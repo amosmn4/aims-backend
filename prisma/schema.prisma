@@ -1,0 +1,1242 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum AppRole {
+  ceo
+  system_admin
+  finance
+  hr
+  it
+  marketing_ops
+  tender
+  department_head
+  account_manager
+  general_staff
+}
+
+enum ContractStatus {
+  draft
+  active
+  on_hold
+  expired
+  terminated
+}
+
+enum ContractBillingFrequency {
+  one_off
+  monthly
+  quarterly
+  annual
+}
+
+enum FinanceReportType {
+  monthly_financial
+  debtors_ageing
+  revenue_service_line
+  quarterly_executive
+}
+
+enum FinanceReportStatus {
+  draft
+  submitted
+  approved
+  changes_requested
+}
+
+enum ComplianceStatus {
+  pending
+  filed_on_time
+  filed_late
+  overdue
+}
+
+enum DebtorFollowUpType {
+  reminder_sent
+  promise_to_pay
+  escalated
+}
+
+enum ProjectStatus {
+  planning
+  active
+  on_hold
+  completed
+  cancelled
+}
+
+enum TaskStatus {
+  not_started
+  in_progress
+  review
+  blocked
+  completed
+}
+
+enum TaskPriority {
+  low
+  medium
+  high
+  urgent
+}
+
+enum DocumentResourceType {
+  project
+  task
+  finance_report
+  tender
+  client_request
+}
+
+// Matches the AMSOL Pipeline prototype's tender board exactly: identified -> applying
+// (prototype: "Preparing Application") -> submitted -> evaluation ("Under Evaluation") ->
+// won/lost. withdrawn isn't in the prototype but existed in this system already, so it stays.
+enum TenderStage {
+  identified
+  applying
+  submitted
+  evaluation
+  won
+  lost
+  withdrawn
+}
+
+// Where a project's delivery actually stands once a tender is forwarded to a department or a
+// client engagement is onboarded — the prototype's "Projects & Delivery" board. Separate from
+// ProjectStatus (planning/active/on_hold/completed/cancelled), which is the project's overall
+// health/lifecycle used by the existing task-kanban project page; this is specifically the
+// pipeline position, so the two can't drift into meaning the same thing under different names.
+enum ProjectDeliveryStage {
+  onboarding
+  in_progress
+  delivery
+  invoicing
+  payment
+  closed
+}
+
+enum TenderBondType {
+  bid_bond
+  performance_bond
+  other
+}
+
+enum TenderBondStatus {
+  pending
+  lodged
+  released
+  forfeited
+}
+
+enum TenderRequirementStatus {
+  pending
+  in_progress
+  obtained
+  not_applicable
+}
+
+// Matches the AMSOL Pipeline prototype's "Client Engagement" board: new -> assigned (prototype:
+// "Assigned to Dept") -> engaging ("Engagement") -> proposal ("Proposal Sent") -> won. lost and
+// withdrawn aren't in the prototype (it merges them into one "Closed" outcome) but this system
+// already tracked them as distinct stages with a lostFromStage detail, so they stay separate.
+enum ClientRequestStage {
+  new
+  assigned
+  engaging
+  proposal
+  won
+  lost
+  withdrawn
+}
+
+enum ClientRequestSource {
+  operations
+  marketing
+  referral
+  website
+  other
+}
+
+enum ClientRequestConversionType {
+  project
+  recurring_contract
+}
+
+enum ClientRequestActivityType {
+  note
+  call
+  email
+  meeting
+}
+
+enum DocumentAccessType {
+  everyone
+  department
+  user
+}
+
+model Office {
+  id           String   @id @default(uuid()) @db.Char(36)
+  name         String
+  country      String
+  city         String?
+  currencyCode String   @default("KES") @map("currency_code")
+  isHq         Boolean  @default(false) @map("is_hq")
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  users User[]
+
+  @@map("offices")
+}
+
+model Department {
+  id          String   @id @default(uuid()) @db.Char(36)
+  code        String   @unique
+  name        String
+  description String?  @db.Text
+  icon        String?
+  isCore      Boolean  @default(false) @map("is_core")
+  isActive    Boolean  @default(true) @map("is_active")
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  users                User[]
+  contracts            Contract[]
+  budgets              Budget[]
+  projects             Project[]
+  documentAccessGrants DocumentAccessGrant[]
+  tenders              Tender[]
+  clientRequests       ClientRequest[]
+
+  @@map("departments")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Char(36)
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  fullName     String?  @map("full_name")
+  phone        String?
+  jobTitle     String?  @map("job_title")
+  avatarUrl    String?  @map("avatar_url")
+  departmentId String?  @map("department_id") @db.Char(36)
+  officeId     String?  @map("office_id") @db.Char(36)
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  office     Office?     @relation(fields: [officeId], references: [id], onDelete: SetNull)
+  roles      UserRole[]
+
+  accountManagedClients   Client[]               @relation("ClientAccountManager")
+  accountManagedContracts Contract[]             @relation("ContractAccountManager")
+  createdContracts        Contract[]             @relation("ContractCreatedBy")
+  createdFinanceReports   FinanceReport[]        @relation("FinanceReportCreatedBy")
+  reviewedFinanceReports  FinanceReport[]        @relation("FinanceReportReviewedBy")
+  financeReportComments   FinanceReportComment[]
+  uploadedContractDocs    ContractDocument[]
+  auditLogEntries         AuditLog[]
+  taskComments            TaskComment[]
+  documents                Document[]            @relation("DocumentCreatedBy")
+  uploadedDocumentVersions DocumentVersion[]      @relation("DocumentVersionUploadedBy")
+  documentAccessGrants     DocumentAccessGrant[]  @relation("DocumentAccessGrantUser")
+  accountManagedTenders    Tender[]              @relation("TenderAccountManager")
+  createdTenders           Tender[]              @relation("TenderCreatedBy")
+  tenderResourceAssignments TenderResource[]     @relation("TenderResourceUser")
+  tenderTimeEntries        TenderTimeEntry[]     @relation("TenderTimeEntryUser")
+  assignedClientRequests    ClientRequest[]         @relation("ClientRequestAssignee")
+  createdClientRequests     ClientRequest[]         @relation("ClientRequestCreatedBy")
+  clientRequestActivities   ClientRequestActivity[] @relation("ClientRequestActivityCreatedBy")
+  notifications             Notification[]          @relation("NotificationRecipient")
+  createdNotifications      Notification[]          @relation("NotificationCreatedBy")
+  projectActivities         ProjectActivity[]        @relation("ProjectActivityCreatedBy")
+  tenderActivities          TenderActivity[]         @relation("TenderActivityCreatedBy")
+  projectTeamMemberships    ProjectTeamMember[]
+
+  @@map("users")
+}
+
+model UserRole {
+  id        String   @id @default(uuid()) @db.Char(36)
+  userId    String   @map("user_id") @db.Char(36)
+  role      AppRole
+  grantedBy String?  @map("granted_by") @db.Char(36)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, role])
+  @@map("user_roles")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Char(36)
+  userId     String?  @map("user_id") @db.Char(36)
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  oldValue   Json?    @map("old_value")
+  newValue   Json?    @map("new_value")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@map("audit_log")
+}
+
+model Client {
+  id               String   @id @default(uuid()) @db.Char(36)
+  name             String
+  code             String?  @unique
+  country          String?
+  currencyCode     String   @default("KES") @map("currency_code")
+  contactEmail     String?  @map("contact_email")
+  contactPhone     String?  @map("contact_phone")
+  isActive         Boolean  @default(true) @map("is_active")
+  industry         String?
+  segment          String?
+  accountManagerId String?  @map("account_manager_id") @db.Char(36)
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  accountManager           User?                     @relation("ClientAccountManager", fields: [accountManagerId], references: [id], onDelete: SetNull)
+  contacts                 ClientContact[]
+  contracts                Contract[]
+  invoices                 Invoice[]
+  payrollComplianceRecords PayrollComplianceRecord[]
+  projects                 Project[]
+  tenders                  Tender[]
+  clientRequests           ClientRequest[]
+
+  @@map("clients")
+}
+
+model ClientContact {
+  id        String   @id @default(uuid()) @db.Char(36)
+  clientId  String   @map("client_id") @db.Char(36)
+  name      String
+  role      String?
+  email     String?
+  phone     String?
+  isPrimary Boolean  @default(false) @map("is_primary")
+  notes     String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@map("client_contacts")
+}
+
+model ServiceLine {
+  id          String   @id @default(uuid()) @db.Char(36)
+  code        String   @unique
+  name        String
+  isRecurring Boolean  @default(false) @map("is_recurring")
+  isActive    Boolean  @default(true) @map("is_active")
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  invoices       Invoice[]
+  contracts      Contract[]
+  tenders        Tender[]
+  clientRequests ClientRequest[]
+
+  @@map("service_lines")
+}
+
+model Invoice {
+  invoiceNumber String   @unique @map("invoice_number")
+  id            String   @id @default(uuid()) @db.Char(36)
+  clientId      String   @map("client_id") @db.Char(36)
+  serviceLineId String?  @map("service_line_id") @db.Char(36)
+  contractId    String?  @map("contract_id") @db.Char(36)
+  issueDate     DateTime @map("issue_date") @db.Date
+  dueDate       DateTime @map("due_date") @db.Date
+  currencyCode  String   @default("KES") @map("currency_code")
+  subtotal      Decimal  @db.Decimal(14, 2)
+  tax           Decimal  @default(0) @db.Decimal(14, 2)
+  total         Decimal  @db.Decimal(14, 2)
+  directCost    Decimal  @default(0) @map("direct_cost") @db.Decimal(14, 2)
+  status        String   @default("draft")
+  isRecurring   Boolean  @default(false) @map("is_recurring")
+  notes         String?  @db.Text
+  createdBy     String?  @map("created_by") @db.Char(36)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  client      Client           @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  serviceLine ServiceLine?     @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
+  contract    Contract?        @relation(fields: [contractId], references: [id], onDelete: SetNull)
+  payments    InvoicePayment[]
+  followUps   DebtorFollowUp[]
+
+  @@index([clientId])
+  @@index([serviceLineId])
+  @@index([contractId])
+  @@index([issueDate])
+  @@map("invoices")
+}
+
+model InvoicePayment {
+  id        String   @id @default(uuid()) @db.Char(36)
+  invoiceId String   @map("invoice_id") @db.Char(36)
+  paidOn    DateTime @map("paid_on") @db.Date
+  amount    Decimal  @db.Decimal(14, 2)
+  method    String?
+  reference String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@map("invoice_payments")
+}
+
+model FinanceUpload {
+  id           String   @id @default(uuid()) @db.Char(36)
+  fileName     String   @map("file_name")
+  uploadType   String   @map("upload_type")
+  rowCount     Int      @default(0) @map("row_count")
+  successCount Int      @default(0) @map("success_count")
+  errorCount   Int      @default(0) @map("error_count")
+  errors       Json?
+  uploadedBy   String?  @map("uploaded_by") @db.Char(36)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("finance_uploads")
+}
+
+model FinanceReport {
+  id          String              @id @default(uuid()) @db.Char(36)
+  reportType  FinanceReportType   @map("report_type")
+  periodStart DateTime            @map("period_start") @db.Date
+  periodEnd   DateTime            @map("period_end") @db.Date
+  title       String
+  narrative   String?             @db.Text
+  snapshot    Json
+  status      FinanceReportStatus @default(draft)
+  submittedBy String?             @map("submitted_by") @db.Char(36)
+  submittedAt DateTime?           @map("submitted_at")
+  reviewedBy  String?             @map("reviewed_by") @db.Char(36)
+  reviewedAt  DateTime?           @map("reviewed_at")
+  reviewNote  String?             @map("review_note") @db.Text
+  createdBy   String              @map("created_by") @db.Char(36)
+  createdAt   DateTime            @default(now()) @map("created_at")
+  updatedAt   DateTime            @updatedAt @map("updated_at")
+
+  creator  User                   @relation("FinanceReportCreatedBy", fields: [createdBy], references: [id], onDelete: Cascade)
+  reviewer User?                  @relation("FinanceReportReviewedBy", fields: [reviewedBy], references: [id], onDelete: SetNull)
+  comments FinanceReportComment[]
+
+  @@index([status])
+  @@index([periodEnd])
+  @@map("finance_reports")
+}
+
+model FinanceReportComment {
+  id        String   @id @default(uuid()) @db.Char(36)
+  reportId  String   @map("report_id") @db.Char(36)
+  authorId  String   @map("author_id") @db.Char(36)
+  body      String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  report FinanceReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  author User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@map("finance_report_comments")
+}
+
+model Contract {
+  id               String                   @id @default(uuid()) @db.Char(36)
+  contractNumber   String                   @unique @map("contract_number")
+  title            String
+  description      String?                  @db.Text
+  clientId         String                   @map("client_id") @db.Char(36)
+  departmentId     String?                  @map("department_id") @db.Char(36)
+  serviceLineId    String?                  @map("service_line_id") @db.Char(36)
+  accountManagerId String?                  @map("account_manager_id") @db.Char(36)
+  tenderId         String?                  @unique @map("tender_id") @db.Char(36)
+  clientRequestId  String?                  @unique @map("client_request_id") @db.Char(36)
+  status           ContractStatus           @default(draft)
+  billingFrequency ContractBillingFrequency @map("billing_frequency")
+  startDate        DateTime                 @map("start_date") @db.Date
+  endDate          DateTime?                @map("end_date") @db.Date
+  value            Decimal                  @db.Decimal(14, 2)
+  currency         String                   @default("KES")
+  nextInvoiceDate  DateTime?                @map("next_invoice_date") @db.Date
+  autoRenew        Boolean                  @default(false) @map("auto_renew")
+  notes            String?                  @db.Text
+  createdBy        String?                  @map("created_by") @db.Char(36)
+  createdAt        DateTime                 @default(now()) @map("created_at")
+  updatedAt        DateTime                 @updatedAt @map("updated_at")
+
+  client         Client             @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  department     Department?        @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  serviceLine    ServiceLine?       @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
+  accountManager User?              @relation("ContractAccountManager", fields: [accountManagerId], references: [id], onDelete: SetNull)
+  creator        User?              @relation("ContractCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  tender         Tender?            @relation(fields: [tenderId], references: [id], onDelete: SetNull)
+  clientRequest  ClientRequest?     @relation(fields: [clientRequestId], references: [id], onDelete: SetNull)
+  documents      ContractDocument[]
+  budgets        Budget[]
+  invoices       Invoice[]
+  projects       Project[]
+
+  @@map("contracts")
+}
+
+model ContractDocument {
+  id          String   @id @default(uuid()) @db.Char(36)
+  contractId  String   @map("contract_id") @db.Char(36)
+  fileName    String   @map("file_name")
+  storagePath String   @map("storage_path")
+  mimeType    String?  @map("mime_type")
+  sizeBytes   BigInt   @map("size_bytes")
+  version     Int      @default(1)
+  category    String   @default("other")
+  uploadedBy  String?  @map("uploaded_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  uploader User?    @relation(fields: [uploadedBy], references: [id], onDelete: SetNull)
+
+  @@map("contract_documents")
+}
+
+// Budgeted amount for a period, against either a department or a contract/project (never both).
+// Actuals are never stored here — they're always derived live from Invoice data so
+// budget-vs-actual can't drift out of sync with what Finance has actually invoiced.
+model Budget {
+  id             String   @id @default(uuid()) @db.Char(36)
+  departmentId   String?  @map("department_id") @db.Char(36)
+  contractId     String?  @map("contract_id") @db.Char(36)
+  periodStart    DateTime @map("period_start") @db.Date
+  periodEnd      DateTime @map("period_end") @db.Date
+  budgetedAmount Decimal  @map("budgeted_amount") @db.Decimal(14, 2)
+  currency       String   @default("KES")
+  notes          String?  @db.Text
+  createdBy      String?  @map("created_by") @db.Char(36)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  contract   Contract?   @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  @@index([departmentId])
+  @@index([contractId])
+  @@map("budgets")
+}
+
+// One row per client per statutory filing period — financial/compliance oversight only,
+// not the payroll engine itself (that stays in the separate HRMS product).
+model PayrollComplianceRecord {
+  id         String           @id @default(uuid()) @db.Char(36)
+  clientId   String           @map("client_id") @db.Char(36)
+  period     DateTime         @db.Date
+  filingType String           @map("filing_type")
+  dueDate    DateTime         @map("due_date") @db.Date
+  filedDate  DateTime?        @map("filed_date") @db.Date
+  status     ComplianceStatus @default(pending)
+  notes      String?          @db.Text
+  createdAt  DateTime         @default(now()) @map("created_at")
+  updatedAt  DateTime         @updatedAt @map("updated_at")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
+  @@index([status])
+  @@map("payroll_compliance_records")
+}
+
+// Append-only collection log for an outstanding invoice — a debtor can have several of
+// these over time; the Debtors view shows the most recent alongside the full history.
+model DebtorFollowUp {
+  id           String             @id @default(uuid()) @db.Char(36)
+  invoiceId    String             @map("invoice_id") @db.Char(36)
+  type         DebtorFollowUpType
+  channel      String?
+  promisedDate DateTime?          @map("promised_date") @db.Date
+  notes        String?            @db.Text
+  createdBy    String?            @map("created_by") @db.Char(36)
+  createdAt    DateTime           @default(now()) @map("created_at")
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@map("debtor_follow_ups")
+}
+
+// Projects originate from a won tender or directly from a client engagement (both optional —
+// an internal project may have neither). Financials aren't duplicated here: a project's
+// budget/actual/margin are read live from Budget/Invoice via contractId.
+model Project {
+  id              String               @id @default(uuid()) @db.Char(36)
+  name            String
+  description     String?              @db.Text
+  clientId        String?              @map("client_id") @db.Char(36)
+  contractId      String?              @map("contract_id") @db.Char(36)
+  clientRequestId String?              @unique @map("client_request_id") @db.Char(36)
+  tenderId        String?              @unique @map("tender_id") @db.Char(36)
+  departmentId    String               @map("department_id") @db.Char(36)
+  status          ProjectStatus        @default(planning)
+  deliveryStage   ProjectDeliveryStage @default(onboarding) @map("delivery_stage")
+  // Project Workspace fields (Overview/EVM) — methodology and health are free-form/manager-set;
+  // budget is the execution budget (cost side) used for Planned/Earned Value, distinct from the
+  // Invoice/InvoicePayment totals already tracked (that's revenue, this is cost).
+  methodology     String?
+  health          ProjectHealth        @default(green)
+  budget          Decimal?             @db.Decimal(14, 2)
+  startDate       DateTime?            @map("start_date") @db.Date
+  endDate         DateTime?            @map("end_date") @db.Date
+  createdBy       String?              @map("created_by") @db.Char(36)
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @updatedAt @map("updated_at")
+
+  client        Client?        @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  contract      Contract?      @relation(fields: [contractId], references: [id], onDelete: SetNull)
+  clientRequest ClientRequest? @relation(fields: [clientRequestId], references: [id], onDelete: SetNull)
+  tender        Tender?        @relation(fields: [tenderId], references: [id], onDelete: SetNull)
+  department    Department     @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  tasks       Task[]
+  milestones  Milestone[]
+  activities  ProjectActivity[]
+  costItems   ProjectCostItem[]
+  team        ProjectTeamMember[]
+  raci        ProjectRaciEntry[]
+  raidEntries ProjectRaidEntry[]
+
+  @@index([departmentId])
+  @@index([clientId])
+  @@index([contractId])
+  @@index([deliveryStage])
+  @@map("projects")
+}
+
+enum ProjectHealth {
+  green
+  amber
+  red
+}
+
+// Status values are fixed to the four the spec calls for (task boards per department) —
+// not a generic arbitrary-column kanban.
+model Task {
+  id          String       @id @default(uuid()) @db.Char(36)
+  projectId   String       @map("project_id") @db.Char(36)
+  title       String
+  description String?      @db.Text
+  // Free-text phase grouping for the WBS/Gantt view (e.g. "Mobilization & Planning") — not a
+  // separate model since phases are just a label a project manager types, not an entity with
+  // its own lifecycle or relations of its own.
+  phase           String?
+  status          TaskStatus   @default(not_started)
+  priority        TaskPriority @default(medium)
+  assigneeId      String?      @map("assignee_id") @db.Char(36)
+  startDate       DateTime?    @map("start_date") @db.Date
+  dueDate         DateTime?    @map("due_date") @db.Date
+  estimatedHours  Decimal?     @map("estimated_hours") @db.Decimal(6, 2)
+  actualHours     Decimal      @default(0) @map("actual_hours") @db.Decimal(6, 2)
+  position        Int          @default(0)
+  createdBy       String?      @map("created_by") @db.Char(36)
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  project      Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  comments     TaskComment[]
+  // "this task depends on ..." / "... depends on this task" — the Gantt/critical-path graph.
+  dependsOn    TaskDependency[] @relation("TaskDependents")
+  dependedOnBy TaskDependency[] @relation("TaskPrerequisites")
+
+  @@index([projectId])
+  @@index([assigneeId])
+  @@index([status])
+  @@map("tasks")
+}
+
+// The dependency graph the schema comment on Milestone used to flag as deferred ("Phase 3
+// Gantt work") — a task can't start before every task it depends on is done. Self-referential
+// through two named relations rather than an implicit many-to-many so the direction
+// (predecessor -> successor) is unambiguous in queries.
+model TaskDependency {
+  id          String   @id @default(uuid()) @db.Char(36)
+  taskId      String   @map("task_id") @db.Char(36)
+  dependsOnId String   @map("depends_on_id") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  task      Task @relation("TaskDependents", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOn Task @relation("TaskPrerequisites", fields: [dependsOnId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, dependsOnId])
+  @@map("task_dependencies")
+}
+
+// Milestones are date markers on a project's timeline — no dependency graph yet
+// (that's the Phase 3 Gantt work); this is deliberately simple: a title, a due date, done or not.
+model Milestone {
+  id          String   @id @default(uuid()) @db.Char(36)
+  projectId   String   @map("project_id") @db.Char(36)
+  title       String
+  description String?  @db.Text
+  dueDate     DateTime @map("due_date") @db.Date
+  isComplete  Boolean  @default(false) @map("is_complete")
+  createdBy   String?  @map("created_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("milestones")
+}
+
+// Same shape as ClientRequestActivity — the "Activity & Communication" log on a delivery
+// project's pipeline card (meetings/emails/calls/site visits/notes), kept as its own model
+// rather than reusing ClientRequestActivity so a project's log isn't artificially tied to
+// having originated from a client request (most won't have one).
+model ProjectActivity {
+  id         String                     @id @default(uuid()) @db.Char(36)
+  projectId  String                     @map("project_id") @db.Char(36)
+  type       ClientRequestActivityType  @default(note)
+  summary    String                     @db.Text
+  occurredAt DateTime                   @default(now()) @map("occurred_at")
+  createdBy  String?                    @map("created_by") @db.Char(36)
+  createdAt  DateTime                   @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  creator User?   @relation("ProjectActivityCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@map("project_activities")
+}
+
+// Execution cost tracking (budget vs actual spend per category) — the Project Workspace
+// Financials tab's "Cost Breakdown by Category". Deliberately separate from Invoice/
+// InvoicePayment, which is revenue (what's billed to the client): this is what delivering the
+// project actually costs internally. Mirrors TenderCostItem's shape.
+model ProjectCostItem {
+  id             String   @id @default(uuid()) @db.Char(36)
+  projectId      String   @map("project_id") @db.Char(36)
+  category       String
+  budgetedAmount Decimal  @map("budgeted_amount") @db.Decimal(14, 2)
+  actualAmount   Decimal  @default(0) @map("actual_amount") @db.Decimal(14, 2)
+  createdBy      String?  @map("created_by") @db.Char(36)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("project_cost_items")
+}
+
+enum ProjectTeamMemberType {
+  internal
+  external
+}
+
+// The Team & Resources roster — deliberately not just "assignees on tasks": a project has
+// people (and external vendors/client contacts) allocated to it at a percentage regardless of
+// whether they're assigned to any individual task. userId is optional so external people
+// (a vetting agency, a client-side sponsor) can be listed by name without needing a User
+// record, the same free-text-when-there's-no-real-record pattern used for prospect clients.
+model ProjectTeamMember {
+  id                String                @id @default(uuid()) @db.Char(36)
+  projectId         String                @map("project_id") @db.Char(36)
+  userId            String?               @map("user_id") @db.Char(36)
+  name              String
+  role              String
+  type              ProjectTeamMemberType @default(internal)
+  allocationPercent Int                   @default(0) @map("allocation_percent")
+  hoursLogged       Decimal               @default(0) @map("hours_logged") @db.Decimal(8, 2)
+  createdAt         DateTime              @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@map("project_team_members")
+}
+
+// RACI matrix rows. Free-text R/A/C/I (matching names/roles as typed, not strict User
+// references) since a row commonly names an external party or a role rather than one person.
+model ProjectRaciEntry {
+  id          String   @id @default(uuid()) @db.Char(36)
+  projectId   String   @map("project_id") @db.Char(36)
+  deliverable String
+  responsible String?
+  accountable String?
+  consulted   String?
+  informed    String?
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("project_raci_entries")
+}
+
+enum ProjectRaidType {
+  risk
+  issue
+  dependency
+  assumption
+}
+
+enum ProjectRaidSeverity {
+  low
+  medium
+  high
+}
+
+enum ProjectRaidStatus {
+  open
+  accepted
+  closed
+}
+
+// Risks / Assumptions / Issues / Dependencies log — the project management discipline of
+// tracking what could go wrong (or already has) separately from the day-to-day task list.
+model ProjectRaidEntry {
+  id          String              @id @default(uuid()) @db.Char(36)
+  projectId   String              @map("project_id") @db.Char(36)
+  type        ProjectRaidType
+  description String              @db.Text
+  severity    ProjectRaidSeverity @default(medium)
+  owner       String?
+  status      ProjectRaidStatus   @default(open)
+  mitigation  String?             @db.Text
+  createdBy   String?             @map("created_by") @db.Char(36)
+  createdAt   DateTime            @default(now()) @map("created_at")
+  updatedAt   DateTime            @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("project_raid_entries")
+}
+
+model TaskComment {
+  id        String   @id @default(uuid()) @db.Char(36)
+  taskId    String   @map("task_id") @db.Char(36)
+  authorId  String   @map("author_id") @db.Char(36)
+  body      String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  task   Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@map("task_comments")
+}
+
+// Central document library. Deliberately polymorphic (resourceType + resourceId) rather than
+// per-entity nullable FKs, so a document attached from a Project/Task/FinanceReport is the exact
+// same row the central library lists — no separate "publish to library" step, and attaching a new
+// resource type later is a one-line enum addition instead of a schema migration. There is no
+// DB-level FK/cascade to the attached resource because of this; each resource's own delete path
+// is responsible for calling DocumentsService.deleteAllForResource() first.
+model Document {
+  id              String               @id @default(uuid()) @db.Char(36)
+  resourceType    DocumentResourceType @map("resource_type")
+  resourceId      String               @map("resource_id") @db.Char(36)
+  title           String
+  description     String?              @db.Text
+  category        String               @default("other")
+  tags            Json?
+  latestVersionId String?              @unique @map("latest_version_id") @db.Char(36)
+  createdBy       String?              @map("created_by") @db.Char(36)
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @updatedAt @map("updated_at")
+
+  creator       User?                 @relation("DocumentCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  versions      DocumentVersion[]     @relation("DocumentVersions")
+  latestVersion DocumentVersion?      @relation("DocumentLatestVersion", fields: [latestVersionId], references: [id], onDelete: SetNull)
+  accessGrants  DocumentAccessGrant[]
+  tenderRequirements TenderRequirement[]
+
+  @@index([resourceType, resourceId])
+  @@index([createdBy])
+  @@map("documents")
+}
+
+// Append-only version history for a Document. Document.latestVersionId always points here so
+// downloads/list views don't need a MAX(versionNo) query.
+model DocumentVersion {
+  id          String   @id @default(uuid()) @db.Char(36)
+  documentId  String   @map("document_id") @db.Char(36)
+  versionNo   Int      @map("version_no")
+  fileName    String   @map("file_name")
+  storagePath String   @map("storage_path")
+  mimeType    String?  @map("mime_type")
+  sizeBytes   BigInt   @map("size_bytes")
+  uploadedBy  String?  @map("uploaded_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  document Document  @relation("DocumentVersions", fields: [documentId], references: [id], onDelete: Cascade)
+  uploader User?     @relation("DocumentVersionUploadedBy", fields: [uploadedBy], references: [id], onDelete: SetNull)
+  latestOf Document? @relation("DocumentLatestVersion")
+
+  @@unique([documentId, versionNo])
+  @@map("document_versions")
+}
+
+// Sharing scope for a Document. Rows are an allowlist that *narrows* visibility — zero grants
+// means visible to everyone authenticated (matches existing open-read behavior on
+// Projects/Tasks); one or more grants restricts to a match on accessType. MySQL unique indexes
+// don't dedupe NULLs, so "at most one everyone-grant" is enforced in DocumentsService, not here.
+model DocumentAccessGrant {
+  id           String             @id @default(uuid()) @db.Char(36)
+  documentId   String             @map("document_id") @db.Char(36)
+  accessType   DocumentAccessType @map("access_type")
+  departmentId String?            @map("department_id") @db.Char(36)
+  userId       String?            @map("user_id") @db.Char(36)
+  createdAt    DateTime           @default(now()) @map("created_at")
+
+  document   Document    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  user       User?       @relation("DocumentAccessGrantUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@map("document_access_grants")
+}
+
+// Pre-contract CRM pipeline: identified -> in_progress (preparing the bid) -> submitted ->
+// won / lost / withdrawn. A won tender is converted to a Contract via an explicit action
+// (ContractsService/TendersService), never automatically — see Contract.tenderId.
+model Tender {
+  id                 String      @id @default(uuid()) @db.Char(36)
+  referenceNumber    String?     @unique @map("reference_number")
+  title              String
+  description        String?     @db.Text
+  clientId           String?     @map("client_id") @db.Char(36)
+  prospectClientName String?     @map("prospect_client_name")
+  departmentId       String      @map("department_id") @db.Char(36)
+  serviceLineId      String?     @map("service_line_id") @db.Char(36)
+  accountManagerId   String?     @map("account_manager_id") @db.Char(36)
+  stage              TenderStage @default(identified)
+  estimatedValue     Decimal?    @map("estimated_value") @db.Decimal(14, 2)
+  currency           String      @default("KES")
+  submissionDeadline DateTime?   @map("submission_deadline") @db.Date
+  submittedAt        DateTime?   @map("submitted_at")
+  wonAt              DateTime?   @map("won_at")
+  lostAt             DateTime?   @map("lost_at")
+  withdrawnAt        DateTime?   @map("withdrawn_at")
+  lostReason         String?     @map("lost_reason") @db.Text
+  notes              String?     @db.Text
+  createdBy          String?     @map("created_by") @db.Char(36)
+  createdAt          DateTime    @default(now()) @map("created_at")
+  updatedAt          DateTime    @updatedAt @map("updated_at")
+
+  client         Client?           @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  department     Department        @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  serviceLine    ServiceLine?      @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
+  accountManager User?             @relation("TenderAccountManager", fields: [accountManagerId], references: [id], onDelete: SetNull)
+  creator        User?             @relation("TenderCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  resources      TenderResource[]
+  timeEntries    TenderTimeEntry[]
+  costItems      TenderCostItem[]
+  bonds          TenderBond[]
+  pricingItems   TenderPricingItem[]
+  requirements   TenderRequirement[]
+  activities     TenderActivity[]
+  contract       Contract?
+  project        Project?
+
+  @@index([departmentId])
+  @@index([stage])
+  @@index([clientId])
+  @@map("tenders")
+}
+
+// Budgeted resourcing: who is assigned to pursue the tender, at what estimated hours/rate.
+// Separate from TenderTimeEntry (actuals) the same way Budget/Invoice are separate for Contracts.
+model TenderResource {
+  id             String   @id @default(uuid()) @db.Char(36)
+  tenderId       String   @map("tender_id") @db.Char(36)
+  userId         String   @map("user_id") @db.Char(36)
+  roleNote       String?  @map("role_note")
+  allocatedHours Decimal? @map("allocated_hours") @db.Decimal(8, 2)
+  hourlyRate     Decimal? @map("hourly_rate") @db.Decimal(10, 2)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  tender Tender @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  user   User   @relation("TenderResourceUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenderId, userId])
+  @@map("tender_resources")
+}
+
+// Append-only actual time log. Logging time doesn't require a TenderResource row to exist
+// first — cost is only computed where a matching TenderResource.hourlyRate is found for that
+// user+tender (see TendersService.getCostSummary); hours are always shown regardless.
+model TenderTimeEntry {
+  id        String   @id @default(uuid()) @db.Char(36)
+  tenderId  String   @map("tender_id") @db.Char(36)
+  userId    String   @map("user_id") @db.Char(36)
+  entryDate DateTime @map("entry_date") @db.Date
+  hours     Decimal  @db.Decimal(5, 2)
+  notes     String?  @db.Text
+  createdBy String?  @map("created_by") @db.Char(36)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tender Tender @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  user   User   @relation("TenderTimeEntryUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenderId])
+  @@index([userId])
+  @@map("tender_time_entries")
+}
+
+// Non-staff cost of pursuing the bid (travel, printing, external consultants) — combined with
+// TenderResource's human cost, this is "cost to pursue", kept entirely separate from
+// TenderPricingItem's "bid price" (what would actually be quoted to the client).
+model TenderCostItem {
+  id          String   @id @default(uuid()) @db.Char(36)
+  tenderId    String   @map("tender_id") @db.Char(36)
+  category    String   @default("other")
+  description String
+  amount      Decimal  @db.Decimal(12, 2)
+  createdBy   String?  @map("created_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  tender Tender @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+
+  @@index([tenderId])
+  @@map("tender_cost_items")
+}
+
+model TenderBond {
+  id         String            @id @default(uuid()) @db.Char(36)
+  tenderId   String            @map("tender_id") @db.Char(36)
+  bondType   TenderBondType    @map("bond_type")
+  amount     Decimal           @db.Decimal(14, 2)
+  provider   String?
+  status     TenderBondStatus  @default(pending)
+  issuedDate DateTime?         @map("issued_date") @db.Date
+  expiryDate DateTime?         @map("expiry_date") @db.Date
+  notes      String?           @db.Text
+  createdAt  DateTime          @default(now()) @map("created_at")
+  updatedAt  DateTime          @updatedAt @map("updated_at")
+
+  tender Tender @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+
+  @@index([tenderId])
+  @@map("tender_bonds")
+}
+
+// Itemized calculation behind the price actually quoted to the client — separate from the
+// tender's own quick manual `estimatedValue`, which stays the number used for pipeline/funnel
+// value. Nothing auto-syncs between the two.
+model TenderPricingItem {
+  id          String   @id @default(uuid()) @db.Char(36)
+  tenderId    String   @map("tender_id") @db.Char(36)
+  sortOrder   Int      @default(0) @map("sort_order")
+  description String
+  quantity    Decimal  @default(1) @db.Decimal(10, 2)
+  unitPrice   Decimal  @map("unit_price") @db.Decimal(14, 2)
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tender Tender @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+
+  @@index([tenderId])
+  @@map("tender_pricing_items")
+}
+
+// Global, reusable catalog of standard requirement checklists (e.g. "Government tender
+// standard requirements") — not tender-scoped. Applying one to a tender bulk-copies its items
+// into that tender's own TenderRequirement rows.
+model TenderRequirementTemplate {
+  id          String   @id @default(uuid()) @db.Char(36)
+  name        String
+  description String?  @db.Text
+  createdBy   String?  @map("created_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  items TenderRequirementTemplateItem[]
+
+  @@map("tender_requirement_templates")
+}
+
+model TenderRequirementTemplateItem {
+  id         String @id @default(uuid()) @db.Char(36)
+  templateId String @map("template_id") @db.Char(36)
+  title      String
+  category   String @default("general")
+  sortOrder  Int    @default(0) @map("sort_order")
+
+  template TenderRequirementTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@index([templateId])
+  @@map("tender_requirement_template_items")
+}
+
+// A tender's actual checklist item — either added manually or copied in from a template.
+// Optionally linked to a Document already attached in the tender's own Documents tab (no
+// separate upload path).
+model TenderRequirement {
+  id         String                  @id @default(uuid()) @db.Char(36)
+  tenderId   String                  @map("tender_id") @db.Char(36)
+  title      String
+  category   String                  @default("general")
+  status     TenderRequirementStatus @default(pending)
+  notes      String?                 @db.Text
+  documentId String?                 @map("document_id") @db.Char(36)
+  sortOrder  Int                     @default(0) @map("sort_order")
+  createdAt  DateTime                @default(now()) @map("created_at")
+  updatedAt  DateTime                @updatedAt @map("updated_at")
+
+  tender   Tender    @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  document Document? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+
+  @@index([tenderId])
+  @@map("tender_requirements")
+}
+
+// Same shape as ClientRequestActivity/ProjectActivity — the "Activity & Communication" log on
+// a tender's pipeline card (clarification calls/emails with the issuer, internal notes).
+model TenderActivity {
+  id         String                     @id @default(uuid()) @db.Char(36)
+  tenderId   String                     @map("tender_id") @db.Char(36)
+  type       ClientRequestActivityType  @default(note)
+  summary    String                     @db.Text
+  occurredAt DateTime                   @default(now()) @map("occurred_at")
+  createdBy  String?                    @map("created_by") @db.Char(36)
+  createdAt  DateTime                   @default(now()) @map("created_at")
+
+  tender  Tender @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  creator User?  @relation("TenderActivityCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([tenderId])
+  @@map("tender_activities")
+}
+
+// Inbound client requests: Operations/Marketing intake -> routed to the owning department ->
+// engaged (calls/meetings, see ClientRequestActivity) -> converted into a Project and/or a
+// recurring Contract, or lost/withdrawn. departmentId is null until routed — before that, only
+// marketing_ops (the intake department) can act on it; see TendersService-style
+// assertDepartmentAccess usage in ClientRequestsService for the mutation rule once routed.
+model ClientRequest {
+  id                 String                       @id @default(uuid()) @db.Char(36)
+  referenceNumber    String?                      @unique @map("reference_number")
+  title              String
+  description        String?                      @db.Text
+  clientId           String?                      @map("client_id") @db.Char(36)
+  prospectClientName String?                      @map("prospect_client_name")
+  contactName        String?                      @map("contact_name")
+  contactEmail       String?                      @map("contact_email")
+  contactPhone       String?                      @map("contact_phone")
+  source             ClientRequestSource          @default(other)
+  serviceLineId      String?                      @map("service_line_id") @db.Char(36)
+  departmentId       String?                      @map("department_id") @db.Char(36)
+  assignedToId       String?                      @map("assigned_to_id") @db.Char(36)
+  stage              ClientRequestStage           @default(new)
+  estimatedValue     Decimal?                     @map("estimated_value") @db.Decimal(14, 2)
+  currency           String                       @default("KES")
+  routedAt           DateTime?                    @map("routed_at")
+  engagedAt          DateTime?                    @map("engaged_at")
+  proposalSentAt     DateTime?                    @map("proposal_sent_at")
+  convertedAt        DateTime?                    @map("converted_at")
+  conversionType     ClientRequestConversionType? @map("conversion_type")
+  lostAt             DateTime?                    @map("lost_at")
+  // Snapshot of the stage right before the request was marked lost/withdrawn — this, not
+  // `stage` itself (which just becomes "lost"), is what answers "where in the process do
+  // requests fail".
+  lostFromStage      ClientRequestStage?          @map("lost_from_stage")
+  lostReason         String?                      @map("lost_reason") @db.Text
+  createdBy          String?                      @map("created_by") @db.Char(36)
+  createdAt          DateTime                     @default(now()) @map("created_at")
+  updatedAt          DateTime                     @updatedAt @map("updated_at")
+
+  client            Client?                 @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  serviceLine       ServiceLine?            @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
+  department        Department?             @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  assignedTo        User?                   @relation("ClientRequestAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  creator           User?                   @relation("ClientRequestCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  activities        ClientRequestActivity[]
+  convertedProject  Project?
+  convertedContract Contract?
+
+  @@index([departmentId])
+  @@index([stage])
+  @@index([clientId])
+  @@map("client_requests")
+}
+
+// Engagement timeline — the calls/emails/meetings/notes a department logs while working a
+// request. This is the concrete record of "engaging the client".
+model ClientRequestActivity {
+  id         String                     @id @default(uuid()) @db.Char(36)
+  requestId  String                     @map("request_id") @db.Char(36)
+  type       ClientRequestActivityType  @default(note)
+  summary    String                     @db.Text
+  occurredAt DateTime                   @default(now()) @map("occurred_at")
+  createdBy  String?                    @map("created_by") @db.Char(36)
+  createdAt  DateTime                   @default(now()) @map("created_at")
+
+  request ClientRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  creator User?         @relation("ClientRequestActivityCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([requestId])
+  @@map("client_request_activities")
+}
+
+enum NotificationType {
+  task_due
+  project_alert
+  contract_expiry
+  invoice_overdue
+  tender_deadline
+  meeting
+  reminder
+}
+
+enum NotificationSeverity {
+  info
+  warning
+  critical
+}
+
+// In-app only for now (email lands later — see NotificationsSweepService). System-generated
+// rows (deadlines, expiries, overdue items) are deduped per-recipient via dedupeKey so the
+// hourly sweep can safely re-run without spamming; manual reminders (createdBy set, dedupeKey
+// null) skip dedup entirely since each one is a distinct human action.
+model Notification {
+  id           String                @id @default(uuid()) @db.Char(36)
+  userId       String                @map("user_id") @db.Char(36)
+  type         NotificationType
+  severity     NotificationSeverity  @default(info)
+  title        String
+  body         String?               @db.Text
+  resourceType String?               @map("resource_type")
+  resourceId   String?               @map("resource_id")
+  dedupeKey    String?               @map("dedupe_key")
+  isRead       Boolean               @default(false) @map("is_read")
+  readAt       DateTime?             @map("read_at")
+  createdBy    String?               @map("created_by") @db.Char(36)
+  createdAt    DateTime              @default(now()) @map("created_at")
+
+  user    User  @relation("NotificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  creator User? @relation("NotificationCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, isRead])
+  @@map("notifications")
+}
