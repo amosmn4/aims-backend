@@ -1,16 +1,13 @@
-import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import { promises as fs } from "node:fs";
-import * as path from "node:path";
+import { ForbiddenException, Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
+import { StorageService } from "../../storage/storage.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateContractDto } from "./dto/create-contract.dto";
 import type { UpdateContractDto } from "./dto/update-contract.dto";
 import type { UploadDocumentDto } from "./dto/upload-document.dto";
 
-// Documents live on local disk for now (uploads/contracts/, gitignored) — a later move to
-// S3-compatible storage only changes these three methods, nothing upstream of them.
-const UPLOADS_DIR = path.join(process.cwd(), "uploads", "contracts");
+const KEY_PREFIX = "contracts";
 
 // Prisma's BigInt (sizeBytes) can't be JSON-serialized by Express as-is — file sizes are
 // always well within Number.MAX_SAFE_INTEGER, so a plain Number is safe here.
@@ -20,7 +17,10 @@ function serializeDocument<T extends { sizeBytes: bigint }>(doc: T) {
 
 @Injectable()
 export class ContractsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
+  ) {}
 
   findAll(filters: { departmentId?: string; clientId?: string }) {
     return this.prisma.contract.findMany({
@@ -35,7 +35,16 @@ export class ContractsService {
   async findOne(id: string) {
     const contract = await this.prisma.contract.findUniqueOrThrow({
       where: { id },
-      include: { client: true, department: true, serviceLine: true, documents: true },
+      include: {
+        client: true,
+        department: true,
+        serviceLine: true,
+        documents: true,
+        tender: { select: { id: true, referenceNumber: true, title: true } },
+        clientRequest: { select: { id: true, referenceNumber: true, title: true } },
+        projects: { select: { id: true, name: true } },
+        _count: { select: { invoices: true } },
+      },
     });
     return { ...contract, documents: contract.documents.map(serializeDocument) };
   }
@@ -99,10 +108,9 @@ export class ContractsService {
     dto: UploadDocumentDto,
     userId: string,
   ) {
-    await fs.mkdir(UPLOADS_DIR, { recursive: true });
     const safeName = file.originalname.replace(/[^a-z0-9.\-_]+/gi, "_");
     const storedName = `${contractId}-${Date.now()}-${safeName}`;
-    await fs.writeFile(path.join(UPLOADS_DIR, storedName), file.buffer);
+    await this.storage.write(`${KEY_PREFIX}/${storedName}`, file.buffer);
 
     const doc = await this.prisma.contractDocument.create({
       data: {
@@ -120,18 +128,12 @@ export class ContractsService {
 
   async getDocumentFile(documentId: string) {
     const doc = await this.prisma.contractDocument.findUniqueOrThrow({ where: { id: documentId } });
-    const fullPath = path.join(UPLOADS_DIR, doc.storagePath);
-    try {
-      await fs.access(fullPath);
-    } catch {
-      throw new NotFoundException("Document file is missing from storage");
-    }
-    return { doc, fullPath };
+    return { doc, key: `${KEY_PREFIX}/${doc.storagePath}` };
   }
 
   async deleteDocument(documentId: string) {
     const doc = await this.prisma.contractDocument.findUniqueOrThrow({ where: { id: documentId } });
-    await fs.rm(path.join(UPLOADS_DIR, doc.storagePath), { force: true });
+    await this.storage.delete(`${KEY_PREFIX}/${doc.storagePath}`);
     const deleted = await this.prisma.contractDocument.delete({ where: { id: documentId } });
     return serializeDocument(deleted);
   }

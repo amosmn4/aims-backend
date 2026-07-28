@@ -24,6 +24,17 @@ import { ClientRequestsModule } from "./crm/client-requests/client-requests.modu
 import { AuditLogModule } from "./audit-log/audit-log.module";
 import { DocumentsModule } from "./documents/documents.module";
 import { NotificationsModule } from "./notifications/notifications.module";
+import { RecruitmentModule } from "./hr/recruitment/recruitment.module";
+import { LeadsModule } from "./marketing/leads/leads.module";
+import { WebsiteAnalyticsModule } from "./marketing/website-analytics/website-analytics.module";
+import { BlogModule } from "./marketing/blog/blog.module";
+import { ItSystemsModule } from "./it/systems/it-systems.module";
+import { SearchModule } from "./search/search.module";
+import { EngagementsModule } from "./engagements/engagements.module";
+import { TicketsModule } from "./it/tickets/tickets.module";
+import { HrmsLicensesModule } from "./it/hrms-licenses/hrms-licenses.module";
+import { CampaignsModule } from "./marketing/campaigns/campaigns.module";
+import { CalendarModule } from "./calendar/calendar.module";
 
 @Module({
   imports: [
@@ -51,6 +62,17 @@ import { NotificationsModule } from "./notifications/notifications.module";
     AuditLogModule,
     DocumentsModule,
     NotificationsModule,
+    RecruitmentModule,
+    LeadsModule,
+    WebsiteAnalyticsModule,
+    BlogModule,
+    ItSystemsModule,
+    SearchModule,
+    EngagementsModule,
+    TicketsModule,
+    HrmsLicensesModule,
+    CampaignsModule,
+    CalendarModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

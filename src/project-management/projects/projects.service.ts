@@ -39,8 +39,8 @@ export class ProjectsService {
       include: {
         department: true,
         client: true,
-        tender: { select: { id: true, referenceNumber: true } },
-        clientRequest: { select: { id: true, referenceNumber: true } },
+        tender: { select: { id: true, referenceNumber: true, title: true } },
+        clientRequest: { select: { id: true, referenceNumber: true, title: true } },
         _count: { select: { tasks: true } },
       },
       orderBy: { createdAt: "desc" },
@@ -54,8 +54,8 @@ export class ProjectsService {
         department: true,
         client: true,
         contract: true,
-        tender: { select: { id: true, referenceNumber: true } },
-        clientRequest: { select: { id: true, referenceNumber: true } },
+        tender: { select: { id: true, referenceNumber: true, title: true } },
+        clientRequest: { select: { id: true, referenceNumber: true, title: true } },
       },
     });
   }

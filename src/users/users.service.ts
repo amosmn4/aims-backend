@@ -1,17 +1,26 @@
-import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { ForbiddenException, Injectable, NotFoundException, BadRequestException } from "@nestjs/common";
 import * as bcrypt from "bcrypt";
-import type { AppRole } from "@prisma/client";
+import * as crypto from "crypto";
+import type { AppRole, User } from "@prisma/client";
+import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../prisma/prisma.service";
 import { isSystemAdmin } from "../common/is-system-admin";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import type { CreateUserDto } from "./dto/create-user.dto";
 import type { UpdateUserDto } from "./dto/update-user.dto";
+import { EmailService } from "../notifications/email/email.service";
+import { renderInviteEmail } from "./user-invite-email.util";
 
 const SALT_ROUNDS = 10;
+const SETUP_TOKEN_TTL_MS = 72 * 60 * 60 * 1000; // 72 hours
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly email: EmailService,
+    private readonly config: ConfigService,
+  ) {}
 
   // System admins are invisible to everyone except another system admin — including the CEO
   // — everywhere in the app. This is the one place that rule is enforced for the full listing;
@@ -22,7 +31,7 @@ export class UsersService {
       include: { roles: true, department: true, office: true },
       orderBy: { createdAt: "desc" },
     });
-    return users.map(({ passwordHash: _passwordHash, ...user }) => user);
+    return users.map(({ passwordHash, ...user }) => ({ ...user, hasPassword: passwordHash !== null }));
   }
 
   findAllLite(viewer: AuthenticatedUser) {
@@ -41,11 +50,10 @@ export class UsersService {
       throw new ForbiddenException("Only a system administrator can grant the system_admin role");
     }
 
-    const passwordHash = await bcrypt.hash(dto.password, SALT_ROUNDS);
     const user = await this.prisma.user.create({
       data: {
         email: dto.email.toLowerCase(),
-        passwordHash,
+        passwordHash: null,
         fullName: dto.fullName,
         departmentId: dto.departmentId,
         officeId: dto.officeId,
@@ -53,8 +61,43 @@ export class UsersService {
       },
       include: { roles: true, department: true, office: true },
     });
+    const inviteSent = await this.issueSetupTokenAndEmail(user);
     const { passwordHash: _passwordHash, ...rest } = user;
-    return rest;
+    return { ...rest, inviteSent };
+  }
+
+  async resendInvite(id: string, viewer: AuthenticatedUser) {
+    await this.assertTargetVisible(id, viewer);
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException("User not found");
+    if (user.passwordHash !== null) {
+      throw new BadRequestException("User has already set a password");
+    }
+    const inviteSent = await this.issueSetupTokenAndEmail(user);
+    return { inviteSent };
+  }
+
+  // Issues a fresh single-use setup token and emails the "set your password" link. Used both
+  // by create() (initial invite) and resendInvite() (admin-triggered resend) — the two flows
+  // differ only in when they're called, not in what they do once a user needs a fresh token.
+  private async issueSetupTokenAndEmail(user: User): Promise<boolean> {
+    const rawToken = crypto.randomBytes(32).toString("hex");
+    const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+    await this.prisma.passwordSetupToken.create({
+      data: {
+        userId: user.id,
+        tokenHash,
+        expiresAt: new Date(Date.now() + SETUP_TOKEN_TTL_MS),
+      },
+    });
+
+    const frontendUrl = this.config.get<string>("CORS_ORIGIN") ?? "http://localhost:3000";
+    const link = `${frontendUrl}/set-password?token=${rawToken}`;
+    return this.email.send(
+      user.email,
+      "You've been added to AIMS — set your password",
+      renderInviteEmail(user.fullName ?? user.email, link),
+    );
   }
 
   async update(id: string, dto: UpdateUserDto, viewer: AuthenticatedUser) {

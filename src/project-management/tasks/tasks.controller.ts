@@ -31,7 +31,7 @@ export class TasksController {
   }
 
   @Post()
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   create(@Body() dto: CreateTaskDto, @CurrentUser() user: AuthenticatedUser) {
     return this.tasksService.create(dto, user);
   }

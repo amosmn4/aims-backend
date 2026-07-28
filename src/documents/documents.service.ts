@@ -1,18 +1,17 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import type { Document, DocumentAccessGrant, DocumentResourceType, DocumentVersion } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { StorageService } from "../storage/storage.service";
 import { assertDepartmentAccess } from "../common/assert-department-access";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import type { UploadDocumentDto } from "./dto/upload-document.dto";
 import type { UpdateDocumentDto } from "./dto/update-document.dto";
 import type { SetAccessGrantsDto } from "./dto/set-access-grants.dto";
 
-// Documents live on local disk for now (uploads/documents/, gitignored), mirroring the
-// Contracts module's storage pattern — a later move to S3-compatible storage only changes
-// the read/write helpers below, nothing upstream of them.
-const UPLOADS_DIR = path.join(process.cwd(), "uploads", "documents");
+// Documents live under the "documents/" key prefix in whatever StorageService resolves to
+// (S3 when configured, local disk uploads/documents/ otherwise) — storagePath is a plain key,
+// never a real filesystem path, so it works unchanged either way.
+const KEY_PREFIX = "documents";
 
 const ALLOWED_MIME_TYPES = new Set([
   "application/pdf",
@@ -68,7 +67,10 @@ type LibraryEntry = SerializedDocument;
 
 @Injectable()
 export class DocumentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
+  ) {}
 
   /**
    * Mirrors the access rule each resource's own controller/service already enforces —
@@ -112,10 +114,10 @@ export class DocumentsService {
         where: { id: resourceId },
         include: { department: true },
       });
-      // Unrouted requests have no department yet — they belong to Operations/Marketing intake.
+      // Unrouted requests have no department yet — they belong to Tender's intake.
       if (!request.department) {
-        if (isAdminOrCeo(user) || user.roles.includes("marketing_ops")) return;
-        throw new ForbiddenException("Only Operations/Marketing can manage an unrouted request's documents");
+        if (isAdminOrCeo(user) || user.roles.includes("tender")) return;
+        throw new ForbiddenException("Only Tender can manage an unrouted request's documents");
       }
       assertDepartmentAccess(request.department, user);
       return;
@@ -263,12 +265,11 @@ export class DocumentsService {
     versionNo: number,
     file: Express.Multer.File,
   ) {
-    const dir = path.join(UPLOADS_DIR, resourceType, resourceId, documentId);
-    await fs.mkdir(dir, { recursive: true });
     const safeName = file.originalname.replace(/[^a-z0-9.\-_]+/gi, "_");
     const storedName = `v${versionNo}-${Date.now()}-${safeName}`;
-    await fs.writeFile(path.join(dir, storedName), file.buffer);
-    return path.join(resourceType, resourceId, documentId, storedName);
+    const storagePath = `${resourceType}/${resourceId}/${documentId}/${storedName}`;
+    await this.storage.write(`${KEY_PREFIX}/${storagePath}`, file.buffer);
+    return storagePath;
   }
 
   async upload(file: Express.Multer.File, dto: UploadDocumentDto, user: AuthenticatedUser) {
@@ -367,13 +368,7 @@ export class DocumentsService {
       ? await this.prisma.documentVersion.findUniqueOrThrow({ where: { id: versionId } })
       : await this.prisma.documentVersion.findUniqueOrThrow({ where: { id: doc.latestVersionId! } });
 
-    const fullPath = path.join(UPLOADS_DIR, version.storagePath);
-    try {
-      await fs.access(fullPath);
-    } catch {
-      throw new NotFoundException("Document file is missing from storage");
-    }
-    return { fileName: version.fileName, fullPath };
+    return { fileName: version.fileName, key: `${KEY_PREFIX}/${version.storagePath}` };
   }
 
   async update(documentId: string, dto: UpdateDocumentDto, user: AuthenticatedUser) {
@@ -398,9 +393,7 @@ export class DocumentsService {
     await this.assertCanAttach(doc.resourceType, doc.resourceId, user);
 
     const versions = await this.prisma.documentVersion.findMany({ where: { documentId } });
-    await Promise.all(
-      versions.map((v) => fs.rm(path.join(UPLOADS_DIR, v.storagePath), { force: true })),
-    );
+    await Promise.all(versions.map((v) => this.storage.delete(`${KEY_PREFIX}/${v.storagePath}`)));
     // latestVersionId points at a DocumentVersion row, so it must be cleared before the
     // version rows (and then the document itself) can be deleted.
     await this.prisma.document.update({ where: { id: documentId }, data: { latestVersionId: null } });
@@ -413,7 +406,7 @@ export class DocumentsService {
     const docs = await this.prisma.document.findMany({ where: { resourceType, resourceId } });
     for (const doc of docs) {
       const versions = await this.prisma.documentVersion.findMany({ where: { documentId: doc.id } });
-      await Promise.all(versions.map((v) => fs.rm(path.join(UPLOADS_DIR, v.storagePath), { force: true })));
+      await Promise.all(versions.map((v) => this.storage.delete(`${KEY_PREFIX}/${v.storagePath}`)));
       await this.prisma.document.update({ where: { id: doc.id }, data: { latestVersionId: null } });
       await this.prisma.document.delete({ where: { id: doc.id } });
     }

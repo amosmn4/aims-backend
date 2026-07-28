@@ -176,18 +176,19 @@ export class ClientRequestsService {
         assignedTo: { select: userSelect },
         convertedProject: { select: { id: true, name: true } },
         convertedContract: { select: { id: true, contractNumber: true } },
+        convertedFromLead: { select: { id: true, name: true } },
       },
     });
     return { ...request, assignedTo: request.assignedTo ? maskUserRef(request.assignedTo, viewer) : null };
   }
 
-  /** Before routing (no department yet) only marketing_ops/admin/ceo can act on a request —
-   * it "belongs" to the intake department by default. Once routed, ownership follows the
-   * assigned department, same as every other module's assertDepartmentAccess usage. */
+  /** Before routing (no department yet) only tender/admin/ceo can act on a request — Tender
+   * owns intake (same team as the pre-project Tender pipeline). Once routed, ownership follows
+   * the assigned department, same as every other module's assertDepartmentAccess usage. */
   private async assertAccess(request: { departmentId: string | null }, user: AuthenticatedUser) {
     if (!request.departmentId) {
-      if (isAdminOrCeo(user) || user.roles.includes("marketing_ops")) return;
-      throw new ForbiddenException("Only Operations/Marketing can manage an unrouted request");
+      if (isAdminOrCeo(user) || user.roles.includes("tender")) return;
+      throw new ForbiddenException("Only Tender can manage an unrouted request");
     }
     const department = await this.prisma.department.findUniqueOrThrow({ where: { id: request.departmentId } });
     assertDepartmentAccess(department, user);

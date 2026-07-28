@@ -14,6 +14,7 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 import { ContractsService } from "./contracts.service";
+import { StorageService } from "../../storage/storage.service";
 import { CreateContractDto } from "./dto/create-contract.dto";
 import { UpdateContractDto } from "./dto/update-contract.dto";
 import { UploadDocumentDto } from "./dto/upload-document.dto";
@@ -23,7 +24,10 @@ import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 
 @Controller("contracts")
 export class ContractsController {
-  constructor(private readonly contractsService: ContractsService) {}
+  constructor(
+    private readonly contractsService: ContractsService,
+    private readonly storage: StorageService,
+  ) {}
 
   @Get()
   @Roles()
@@ -38,13 +42,13 @@ export class ContractsController {
   }
 
   @Post()
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   create(@Body() dto: CreateContractDto, @CurrentUser() user: AuthenticatedUser) {
     return this.contractsService.create(dto, user);
   }
 
   @Patch(":id")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   update(
     @Param("id") id: string,
     @Body() dto: UpdateContractDto,
@@ -54,7 +58,7 @@ export class ContractsController {
   }
 
   @Delete(":id")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   remove(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.contractsService.remove(id, user);
   }
@@ -80,8 +84,8 @@ export class ContractsController {
   @Get("documents/:documentId/download")
   @Roles()
   async downloadDocument(@Param("documentId") documentId: string, @Res() res: Response) {
-    const { doc, fullPath } = await this.contractsService.getDocumentFile(documentId);
-    res.download(fullPath, doc.fileName);
+    const { doc, key } = await this.contractsService.getDocumentFile(documentId);
+    await this.storage.streamToResponse(key, res, { disposition: "attachment", fileName: doc.fileName });
   }
 
   @Delete("documents/:documentId")

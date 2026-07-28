@@ -2,8 +2,11 @@ import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import * as bcrypt from "bcrypt";
+import * as crypto from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import type { AuthenticatedUser } from "./types/authenticated-user";
+
+const SALT_ROUNDS = 10;
 
 @Injectable()
 export class AuthService {
@@ -23,12 +26,51 @@ export class AuthService {
       throw new UnauthorizedException("Invalid email or password");
     }
 
+    if (!user.passwordHash) {
+      throw new UnauthorizedException(
+        "Your account setup isn't complete — check your email for a setup link",
+      );
+    }
+
     const passwordMatches = await bcrypt.compare(password, user.passwordHash);
     if (!passwordMatches) {
       throw new UnauthorizedException("Invalid email or password");
     }
 
     return user;
+  }
+
+  // Verifies a PasswordSetupToken (invite or resend-invite), sets the user's password, burns
+  // the token (and any other unused tokens for that user, to avoid stale-link races), and signs
+  // the user straight in — mirrors login()'s token issuance so the frontend can redirect
+  // directly into the app after setup completes.
+  async setPassword(token: string, password: string) {
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    const setupToken = await this.prisma.passwordSetupToken.findUnique({
+      where: { tokenHash },
+      include: { user: { include: { roles: true } } },
+    });
+
+    if (!setupToken || setupToken.usedAt || setupToken.expiresAt < new Date()) {
+      throw new UnauthorizedException("This link is invalid or has expired");
+    }
+
+    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+    await this.prisma.$transaction([
+      this.prisma.user.update({ where: { id: setupToken.userId }, data: { passwordHash } }),
+      this.prisma.passwordSetupToken.updateMany({
+        where: { userId: setupToken.userId, usedAt: null },
+        data: { usedAt: new Date() },
+      }),
+    ]);
+
+    const authUser: AuthenticatedUser = {
+      id: setupToken.user.id,
+      email: setupToken.user.email,
+      roles: setupToken.user.roles.map((r) => r.role),
+      departmentId: setupToken.user.departmentId,
+    };
+    return { authUser, ...this.issueTokens(authUser) };
   }
 
   issueTokens(user: AuthenticatedUser) {

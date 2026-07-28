@@ -14,6 +14,7 @@ import type { CookieOptions, Request, Response } from "express";
 import { AuthService } from "./auth.service";
 import { LoginDto } from "./dto/login.dto";
 import { DemoLoginDto } from "./dto/demo-login.dto";
+import { SetPasswordDto } from "./dto/set-password.dto";
 import { Public } from "./decorators/public.decorator";
 import { CurrentUser } from "./decorators/current-user.decorator";
 import type { AuthenticatedUser } from "./types/authenticated-user";
@@ -81,6 +82,19 @@ export class AuthController {
   @Get("me")
   me(@CurrentUser() user: AuthenticatedUser) {
     return this.authService.getProfile(user.id);
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("set-password")
+  @HttpCode(200)
+  async setPassword(@Body() dto: SetPasswordDto, @Res({ passthrough: true }) res: Response) {
+    const { authUser, accessToken, refreshToken } = await this.authService.setPassword(
+      dto.token,
+      dto.password,
+    );
+    res.cookie(REFRESH_COOKIE, refreshToken, this.refreshCookieOptions());
+    return { accessToken, user: authUser };
   }
 
   @Public()

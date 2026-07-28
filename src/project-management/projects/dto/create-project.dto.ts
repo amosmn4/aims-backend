@@ -3,6 +3,7 @@ import { IsDateString, IsIn, IsNumber, IsOptional, IsString, Min } from "class-v
 const PROJECT_STATUSES = ["planning", "active", "on_hold", "completed", "cancelled"] as const;
 const DELIVERY_STAGES = ["onboarding", "in_progress", "delivery", "invoicing", "payment", "closed"] as const;
 const PROJECT_HEALTHS = ["green", "amber", "red"] as const;
+export const SDLC_STAGES = ["requirements", "design", "development", "testing", "deployment", "maintenance"] as const;
 
 export class CreateProjectDto {
   @IsString()
@@ -34,6 +35,11 @@ export class CreateProjectDto {
   @IsOptional()
   @IsString()
   methodology?: string;
+
+  // Only meaningful when methodology === "system_development" — a standard SDLC stepper.
+  @IsOptional()
+  @IsIn(SDLC_STAGES)
+  sdlcStage?: (typeof SDLC_STAGES)[number];
 
   @IsOptional()
   @IsIn(PROJECT_HEALTHS)

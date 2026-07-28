@@ -72,6 +72,11 @@ export class TendersService {
         accountManager: {
           select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
         },
+        // Just the status column, not the full checklist — cheap enough to include on every
+        // row so the pipeline board can show "X of Y requirements resolved" without an N+1
+        // request per card. Percent-complete is computed client-side from this, same as the
+        // Project Workspace's EVM/Gantt stats.
+        requirements: { select: { status: true } },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -157,6 +162,7 @@ export class TendersService {
           select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
         },
         contract: { select: { id: true, contractNumber: true } },
+        project: { select: { id: true, name: true } },
       },
     });
     return {

@@ -4,10 +4,11 @@ import * as bcrypt from "bcrypt";
 const prisma = new PrismaClient();
 
 const DEPARTMENTS = [
+  { code: "operations", name: "Operations", isCore: true, sortOrder: 0 },
   { code: "finance", name: "Finance", isCore: true, sortOrder: 1 },
   { code: "hr", name: "Human Resources", isCore: true, sortOrder: 2 },
   { code: "it", name: "Information Technology", isCore: true, sortOrder: 3 },
-  { code: "marketing_ops", name: "Marketing & Operations", isCore: true, sortOrder: 4 },
+  { code: "marketing", name: "Marketing", isCore: true, sortOrder: 4 },
   { code: "tender", name: "Tender", isCore: true, sortOrder: 5 },
 ];
 
@@ -50,10 +51,11 @@ function dateAtFraction(start: Date, end: Date, frac: number): Date {
 }
 
 const STAFF = [
+  { email: "florence.wanjiru@amsol.com", fullName: "Florence Wanjiru", dept: "operations", role: "operations" as const },
   { email: "grace.mwangi@amsol.com", fullName: "Grace Mwangi", dept: "finance", role: "finance" as const },
   { email: "peter.otieno@amsol.com", fullName: "Peter Otieno", dept: "hr", role: "hr" as const },
   { email: "samuel.kiptoo@amsol.com", fullName: "Samuel Kiptoo", dept: "it", role: "it" as const },
-  { email: "amina.yusuf@amsol.com", fullName: "Amina Yusuf", dept: "marketing_ops", role: "marketing_ops" as const },
+  { email: "amina.yusuf@amsol.com", fullName: "Amina Yusuf", dept: "marketing", role: "marketing" as const },
   { email: "david.mutua@amsol.com", fullName: "David Mutua", dept: "tender", role: "tender" as const },
   { email: "linda.achieng@amsol.com", fullName: "Linda Achieng", dept: "finance", role: "account_manager" as const },
 ];
@@ -207,7 +209,7 @@ async function main() {
       number: "CTR-2026-104",
       title: "Salary Survey — Kigali Fintech Hub",
       clientCode: "CL-007",
-      dept: "marketing_ops",
+      dept: "marketing",
       sl: "SALARY_SURVEY",
       status: "draft" as const,
       billing: "one_off" as const,
@@ -404,7 +406,7 @@ async function main() {
     },
     {
       name: "Brand Refresh Campaign",
-      dept: "marketing_ops",
+      dept: "marketing",
       lead: mktLead,
       clientCode: null,
       status: "active" as const,
@@ -684,6 +686,300 @@ async function main() {
   }
 
   // ---------------------------------------------------------------------
+  // Recruitment funnel — AMSOL running recruitment AS A SERVICE for a
+  // client, reported as aggregate stage counts (not individual candidate
+  // records) on HR's own delivery project.
+  // ---------------------------------------------------------------------
+  const hrRecruitmentProject = await prisma.project.findFirst({ where: { name: "HR Policy Handbook Refresh" } });
+  if (hrRecruitmentProject) {
+    const funnelSeed = {
+      applicationsReceived: 250,
+      screened: 20,
+      interviewed: 8,
+      offered: 3,
+      placed: 2,
+      notes: "Recruitment support for Kampala Traders Co — branch accountant, HR officer and operations supervisor roles.",
+    };
+    const existingFunnel = await prisma.recruitmentFunnel.findUnique({ where: { projectId: hrRecruitmentProject.id } });
+    if (!existingFunnel) {
+      await prisma.recruitmentFunnel.create({
+        data: { projectId: hrRecruitmentProject.id, ...funnelSeed, updatedBy: admin.id },
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Campaigns — marketing spend tracked against the leads it generates.
+  // ---------------------------------------------------------------------
+  const campaignSeeds = [
+    {
+      name: "Q2 Payroll Compliance LinkedIn Push",
+      channel: "LinkedIn",
+      status: "completed" as const,
+      budget: 45000,
+      startDate: monthsAgo(4, 1),
+      endDate: monthsAgo(3, 1),
+      notes: "Promoted the payroll compliance blog post to Kenyan finance leaders.",
+    },
+    {
+      name: "Recruitment-as-a-Service Email Series",
+      channel: "Email",
+      status: "active" as const,
+      budget: 15000,
+      startDate: monthsAgo(1, 1),
+      endDate: null,
+      notes: "Nurture sequence targeting mid-size logistics and manufacturing firms.",
+    },
+  ];
+  const campaignByName = new Map<string, string>();
+  for (const c of campaignSeeds) {
+    const existing = await prisma.campaign.findFirst({ where: { name: c.name } });
+    const row = existing ?? (await prisma.campaign.create({ data: { ...c, createdBy: mktLead } }));
+    campaignByName.set(c.name, row.id);
+  }
+
+  // ---------------------------------------------------------------------
+  // Leads — Marketing's own individual-record pipeline, distinct from the
+  // Tender-owned client-request intake queue.
+  // ---------------------------------------------------------------------
+  const leadSeeds = [
+    {
+      name: "Fatuma Ali",
+      company: "Nakuru Millers Ltd",
+      contactEmail: "fatuma.ali@nakurumillers.co.ke",
+      contactPhone: "+254712345001",
+      source: "website" as const,
+      stage: "new" as const,
+      notes: "Downloaded the payroll compliance guide from the website contact form.",
+    },
+    {
+      name: "Brian Ochieng",
+      company: "Rift Valley Textiles",
+      contactEmail: "brian.ochieng@riftvalleytextiles.com",
+      contactPhone: "+254712345002",
+      source: "referral" as const,
+      stage: "contacted" as const,
+      notes: "Referred by Savanna Foods Ltd's finance director.",
+    },
+    {
+      name: "Esther Nabirye",
+      company: "Kampala Grain Exchange",
+      contactEmail: "esther.nabirye@kge.co.ug",
+      contactPhone: "+256772345003",
+      source: "event" as const,
+      stage: "qualified" as const,
+      notes: "Met at the Kampala HR Leaders breakfast — interested in a salary survey.",
+    },
+    {
+      name: "Moses Kamau",
+      company: "Coastal Shipping Agencies",
+      contactEmail: "moses.kamau@coastalshipping.co.ke",
+      contactPhone: "+254712345004",
+      source: "campaign" as const,
+      stage: "nurturing" as const,
+      notes: "Opened three follow-up emails on the recruitment-as-a-service campaign, no reply yet.",
+      campaignId: campaignByName.get("Recruitment-as-a-Service Email Series"),
+    },
+  ];
+  for (const lead of leadSeeds) {
+    const existing = await prisma.lead.findFirst({ where: { name: lead.name, company: lead.company } });
+    if (!existing) {
+      await prisma.lead.create({ data: { ...lead, createdBy: mktLead } });
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Blog — Marketing's CMS. Published posts carry plausible engagement numbers; the draft
+  // shows what an in-progress post looks like before it's ready to publish.
+  // ---------------------------------------------------------------------
+  const blogPostSeeds = [
+    {
+      slug: "five-payroll-compliance-pitfalls-in-kenya",
+      title: "Five Payroll Compliance Pitfalls in Kenya (and How to Avoid Them)",
+      excerpt: "Statutory deductions, filing deadlines and the mistakes that trigger penalties — a practical checklist for finance teams.",
+      content: "Payroll compliance in Kenya hinges on getting statutory deductions, filing deadlines and remittances right every single month. In this post we walk through the five most common pitfalls we see across the SMEs and enterprises we support — from misclassifying allowances to missing NSSF/SHIF filing windows — and the controls that prevent each one.",
+      tags: ["payroll", "compliance", "kenya"],
+      authorName: "AMSOL HR Team",
+      status: "published" as const,
+      publishedAt: monthsAgo(2, 10),
+      views: 1284,
+      likes: 47,
+      shares: 19,
+      totalTimeSpentSeconds: 1284 * 95,
+      timeSpentSamples: 812,
+    },
+    {
+      slug: "why-outsource-recruitment-as-a-service",
+      title: "Why Outsource Recruitment as a Service",
+      excerpt: "Faster time-to-hire, a wider candidate pool and lower cost-per-placement — the case for treating recruitment as a managed service.",
+      content: "Growing companies often hit a wall with recruitment: hiring managers are stretched thin, the candidate pipeline is thin, and every open role takes longer to fill than it should. Recruitment as a service closes that gap — we outline how AMSOL structures a recruitment engagement end-to-end, from the intake brief through to placement.",
+      tags: ["recruitment", "hr-services"],
+      authorName: "AMSOL Marketing Team",
+      status: "published" as const,
+      publishedAt: monthsAgo(1, 4),
+      views: 731,
+      likes: 22,
+      shares: 8,
+      totalTimeSpentSeconds: 731 * 78,
+      timeSpentSamples: 501,
+    },
+    {
+      slug: "2026-salary-survey-preview",
+      title: "2026 East Africa Salary Survey — Early Themes",
+      excerpt: "A first look at what we're seeing in this year's salary survey data ahead of the full report.",
+      content: null,
+      tags: ["salary-survey"],
+      authorName: null,
+      status: "draft" as const,
+      publishedAt: null,
+      views: 0,
+      likes: 0,
+      shares: 0,
+      totalTimeSpentSeconds: 0,
+      timeSpentSamples: 0,
+    },
+  ];
+  for (const post of blogPostSeeds) {
+    const existing = await prisma.blogPost.findUnique({ where: { slug: post.slug } });
+    if (!existing) {
+      await prisma.blogPost.create({ data: { ...post, createdBy: mktLead } });
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // IT Systems & Sites — a lightweight registry of what IT builds and maintains, distinct
+  // from the Projects/Tasks work that delivers changes to them.
+  // ---------------------------------------------------------------------
+  const itSystemSeeds = [
+    {
+      name: "amsol.com",
+      type: "website" as const,
+      status: "active" as const,
+      owner: "Samuel Kiptoo",
+      notes: "Public marketing site — hosts the blog the Marketing team publishes to.",
+    },
+    {
+      name: "AIMS",
+      type: "internal_system" as const,
+      status: "active" as const,
+      owner: "Samuel Kiptoo",
+      notes: "This system — the internal management platform used by every department.",
+    },
+    {
+      name: "HRMS",
+      type: "internal_system" as const,
+      status: "active" as const,
+      owner: "Samuel Kiptoo",
+      notes: "Licensed to client companies as a standalone HR management product.",
+    },
+    {
+      name: "Google Analytics (GA4) integration",
+      type: "integration" as const,
+      status: "inactive" as const,
+      owner: "Samuel Kiptoo",
+      notes: "Feeds Marketing's Website Analytics dashboard — pending GA4 property setup.",
+    },
+  ];
+  for (const system of itSystemSeeds) {
+    const existing = await prisma.itSystem.findFirst({ where: { name: system.name } });
+    if (!existing) {
+      await prisma.itSystem.create({ data: system });
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Tickets — IT support requests, both internal and raised by HRMS-licensed clients.
+  // ---------------------------------------------------------------------
+  const ticketSeeds = [
+    {
+      title: "VPN drops for remote staff in Kampala office",
+      description: "Multiple reports of VPN disconnects mid-session since Monday.",
+      status: "in_progress" as const,
+      priority: "high" as const,
+      source: "internal" as const,
+      requesterId: hrLead,
+      assigneeId: itLead,
+      resolvedAt: null,
+    },
+    {
+      title: "Payroll export button missing on HRMS dashboard",
+      description: "Serengeti Logistics' HR team can't find the payroll export they used last month.",
+      status: "open" as const,
+      priority: "medium" as const,
+      source: "hrms_client" as const,
+      requesterId: null,
+      assigneeId: itLead,
+      resolvedAt: null,
+    },
+    {
+      title: "Password reset for terminated contractor account",
+      description: null,
+      status: "resolved" as const,
+      priority: "low" as const,
+      source: "internal" as const,
+      requesterId: financeLead,
+      assigneeId: itLead,
+      resolvedAt: daysFromNow(-3),
+    },
+    {
+      title: "Laptop replacement request",
+      description: "Screen flickering intermittently, likely a failing display cable.",
+      status: "closed" as const,
+      priority: "low" as const,
+      source: "internal" as const,
+      requesterId: mktLead,
+      assigneeId: itLead,
+      resolvedAt: daysFromNow(-14),
+    },
+  ];
+  for (const t of ticketSeeds) {
+    const existing = await prisma.ticket.findFirst({ where: { title: t.title } });
+    if (!existing) {
+      await prisma.ticket.create({ data: { ...t, createdBy: itLead } });
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // HRMS Licenses — companies licensing Amsol's HRMS product, distinct from the Client
+  // records (some of the same companies also buy other Amsol services).
+  // ---------------------------------------------------------------------
+  const hrmsLicenseSeeds = [
+    {
+      clientCode: "CL-006",
+      tier: "enterprise" as const,
+      status: "active" as const,
+      activeUsers: 320,
+      renewalDate: daysFromNow(75),
+      notes: "Renews annually each October — flagged for early renewal outreach.",
+    },
+    {
+      clientCode: "CL-007",
+      tier: "starter" as const,
+      status: "trial" as const,
+      activeUsers: 18,
+      renewalDate: daysFromNow(20),
+      notes: "30-day trial — sales following up before it lapses.",
+    },
+  ];
+  for (const l of hrmsLicenseSeeds) {
+    const clientId = clientByCode.get(l.clientCode);
+    if (!clientId) continue;
+    const existing = await prisma.hrmsLicense.findUnique({ where: { clientId } });
+    if (!existing) {
+      await prisma.hrmsLicense.create({
+        data: {
+          clientId,
+          tier: l.tier,
+          status: l.status,
+          activeUsers: l.activeUsers,
+          renewalDate: l.renewalDate,
+          notes: l.notes,
+        },
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------
   // Tenders — one per pipeline stage, spread across departments, so the
   // funnel and win-rate on both the Tender module and CEO dashboard have
   // real variety instead of a single row.
@@ -735,7 +1031,7 @@ async function main() {
     {
       ref: "TND-2026-005",
       title: "Telco Staff Training Program",
-      dept: "marketing_ops",
+      dept: "marketing",
       sl: "TRAINING",
       clientCode: "CL-006",
       stage: "won" as const,
@@ -968,7 +1264,7 @@ async function main() {
   }
 
   // ---------------------------------------------------------------------
-  // Client Requests — the lead-intake pipeline (Operations/Marketing → routed
+  // Client Requests — the lead-intake pipeline (Tender intake → routed
   // department → engaged → converted/lost/withdrawn), spread across every
   // stage so the module's own funnel and the CEO dashboard's "Client Request
   // Pipeline" + "Where requests fail" widgets have real variety.
@@ -1040,7 +1336,7 @@ async function main() {
       clientCode: "CL-006",
       source: "operations" as const,
       sl: "SALARY_SURVEY",
-      dept: "marketing_ops",
+      dept: "marketing",
       assignedTo: mktLead,
       stage: "proposal" as const,
       value: 380_000,
@@ -1092,7 +1388,7 @@ async function main() {
       clientCode: "CL-006",
       source: "operations" as const,
       sl: "ADVISORY",
-      dept: "marketing_ops",
+      dept: "marketing",
       assignedTo: mktLead,
       stage: "withdrawn" as const,
       lostFromStage: "assigned" as const,

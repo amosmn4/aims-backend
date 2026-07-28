@@ -18,6 +18,27 @@ const envSchema = z.object({
 
   SEED_ADMIN_EMAIL: z.string().email().optional(),
   SEED_ADMIN_PASSWORD: z.string().min(1).optional(),
+
+  // Website Analytics (GA4). Both optional — the app boots and the feature degrades to a
+  // "not connected" state when either is unset; see marketing/website-analytics.
+  GA4_PROPERTY_ID: z.string().min(1).optional(),
+  GA4_SERVICE_ACCOUNT_KEY_JSON: z.string().min(1).optional(),
+
+  // Object storage (S3-compatible — AWS S3, MinIO, R2, Spaces via S3_ENDPOINT). All optional —
+  // uploads fall back to local disk (uploads/, gitignored) when unset; see storage/storage.service.
+  S3_BUCKET: z.string().min(1).optional(),
+  S3_REGION: z.string().min(1).optional(),
+  S3_ACCESS_KEY_ID: z.string().min(1).optional(),
+  S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+  S3_ENDPOINT: z.string().min(1).optional(),
+
+  // SMTP for notification email digests. Optional — the digest cron sends nothing (and logs a
+  // warning) when unset; see notifications/email/email.service.
+  SMTP_HOST: z.string().min(1).optional(),
+  SMTP_PORT: z.coerce.number().int().positive().optional(),
+  SMTP_USER: z.string().min(1).optional(),
+  SMTP_PASSWORD: z.string().min(1).optional(),
+  SMTP_FROM: z.string().min(1).optional(),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

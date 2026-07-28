@@ -12,9 +12,10 @@ import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 
-// Any of the 5 operating departments can be *routed* a request and then manage it from there —
-// only creation/routing itself is restricted to marketing_ops (Operations/Marketing intake).
-const DEPT_WRITE_ROLES = ["finance", "hr", "it", "marketing_ops", "tender"] as const;
+// Any of the 5 delivery departments can be *routed* a request and then manage it from there.
+// Operations owns intake — creating and routing a request is restricted to operations — but
+// keeps write access here too so it can still update/annotate/convert requests it originated.
+const DEPT_WRITE_ROLES = ["finance", "hr", "it", "marketing", "tender", "operations"] as const;
 
 @Controller("client-requests")
 export class ClientRequestsController {
@@ -75,7 +76,7 @@ export class ClientRequestsController {
   }
 
   @Post()
-  @Roles("marketing_ops")
+  @Roles("operations")
   create(@Body() dto: CreateClientRequestDto, @CurrentUser() user: AuthenticatedUser) {
     return this.requestsService.create(dto, user);
   }
@@ -87,7 +88,7 @@ export class ClientRequestsController {
   }
 
   @Patch(":id/route")
-  @Roles("marketing_ops")
+  @Roles("operations")
   route(@Param("id") id: string, @Body() dto: RouteClientRequestDto, @CurrentUser() user: AuthenticatedUser) {
     return this.requestsService.route(id, dto, user);
   }
