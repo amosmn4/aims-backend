@@ -6,6 +6,7 @@ import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateLeadDto } from "./dto/create-lead.dto";
 import type { UpdateLeadDto } from "./dto/update-lead.dto";
 import type { CreateLeadActivityDto } from "./dto/create-lead-activity.dto";
+import type { ConvertLeadToRequestDto } from "./dto/convert-lead-to-request.dto";
 
 @Injectable()
 export class LeadsService {
@@ -63,7 +64,10 @@ export class LeadsService {
   // Once a lead is sales-ready, it becomes a real ClientRequest and enters Tender's own
   // intake/routing pipeline from there — reuses ClientRequestsService.create() directly
   // (in-process, not a second HTTP round-trip) rather than duplicating request-creation logic.
-  async convertToRequest(leadId: string, user: AuthenticatedUser) {
+  // If the converting marketer already knows which department this is for, dto.departmentId
+  // routes it immediately (ClientRequestsService.create stamps stage "assigned" for us) instead
+  // of leaving it unrouted for Operations/Tender to triage separately.
+  async convertToRequest(leadId: string, user: AuthenticatedUser, dto: ConvertLeadToRequestDto = {}) {
     const lead = await this.prisma.lead.findUniqueOrThrow({ where: { id: leadId } });
     if (lead.convertedRequestId) {
       throw new BadRequestException("This lead has already been converted");
@@ -77,6 +81,8 @@ export class LeadsService {
         contactEmail: lead.contactEmail ?? undefined,
         contactPhone: lead.contactPhone ?? undefined,
         source: "marketing",
+        departmentId: dto.departmentId,
+        assignedToId: dto.assignedToId,
       },
       user,
     );

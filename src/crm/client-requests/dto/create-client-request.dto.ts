@@ -48,4 +48,14 @@ export class CreateClientRequestDto {
   @IsOptional()
   @IsString()
   currency?: string;
+
+  // Lets intake (Operations, or a lead conversion) assign a department directly instead of
+  // always requiring the separate PATCH :id/route step — see ClientRequestsService.create.
+  @IsOptional()
+  @IsString()
+  departmentId?: string;
+
+  @IsOptional()
+  @IsString()
+  assignedToId?: string;
 }

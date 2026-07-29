@@ -195,8 +195,12 @@ export class ClientRequestsService {
   }
 
   async create(dto: CreateClientRequestDto, user: AuthenticatedUser) {
+    // Assigning a department at creation time (e.g. a lead converted straight into a
+    // department's queue) has the same effect as the separate route() step below — stamp
+    // stage/routedAt here too so it doesn't sit in "new"/unrouted needlessly.
+    const routedNow = dto.departmentId ? { stage: "assigned" as const, routedAt: new Date() } : {};
     return this.prisma.clientRequest.create({
-      data: { ...dto, createdBy: user.id },
+      data: { ...dto, ...routedNow, createdBy: user.id },
     });
   }
 

@@ -3,6 +3,7 @@ import { LeadsService } from "./leads.service";
 import { CreateLeadDto } from "./dto/create-lead.dto";
 import { UpdateLeadDto } from "./dto/update-lead.dto";
 import { CreateLeadActivityDto } from "./dto/create-lead-activity.dto";
+import { ConvertLeadToRequestDto } from "./dto/convert-lead-to-request.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
@@ -59,7 +60,11 @@ export class LeadsController {
 
   @Post(":id/convert-to-request")
   @Roles("marketing")
-  convertToRequest(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
-    return this.leadsService.convertToRequest(id, user);
+  convertToRequest(
+    @Param("id") id: string,
+    @Body() dto: ConvertLeadToRequestDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.leadsService.convertToRequest(id, user, dto);
   }
 }

@@ -16,8 +16,12 @@ export class ClientsController {
     return this.clientsService.findAll();
   }
 
+  // Any department that onboards a won request/tender needs to be able to create the client
+  // record inline during conversion, not just Finance — mirrors DEPT_WRITE_ROLES in
+  // client-requests.controller.ts / tenders.controller.ts. Editing/removing the master record
+  // stays Finance-only below.
   @Post()
-  @Roles("finance")
+  @Roles("finance", "hr", "it", "marketing", "tender", "operations")
   create(@Body() dto: CreateClientDto) {
     return this.clientsService.create(dto);
   }

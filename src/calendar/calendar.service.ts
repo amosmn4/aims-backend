@@ -19,14 +19,21 @@ const OPEN_TENDER_STAGES: TenderStage[] = ["identified", "applying", "submitted"
 export class CalendarService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async listDeadlines(from: Date, to: Date): Promise<DeadlineItem[]> {
+  async listDeadlines(from: Date, to: Date, departmentId?: string): Promise<DeadlineItem[]> {
     const [tenders, bonds, contracts, tasks] = await Promise.all([
       this.prisma.tender.findMany({
-        where: { stage: { in: OPEN_TENDER_STAGES }, submissionDeadline: { gte: from, lte: to } },
+        where: {
+          stage: { in: OPEN_TENDER_STAGES },
+          submissionDeadline: { gte: from, lte: to },
+          ...(departmentId && { departmentId }),
+        },
         select: { id: true, title: true, submissionDeadline: true },
       }),
       this.prisma.tenderBond.findMany({
-        where: { expiryDate: { gte: from, lte: to } },
+        where: {
+          expiryDate: { gte: from, lte: to },
+          ...(departmentId && { tender: { departmentId } }),
+        },
         select: {
           id: true,
           expiryDate: true,
@@ -35,11 +42,15 @@ export class CalendarService {
         },
       }),
       this.prisma.contract.findMany({
-        where: { status: "active", endDate: { gte: from, lte: to } },
+        where: { status: "active", endDate: { gte: from, lte: to }, ...(departmentId && { departmentId }) },
         select: { id: true, title: true, endDate: true },
       }),
       this.prisma.task.findMany({
-        where: { status: { not: "completed" }, dueDate: { gte: from, lte: to } },
+        where: {
+          status: { not: "completed" },
+          dueDate: { gte: from, lte: to },
+          ...(departmentId && { project: { departmentId } }),
+        },
         select: { id: true, title: true, dueDate: true, projectId: true },
       }),
     ]);

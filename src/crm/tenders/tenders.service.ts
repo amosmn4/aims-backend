@@ -210,7 +210,7 @@ export class TendersService {
       data: {
         stage: dto.stage,
         submittedAt: dto.stage === "submitted" ? now : existing.submittedAt,
-        wonAt: dto.stage === "won" ? now : existing.wonAt,
+        wonAt: dto.stage === "won" ? (dto.wonAt ? new Date(dto.wonAt) : now) : existing.wonAt,
         lostAt: dto.stage === "lost" ? now : existing.lostAt,
         withdrawnAt: dto.stage === "withdrawn" ? now : existing.withdrawnAt,
         lostReason: dto.stage === "lost" || dto.stage === "withdrawn" ? dto.lostReason : existing.lostReason,

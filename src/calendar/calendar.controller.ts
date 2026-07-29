@@ -8,9 +8,13 @@ export class CalendarController {
 
   @Get("deadlines")
   @Roles()
-  deadlines(@Query("from") from?: string, @Query("to") to?: string) {
+  deadlines(
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("departmentId") departmentId?: string,
+  ) {
     const start = from ? new Date(from) : new Date();
     const end = to ? new Date(to) : new Date(start.getTime() + 90 * 86_400_000);
-    return this.calendarService.listDeadlines(start, end);
+    return this.calendarService.listDeadlines(start, end, departmentId);
   }
 }

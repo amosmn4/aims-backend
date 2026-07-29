@@ -12,6 +12,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "ts-node prisma/seed.ts",
+    "reset:demo-data": "ts-node prisma/reset-demo-data.ts",
     "test": "jest"
   },
   "dependencies": {

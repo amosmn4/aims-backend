@@ -9,4 +9,10 @@ export class UpdateTenderStageDto {
   @IsOptional()
   @IsString()
   lostReason?: string;
+
+  // Lets the awarded date be backdated (e.g. entering a tender that was actually won last week)
+  // instead of always stamping "now" — only read when stage is being set to "won".
+  @IsOptional()
+  @IsString()
+  wonAt?: string;
 }
