@@ -5,6 +5,7 @@ import { ConfigService } from "@nestjs/config";
 import cookieParser from "cookie-parser";
 import { AppModule } from "./app.module";
 import type { EnvConfig } from "./config/env.validation";
+import { PrismaExceptionFilter } from "./common/prisma-exception.filter";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -15,6 +16,7 @@ async function bootstrap() {
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }),
   );
+  app.useGlobalFilters(new PrismaExceptionFilter());
   app.enableCors({
     // Hardcoded localhost fallback only applies when CORS_ORIGIN is absent from the validated
     // environment (.env not reached, or set with no value) — never overrides a real .env value.

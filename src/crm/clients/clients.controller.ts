@@ -1,10 +1,11 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import { ClientsService } from "./clients.service";
 import { CreateClientDto } from "./dto/create-client.dto";
 import { UpdateClientDto } from "./dto/update-client.dto";
 import { CreateContactDto } from "./dto/create-contact.dto";
 import { UpdateContactDto } from "./dto/update-contact.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
+import { PaginationQueryDto } from "../../common/pagination";
 
 @Controller("clients")
 export class ClientsController {
@@ -12,8 +13,8 @@ export class ClientsController {
 
   @Get()
   @Roles()
-  findAll() {
-    return this.clientsService.findAll();
+  findAll(@Query() pagination: PaginationQueryDto) {
+    return this.clientsService.findAll(pagination);
   }
 
   // Any department that onboards a won request/tender needs to be able to create the client

@@ -19,6 +19,7 @@ import { CreateContractDto } from "./dto/create-contract.dto";
 import { UpdateContractDto } from "./dto/update-contract.dto";
 import { UploadDocumentDto } from "./dto/upload-document.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
+import { PaginationQueryDto } from "../../common/pagination";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 
@@ -31,8 +32,12 @@ export class ContractsController {
 
   @Get()
   @Roles()
-  findAll(@Query("departmentId") departmentId?: string, @Query("clientId") clientId?: string) {
-    return this.contractsService.findAll({ departmentId, clientId });
+  findAll(
+    @Query("departmentId") departmentId?: string,
+    @Query("clientId") clientId?: string,
+    @Query() pagination?: PaginationQueryDto,
+  ) {
+    return this.contractsService.findAll({ departmentId, clientId }, pagination);
   }
 
   @Get(":id")

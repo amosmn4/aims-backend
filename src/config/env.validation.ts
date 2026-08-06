@@ -39,6 +39,13 @@ const envSchema = z.object({
   SMTP_USER: z.string().min(1).optional(),
   SMTP_PASSWORD: z.string().min(1).optional(),
   SMTP_FROM: z.string().min(1).optional(),
+
+  // Shared secret the amsol.africa website authenticates with to call the public blog feed +
+  // engagement endpoints (GET /public/blog/feed, POST /public/blog/engagement) — see
+  // marketing/blog/public-blog-api-key.guard.ts. Image/video streaming stays unauthenticated
+  // (plain <img>/<video> tags can't send custom headers). Optional at boot so the app still
+  // starts without it, but those two routes reject every request until it's set.
+  PUBLIC_BLOG_API_KEY: z.string().min(1).optional(),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

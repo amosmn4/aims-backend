@@ -2,6 +2,7 @@ import { ForbiddenException, Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { StorageService } from "../../storage/storage.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
+import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateContractDto } from "./dto/create-contract.dto";
 import type { UpdateContractDto } from "./dto/update-contract.dto";
@@ -22,14 +23,18 @@ export class ContractsService {
     private readonly storage: StorageService,
   ) {}
 
-  findAll(filters: { departmentId?: string; clientId?: string }) {
-    return this.prisma.contract.findMany({
-      where: {
-        ...(filters.departmentId && { departmentId: filters.departmentId }),
-        ...(filters.clientId && { clientId: filters.clientId }),
+  findAll(filters: { departmentId?: string; clientId?: string }, pagination: PaginationQueryDto = {}) {
+    return maybePaginate(
+      this.prisma.contract,
+      {
+        where: {
+          ...(filters.departmentId && { departmentId: filters.departmentId }),
+          ...(filters.clientId && { clientId: filters.clientId }),
+        },
+        orderBy: { createdAt: "desc" },
       },
-      orderBy: { createdAt: "desc" },
-    });
+      pagination,
+    );
   }
 
   async findOne(id: string) {

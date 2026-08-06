@@ -3,6 +3,7 @@ import type { TaskStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
 import { maskUserRef } from "../../common/mask-user-ref";
+import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import { DocumentsService } from "../../documents/documents.service";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateTaskDto } from "./dto/create-task.dto";
@@ -18,25 +19,32 @@ export class TasksService {
   ) {}
 
   // Visibility is open cross-department, same reasoning as Projects.
-  findAll(filters: {
-    projectId?: string;
-    departmentId?: string;
-    assigneeId?: string;
-    status?: TaskStatus;
-  }) {
-    return this.prisma.task.findMany({
-      where: {
-        ...(filters.projectId && { projectId: filters.projectId }),
-        ...(filters.assigneeId && { assigneeId: filters.assigneeId }),
-        ...(filters.status && { status: filters.status }),
-        ...(filters.departmentId && { project: { departmentId: filters.departmentId } }),
+  findAll(
+    filters: {
+      projectId?: string;
+      departmentId?: string;
+      assigneeId?: string;
+      status?: TaskStatus;
+    },
+    pagination: PaginationQueryDto = {},
+  ) {
+    return maybePaginate(
+      this.prisma.task,
+      {
+        where: {
+          ...(filters.projectId && { projectId: filters.projectId }),
+          ...(filters.assigneeId && { assigneeId: filters.assigneeId }),
+          ...(filters.status && { status: filters.status }),
+          ...(filters.departmentId && { project: { departmentId: filters.departmentId } }),
+        },
+        include: {
+          project: { select: { id: true, name: true, departmentId: true } },
+          dependsOn: { include: { dependsOn: { select: { id: true, title: true, status: true } } } },
+        },
+        orderBy: [{ status: "asc" }, { position: "asc" }],
       },
-      include: {
-        project: { select: { id: true, name: true, departmentId: true } },
-        dependsOn: { include: { dependsOn: { select: { id: true, title: true, status: true } } } },
-      },
-      orderBy: [{ status: "asc" }, { position: "asc" }],
-    });
+      pagination,
+    );
   }
 
   findOne(id: string) {

@@ -40,7 +40,7 @@ import { CalendarModule } from "./calendar/calendar.module";
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
     ScheduleModule.forRoot(),
-    // General ceiling for every route; login/demo-login apply a stricter @Throttle() override.
+    // General ceiling for every route; login/set-password apply a stricter @Throttle() override.
     ThrottlerModule.forRoot([{ name: "default", ttl: 60_000, limit: 120 }]),
     PrismaModule,
     AuthModule,

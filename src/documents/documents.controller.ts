@@ -43,10 +43,23 @@ export class DocumentsController {
     @Query("tag") tag: string | undefined,
     @Query("q") q: string | undefined,
     @Query("mine") mine: string | undefined,
+    @Query("sharedWithMe") sharedWithMe: string | undefined,
+    @Query("page") page: string | undefined,
+    @Query("pageSize") pageSize: string | undefined,
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.documentsService.findAll(
-      { resourceType, resourceId, departmentId, tag, q, mine: mine === "true" },
+      {
+        resourceType,
+        resourceId,
+        departmentId,
+        tag,
+        q,
+        mine: mine === "true",
+        sharedWithMe: sharedWithMe === "true",
+        page: page ? Number(page) : undefined,
+        pageSize: pageSize ? Number(pageSize) : undefined,
+      },
       user,
     );
   }

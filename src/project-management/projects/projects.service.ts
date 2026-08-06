@@ -3,6 +3,7 @@ import type { ClientRequestActivityType, ProjectStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
 import { maskUserRef } from "../../common/mask-user-ref";
+import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import { DocumentsService } from "../../documents/documents.service";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateProjectDto } from "./dto/create-project.dto";
@@ -29,22 +30,44 @@ export class ProjectsService {
 
   // Visibility is open cross-department ("staff in one department can be involved in
   // another department's activity") — only mutations are department-gated.
-  findAll(filters: { departmentId?: string; status?: ProjectStatus; clientId?: string }) {
-    return this.prisma.project.findMany({
-      where: {
-        ...(filters.departmentId && { departmentId: filters.departmentId }),
-        ...(filters.status && { status: filters.status }),
-        ...(filters.clientId && { clientId: filters.clientId }),
+  findAll(
+    filters: {
+      departmentId?: string;
+      status?: ProjectStatus;
+      clientId?: string;
+      // Google-Drive-style "Shared with me": projects outside the viewer's own department that
+      // they've been added to as a team member, rather than blended into a department's normal
+      // project list. Requires the viewer (their id + home department) since it's relative to
+      // who's asking, not a static filter value.
+      sharedWithMe?: boolean;
+    },
+    pagination: PaginationQueryDto = {},
+    viewer?: AuthenticatedUser,
+  ) {
+    return maybePaginate(
+      this.prisma.project,
+      {
+        where: {
+          ...(filters.departmentId && { departmentId: filters.departmentId }),
+          ...(filters.status && { status: filters.status }),
+          ...(filters.clientId && { clientId: filters.clientId }),
+          ...(filters.sharedWithMe &&
+            viewer && {
+              departmentId: { not: viewer.departmentId ?? undefined },
+              team: { some: { userId: viewer.id } },
+            }),
+        },
+        include: {
+          department: true,
+          client: true,
+          tender: { select: { id: true, referenceNumber: true, title: true } },
+          clientRequest: { select: { id: true, referenceNumber: true, title: true } },
+          _count: { select: { tasks: true } },
+        },
+        orderBy: { createdAt: "desc" },
       },
-      include: {
-        department: true,
-        client: true,
-        tender: { select: { id: true, referenceNumber: true, title: true } },
-        clientRequest: { select: { id: true, referenceNumber: true, title: true } },
-        _count: { select: { tasks: true } },
-      },
-      orderBy: { createdAt: "desc" },
-    });
+      pagination,
+    );
   }
 
   findOne(id: string) {
@@ -105,12 +128,21 @@ export class ProjectsService {
     });
   }
 
-  // Deletion is destructive, so it's reserved for admin/CEO — enforced via @Roles(...) at
-  // the controller (same bypass rule used everywhere else in the app) rather than here.
+  // Department-scoped like every other mutation on this model — a department's own staff can
+  // delete their own department's projects, system_admin/ceo can delete any project.
   // Tasks cascade-delete at the DB level, but their attached Documents don't (Document has
   // no DB-level FK — see DocumentsService) so they're cleaned up explicitly here first.
-  async remove(id: string) {
-    const tasks = await this.prisma.task.findMany({ where: { projectId: id }, select: { id: true } });
+  async remove(id: string, user: AuthenticatedUser) {
+    const project = await this.prisma.project.findUniqueOrThrow({
+      where: { id },
+      include: { department: true },
+    });
+    assertDepartmentAccess(project.department, user);
+
+    const tasks = await this.prisma.task.findMany({
+      where: { projectId: id },
+      select: { id: true },
+    });
     await Promise.all(tasks.map((t) => this.documentsService.deleteAllForResource("task", t.id)));
     await this.documentsService.deleteAllForResource("project", id);
     return this.prisma.project.delete({ where: { id } });
@@ -238,7 +270,10 @@ export class ProjectsService {
       include: { creator: { select: userSelect } },
       orderBy: { occurredAt: "desc" },
     });
-    return activities.map((a) => ({ ...a, creator: a.creator ? maskUserRef(a.creator, viewer) : null }));
+    return activities.map((a) => ({
+      ...a,
+      creator: a.creator ? maskUserRef(a.creator, viewer) : null,
+    }));
   }
 
   async createActivity(
@@ -266,7 +301,9 @@ export class ProjectsService {
   }
 
   async deleteActivity(activityId: string, user: AuthenticatedUser) {
-    const activity = await this.prisma.projectActivity.findUniqueOrThrow({ where: { id: activityId } });
+    const activity = await this.prisma.projectActivity.findUniqueOrThrow({
+      where: { id: activityId },
+    });
     const isAdminOrCeo = user.roles.includes("system_admin") || user.roles.includes("ceo");
     if (activity.createdBy !== user.id && !isAdminOrCeo) {
       throw new ForbiddenException("You can only delete your own activity entries");
@@ -289,7 +326,10 @@ export class ProjectsService {
   /* ---------- Cost items (Financials tab: budget vs actual by category) ---------- */
 
   listCostItems(projectId: string) {
-    return this.prisma.projectCostItem.findMany({ where: { projectId }, orderBy: { createdAt: "asc" } });
+    return this.prisma.projectCostItem.findMany({
+      where: { projectId },
+      orderBy: { createdAt: "asc" },
+    });
   }
 
   async createCostItem(projectId: string, dto: CreateCostItemDto, user: AuthenticatedUser) {
@@ -332,7 +372,9 @@ export class ProjectsService {
   }
 
   async updateTeamMember(memberId: string, dto: UpdateTeamMemberDto, user: AuthenticatedUser) {
-    const member = await this.prisma.projectTeamMember.findUniqueOrThrow({ where: { id: memberId } });
+    const member = await this.prisma.projectTeamMember.findUniqueOrThrow({
+      where: { id: memberId },
+    });
     await this.assertProjectAccess(member.projectId, user);
     const updated = await this.prisma.projectTeamMember.update({
       where: { id: memberId },
@@ -343,7 +385,9 @@ export class ProjectsService {
   }
 
   async deleteTeamMember(memberId: string, user: AuthenticatedUser) {
-    const member = await this.prisma.projectTeamMember.findUniqueOrThrow({ where: { id: memberId } });
+    const member = await this.prisma.projectTeamMember.findUniqueOrThrow({
+      where: { id: memberId },
+    });
     await this.assertProjectAccess(member.projectId, user);
     return this.prisma.projectTeamMember.delete({ where: { id: memberId } });
   }
@@ -351,7 +395,10 @@ export class ProjectsService {
   /* ---------- RACI matrix ---------- */
 
   listRaci(projectId: string) {
-    return this.prisma.projectRaciEntry.findMany({ where: { projectId }, orderBy: { sortOrder: "asc" } });
+    return this.prisma.projectRaciEntry.findMany({
+      where: { projectId },
+      orderBy: { sortOrder: "asc" },
+    });
   }
 
   async createRaciEntry(projectId: string, dto: CreateRaciEntryDto, user: AuthenticatedUser) {
@@ -375,7 +422,10 @@ export class ProjectsService {
   /* ---------- RAID log ---------- */
 
   listRaid(projectId: string) {
-    return this.prisma.projectRaidEntry.findMany({ where: { projectId }, orderBy: { createdAt: "desc" } });
+    return this.prisma.projectRaidEntry.findMany({
+      where: { projectId },
+      orderBy: { createdAt: "desc" },
+    });
   }
 
   async createRaidEntry(projectId: string, dto: CreateRaidEntryDto, user: AuthenticatedUser) {

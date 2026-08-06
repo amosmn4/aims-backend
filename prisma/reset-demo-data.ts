@@ -2,16 +2,35 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
+// The 7 department-lead demo accounts the old seed.ts used to create, plus the 3 one-click
+// DEMO_USERS the app used to expose (that feature and this seed block are both gone from the
+// codebase now — this list only matters for cleaning up a database seeded before that change).
+const DEMO_STAFF_EMAILS = [
+  "florence.wanjiru@amsol.com",
+  "grace.mwangi@amsol.com",
+  "peter.otieno@amsol.com",
+  "samuel.kiptoo@amsol.com",
+  "amina.yusuf@amsol.com",
+  "david.mutua@amsol.com",
+  "linda.achieng@amsol.com",
+  "admin@amsol.demo",
+  "ceo@amsol.demo",
+  "finance@amsol.demo",
+];
+
 /**
- * Wipes every seeded/demo TRANSACTIONAL record so the system can be used with real data, without
- * touching login accounts or reference/lookup data.
+ * Wipes every seeded/demo TRANSACTIONAL record, AND the old demo staff/one-click accounts, so the
+ * system is left with only the bootstrap System Administrator and reference/lookup data — matching
+ * what prisma/seed.ts now creates on a fresh database.
  *
- * PRESERVED (never deleted): User, UserRole, PasswordSetupToken — every login (bootstrap admin,
- * the demo STAFF accounts, and the one-click DEMO_USERS) — plus Department, ServiceLine, Office,
- * which the app needs to function and aren't "demo content."
+ * PRESERVED: the bootstrap System Administrator's User/UserRole/PasswordSetupToken rows, plus
+ * Department, ServiceLine, Office — reference/lookup data the app needs to function, not "demo
+ * content." Any OTHER user you've since created for real (via Admin > Users) is also preserved —
+ * only the specific demo emails above are removed.
  *
  * Everything else — clients, contracts, projects/tasks, invoices, tenders, client requests, leads,
- * campaigns, IT/HR/finance records, documents, notifications, audit log — is deleted.
+ * campaigns, IT/HR/finance records, documents, notifications, audit log, and the demo staff/
+ * one-click accounts themselves — is deleted.
  *
  * Deletes run in FK-safe order (children before parents), inside one transaction so a failure
  * partway through leaves the database untouched rather than half-wiped.
@@ -88,10 +107,16 @@ async function main() {
     prisma.itSystem.deleteMany(),
     prisma.blogPost.deleteMany(),
     prisma.websiteAnalyticsSnapshot.deleteMany(),
+
+    // Old demo staff / one-click accounts — safe now that everything they might have authored
+    // (finance reports, task comments, tender resources/time entries — the Cascade relations on
+    // User) has already been cleared above. Any real user you've since created keeps their email
+    // out of this list, so they're untouched.
+    prisma.user.deleteMany({ where: { email: { in: DEMO_STAFF_EMAILS } } }),
   ]);
 
   console.log(
-    "Demo transactional data cleared. Users, roles, departments, service lines and offices were preserved.",
+    "Demo data cleared. Only the bootstrap System Administrator, departments, service lines and offices remain.",
   );
 }
 

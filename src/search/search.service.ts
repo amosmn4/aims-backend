@@ -95,7 +95,9 @@ export class SearchService {
               select: { id: true, invoiceNumber: true, client: { select: { name: true } } },
             })
           : Promise.resolve([]),
-        this.documentsService.findAll({ q: query }, viewer).then((entries) => entries.slice(0, TAKE_PER_TYPE)),
+        this.documentsService
+          .findAll({ q: query }, viewer)
+          .then((result) => (Array.isArray(result) ? result : result.data).slice(0, TAKE_PER_TYPE)),
       ]);
 
     return [

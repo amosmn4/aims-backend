@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post } from "@nestjs/common";
 import { DepartmentsService } from "./departments.service";
 import { CreateDepartmentDto } from "./dto/create-department.dto";
 import { UpdateDepartmentDto } from "./dto/update-department.dto";
@@ -23,5 +23,11 @@ export class DepartmentsController {
   @Roles("system_admin")
   update(@Param("id") id: string, @Body() dto: UpdateDepartmentDto) {
     return this.departmentsService.update(id, dto);
+  }
+
+  @Delete(":id")
+  @Roles("system_admin")
+  remove(@Param("id") id: string) {
+    return this.departmentsService.remove(id);
   }
 }

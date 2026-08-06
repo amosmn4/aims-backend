@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import { UsersService } from "./users.service";
 import { CreateUserDto } from "./dto/create-user.dto";
 import { UpdateUserDto } from "./dto/update-user.dto";
 import { Roles } from "../auth/decorators/roles.decorator";
 import { CurrentUser } from "../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
+import { PaginationQueryDto } from "../common/pagination";
 
 @Controller("users")
 @Roles("system_admin")
@@ -21,8 +22,8 @@ export class UsersController {
   }
 
   @Get()
-  findAll(@CurrentUser() user: AuthenticatedUser) {
-    return this.usersService.findAll(user);
+  findAll(@CurrentUser() user: AuthenticatedUser, @Query() pagination: PaginationQueryDto) {
+    return this.usersService.findAll(user, pagination);
   }
 
   @Post()
@@ -35,8 +36,18 @@ export class UsersController {
     return this.usersService.resendInvite(id, user);
   }
 
+  @Post(":id/reset-password")
+  resetPassword(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.usersService.resetPassword(id, user);
+  }
+
   @Patch(":id")
   update(@Param("id") id: string, @Body() dto: UpdateUserDto, @CurrentUser() user: AuthenticatedUser) {
     return this.usersService.update(id, dto, user);
+  }
+
+  @Delete(":id")
+  remove(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.usersService.remove(id, user);
   }
 }

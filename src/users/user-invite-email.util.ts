@@ -12,3 +12,10 @@ export function renderInviteEmail(name: string, link: string): string {
 <p><a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>
 <p>This link expires in 72 hours. If you weren't expecting this, you can ignore this email.</p>`;
 }
+
+export function renderResetPasswordEmail(name: string, link: string): string {
+  return `<p>Hi ${escapeHtml(name)},</p>
+<p>An administrator has requested a password reset for your AIMS account. Click the link below to set a new password:</p>
+<p><a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>
+<p>This link expires in 72 hours. If you weren't expecting this, you can ignore this email — your current password will keep working.</p>`;
+}

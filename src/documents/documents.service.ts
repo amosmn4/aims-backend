@@ -3,6 +3,7 @@ import type { Document, DocumentAccessGrant, DocumentResourceType, DocumentVersi
 import { PrismaService } from "../prisma/prisma.service";
 import { StorageService } from "../storage/storage.service";
 import { assertDepartmentAccess } from "../common/assert-department-access";
+import type { Paginated } from "../common/pagination";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import type { UploadDocumentDto } from "./dto/upload-document.dto";
 import type { UpdateDocumentDto } from "./dto/update-document.dto";
@@ -151,9 +152,16 @@ export class DocumentsService {
       tag?: string;
       q?: string;
       mine?: boolean;
+      // True when someone specifically shared this document with the viewer (a `user`-type
+      // access grant naming them) rather than it just being visible to them by default —
+      // the Google-Drive-style "Shared with me" view, distinct from "Mine" (uploaded by them)
+      // and from the department-scoped default list.
+      sharedWithMe?: boolean;
+      page?: number;
+      pageSize?: number;
     },
     user: AuthenticatedUser,
-  ): Promise<LibraryEntry[]> {
+  ): Promise<LibraryEntry[] | Paginated<LibraryEntry>> {
     const documents = await this.prisma.document.findMany({
       where: {
         ...(filters.resourceType &&
@@ -175,6 +183,14 @@ export class DocumentsService {
       .filter((doc) => this.canView(doc, user))
       .map((doc) => ({ ...serializeDocument(doc), resourceType: doc.resourceType }))
       .filter((doc) => !filters.tag || (Array.isArray(doc.tags) && (doc.tags as string[]).includes(filters.tag!)));
+
+    if (filters.sharedWithMe) {
+      entries = entries.filter(
+        (doc) =>
+          doc.createdBy !== user.id &&
+          doc.accessGrants.some((g) => g.accessType === "user" && g.userId === user.id),
+      );
+    }
 
     // Department filter only applies to resource types that actually carry a department;
     // project/task documents are filtered via their parent's department in application code
@@ -234,7 +250,14 @@ export class DocumentsService {
       entries = [...entries, ...mapped].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     }
 
-    return entries;
+    // Filtering/merging above happens in application code (visibility check, tag filter, legacy
+    // ContractDocument merge), so — unlike the plain-Prisma-model list endpoints — pagination has
+    // to slice the final assembled array rather than push skip/take into the query itself.
+    if (!filters.page && !filters.pageSize) return entries;
+    const page = filters.page && filters.page > 0 ? filters.page : 1;
+    const pageSize = filters.pageSize && filters.pageSize > 0 ? Math.min(filters.pageSize, 100) : 25;
+    const start = (page - 1) * pageSize;
+    return { data: entries.slice(start, start + pageSize), total: entries.length, page, pageSize };
   }
 
   async findOne(id: string, user: AuthenticatedUser) {

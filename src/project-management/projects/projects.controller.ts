@@ -17,6 +17,7 @@ import { UpdateRaidEntryDto } from "./dto/update-raid-entry.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
+import { PaginationQueryDto } from "../../common/pagination";
 
 @Controller("projects")
 export class ProjectsController {
@@ -27,11 +28,18 @@ export class ProjectsController {
   @Get()
   @Roles()
   findAll(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("status") status?: ProjectStatus,
     @Query("clientId") clientId?: string,
+    @Query("sharedWithMe") sharedWithMe?: string,
+    @Query() pagination?: PaginationQueryDto,
   ) {
-    return this.projectsService.findAll({ departmentId, status, clientId });
+    return this.projectsService.findAll(
+      { departmentId, status, clientId, sharedWithMe: sharedWithMe === "true" },
+      pagination,
+      user,
+    );
   }
 
   @Get(":id")
@@ -56,10 +64,14 @@ export class ProjectsController {
     return this.projectsService.update(id, dto, user);
   }
 
+  // Department-scoped, same as update()/create() above — system_admin/ceo can delete any
+  // project, a department's own staff can delete their own department's projects, enforced in
+  // the service via assertDepartmentAccess (not just the role list here, since that alone
+  // can't tell "your department" apart from "any department with a matching role").
   @Delete(":id")
-  @Roles("system_admin")
-  remove(@Param("id") id: string) {
-    return this.projectsService.remove(id);
+  @Roles("finance", "hr", "it", "marketing", "tender")
+  remove(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.projectsService.remove(id, user);
   }
 
   @Get(":id/financials")

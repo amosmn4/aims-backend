@@ -1,5 +1,6 @@
-import { Injectable } from "@nestjs/common";
+import { BadRequestException, Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
+import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import type { CreateClientDto } from "./dto/create-client.dto";
 import type { UpdateClientDto } from "./dto/update-client.dto";
 import type { CreateContactDto } from "./dto/create-contact.dto";
@@ -9,8 +10,8 @@ import type { UpdateContactDto } from "./dto/update-contact.dto";
 export class ClientsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  findAll() {
-    return this.prisma.client.findMany({ orderBy: { name: "asc" } });
+  findAll(pagination: PaginationQueryDto = {}) {
+    return maybePaginate(this.prisma.client, { orderBy: { name: "asc" } }, pagination);
   }
 
   create(dto: CreateClientDto) {
@@ -21,7 +22,19 @@ export class ClientsService {
     return this.prisma.client.update({ where: { id }, data: dto });
   }
 
-  remove(id: string) {
+  // Contract/Invoice both use onDelete: Restrict against Client, so a plain delete throws a raw
+  // FK error the moment either exists — pre-check and name the blockers instead.
+  async remove(id: string) {
+    const [contractCount, invoiceCount] = await Promise.all([
+      this.prisma.contract.count({ where: { clientId: id } }),
+      this.prisma.invoice.count({ where: { clientId: id } }),
+    ]);
+    if (contractCount > 0 || invoiceCount > 0) {
+      const parts: string[] = [];
+      if (contractCount > 0) parts.push(`${contractCount} contract${contractCount === 1 ? "" : "s"}`);
+      if (invoiceCount > 0) parts.push(`${invoiceCount} invoice${invoiceCount === 1 ? "" : "s"}`);
+      throw new BadRequestException(`Can't delete this client — it still has ${parts.join(" and ")}.`);
+    }
     return this.prisma.client.delete({ where: { id } });
   }
 

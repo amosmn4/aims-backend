@@ -1,10 +1,16 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import type { BlogPost } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { StorageService } from "../../storage/storage.service";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateBlogPostDto } from "./dto/create-blog-post.dto";
 import type { UpdateBlogPostDto } from "./dto/update-blog-post.dto";
+import type { EngagementType } from "./dto/record-engagement.dto";
 
 const KEY_PREFIX = "blog";
 
@@ -15,16 +21,22 @@ const ALLOWED_VIDEO_MIME_TYPES = new Set(["video/mp4", "video/webm"]);
 const MAX_VIDEO_SIZE_BYTES = 50 * 1024 * 1024;
 
 function slugify(title: string): string {
-  return title
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80) || "post";
+  return (
+    title
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "post"
+  );
 }
 
-function avgTimeSpent(post: Pick<BlogPost, "totalTimeSpentSeconds" | "timeSpentSamples">): number | null {
-  return post.timeSpentSamples > 0 ? Math.round(post.totalTimeSpentSeconds / post.timeSpentSamples) : null;
+function avgTimeSpent(
+  post: Pick<BlogPost, "totalTimeSpentSeconds" | "timeSpentSamples">,
+): number | null {
+  return post.timeSpentSamples > 0
+    ? Math.round(post.totalTimeSpentSeconds / post.timeSpentSamples)
+    : null;
 }
 
 // Field names here deliberately mirror the amsol.africa site's MDX frontmatter shape
@@ -216,26 +228,22 @@ export class BlogService {
     return { key: `${KEY_PREFIX}/${post.videoPath}`, mimeType: post.videoMimeType };
   }
 
-  /* ---------- Public (unauthenticated) ---------- */
+  /* ---------- Public (API-key authenticated — see PublicBlogApiKeyGuard) ---------- */
 
-  async findPublished(limit: number, offset: number) {
+  // The one read call the website makes: every published post, full content included, on every
+  // item — not just a summary list — so the site never needs a second "get one post" round trip.
+  // Cheap enough to send whole: blog volume is posts-per-week, not rows-at-scale, and the site is
+  // expected to poll this every 30-60s (or on page load), not hold a connection open.
+  async findPublishedFeed() {
     const posts = await this.prisma.blogPost.findMany({
       where: { status: "published" },
       orderBy: { publishedAt: "desc" },
-      take: limit,
-      skip: offset,
     });
-    return posts.map(mapPublicSummary);
+    return posts.map(mapPublicDetail);
   }
 
-  async findPublishedBySlug(slug: string) {
-    const post = await this.prisma.blogPost.findUnique({ where: { slug } });
-    if (!post || post.status !== "published") {
-      throw new NotFoundException("Post not found");
-    }
-    return mapPublicDetail(post);
-  }
-
+  // Media stays unauthenticated (see the guard's own comment) — the published-status check here
+  // is the only gate: draft images/videos are never reachable by id-guessing.
   async getImageForPublic(postId: string) {
     const post = await this.prisma.blogPost.findUniqueOrThrow({ where: { id: postId } });
     if (post.status !== "published") {
@@ -252,38 +260,28 @@ export class BlogService {
     return this.resolveVideoFile(post);
   }
 
-  private async publishedPostOrThrow(slug: string) {
+  // One write call replacing the old four (view/like/share/time-spent) — `type` picks the
+  // counter. Returns the updated post so the site can optimistically refresh the number it just
+  // incremented without waiting for the next feed poll.
+  async recordEngagement(slug: string, type: EngagementType, seconds?: number) {
     const post = await this.prisma.blogPost.findUnique({ where: { slug } });
     if (!post || post.status !== "published") {
       throw new NotFoundException("Post not found");
     }
-    return post;
-  }
 
-  async recordView(slug: string) {
-    const post = await this.publishedPostOrThrow(slug);
-    const updated = await this.prisma.blogPost.update({ where: { id: post.id }, data: { views: { increment: 1 } } });
-    return mapPublicSummary(updated);
-  }
+    const data =
+      type === "view"
+        ? { views: { increment: 1 } }
+        : type === "like"
+          ? { likes: { increment: 1 } }
+          : type === "share"
+            ? { shares: { increment: 1 } }
+            : {
+                totalTimeSpentSeconds: { increment: seconds ?? 0 },
+                timeSpentSamples: { increment: 1 },
+              };
 
-  async recordLike(slug: string) {
-    const post = await this.publishedPostOrThrow(slug);
-    const updated = await this.prisma.blogPost.update({ where: { id: post.id }, data: { likes: { increment: 1 } } });
-    return mapPublicSummary(updated);
-  }
-
-  async recordShare(slug: string) {
-    const post = await this.publishedPostOrThrow(slug);
-    const updated = await this.prisma.blogPost.update({ where: { id: post.id }, data: { shares: { increment: 1 } } });
-    return mapPublicSummary(updated);
-  }
-
-  async recordTimeSpent(slug: string, seconds: number) {
-    const post = await this.publishedPostOrThrow(slug);
-    const updated = await this.prisma.blogPost.update({
-      where: { id: post.id },
-      data: { totalTimeSpentSeconds: { increment: seconds }, timeSpentSamples: { increment: 1 } },
-    });
-    return mapPublicSummary(updated);
+    const updated = await this.prisma.blogPost.update({ where: { id: post.id }, data });
+    return mapPublicDetail(updated);
   }
 }
