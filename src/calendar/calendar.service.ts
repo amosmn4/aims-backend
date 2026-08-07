@@ -1,6 +1,8 @@
 import { Injectable } from "@nestjs/common";
 import type { TenderStage } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { isAdminOrCeo } from "../common/is-admin-or-ceo";
+import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 
 export type DeadlineType = "tender_submission" | "bond_expiry" | "contract_renewal" | "task_due";
 
@@ -19,13 +21,24 @@ const OPEN_TENDER_STAGES: TenderStage[] = ["identified", "applying", "submitted"
 export class CalendarService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async listDeadlines(from: Date, to: Date, departmentId?: string): Promise<DeadlineItem[]> {
+  // CEO/system_admin get the department (or company-wide) calendar, same as before. Everyone
+  // else gets *their own* calendar only — deadlines on tenders/contracts they account-manage,
+  // and tasks assigned to them — not everything the rest of their department has on deadline.
+  async listDeadlines(
+    from: Date,
+    to: Date,
+    departmentId: string | undefined,
+    viewer: AuthenticatedUser,
+  ): Promise<DeadlineItem[]> {
+    const mine = !isAdminOrCeo(viewer);
+
     const [tenders, bonds, contracts, tasks] = await Promise.all([
       this.prisma.tender.findMany({
         where: {
           stage: { in: OPEN_TENDER_STAGES },
           submissionDeadline: { gte: from, lte: to },
           ...(departmentId && { departmentId }),
+          ...(mine && { accountManagerId: viewer.id }),
         },
         select: { id: true, title: true, submissionDeadline: true },
       }),
@@ -33,6 +46,7 @@ export class CalendarService {
         where: {
           expiryDate: { gte: from, lte: to },
           ...(departmentId && { tender: { departmentId } }),
+          ...(mine && { tender: { accountManagerId: viewer.id } }),
         },
         select: {
           id: true,
@@ -42,7 +56,12 @@ export class CalendarService {
         },
       }),
       this.prisma.contract.findMany({
-        where: { status: "active", endDate: { gte: from, lte: to }, ...(departmentId && { departmentId }) },
+        where: {
+          status: "active",
+          endDate: { gte: from, lte: to },
+          ...(departmentId && { departmentId }),
+          ...(mine && { accountManagerId: viewer.id }),
+        },
         select: { id: true, title: true, endDate: true },
       }),
       this.prisma.task.findMany({
@@ -50,6 +69,7 @@ export class CalendarService {
           status: { not: "completed" },
           dueDate: { gte: from, lte: to },
           ...(departmentId && { project: { departmentId } }),
+          ...(mine && { assigneeId: viewer.id }),
         },
         select: { id: true, title: true, dueDate: true, projectId: true },
       }),

@@ -51,7 +51,15 @@ const envSchema = z.object({
 export type EnvConfig = z.infer<typeof envSchema>;
 
 export function validateEnv(config: Record<string, unknown>): EnvConfig {
-  const result = envSchema.safeParse(config);
+  // `KEY=""` in .env (the placeholder style .env.example uses for every optional integration)
+  // parses as the empty string, not undefined — `.optional()` only forgives a key that's absent
+  // entirely, so every optional `.min(1)` field above was failing boot the moment its placeholder
+  // was left blank instead of removed. Blank out to undefined here so "unset" and "set to empty"
+  // are treated the same, once, for every field, instead of relaxing each schema individually.
+  const withBlanksStripped = Object.fromEntries(
+    Object.entries(config).map(([key, value]) => [key, value === "" ? undefined : value]),
+  );
+  const result = envSchema.safeParse(withBlanksStripped);
   if (!result.success) {
     const issues = result.error.issues
       .map((issue) => `  - ${issue.path.join(".")}: ${issue.message}`)
