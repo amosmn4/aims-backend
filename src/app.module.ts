@@ -33,6 +33,7 @@ import { SearchModule } from "./search/search.module";
 import { EngagementsModule } from "./engagements/engagements.module";
 import { TicketsModule } from "./it/tickets/tickets.module";
 import { HrmsLicensesModule } from "./it/hrms-licenses/hrms-licenses.module";
+import { InventoryModule } from "./it/inventory/inventory.module";
 import { CampaignsModule } from "./marketing/campaigns/campaigns.module";
 import { CalendarModule } from "./calendar/calendar.module";
 
@@ -71,6 +72,7 @@ import { CalendarModule } from "./calendar/calendar.module";
     EngagementsModule,
     TicketsModule,
     HrmsLicensesModule,
+    InventoryModule,
     CampaignsModule,
     CalendarModule,
   ],

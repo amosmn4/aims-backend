@@ -192,9 +192,50 @@ model Office {
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
-  users User[]
+  users          User[]
+  inventoryItems InventoryItem[]
 
   @@map("offices")
+}
+
+enum InventoryCategory {
+  laptop
+  desktop
+  monitor
+  printer
+  peripheral
+  other
+}
+
+enum InventoryStatus {
+  in_use
+  in_storage
+  under_repair
+  retired
+}
+
+model InventoryItem {
+  id             String            @id @default(uuid()) @db.Char(36)
+  assetTag       String            @unique @map("asset_tag")
+  deviceName     String            @map("device_name")
+  description    String?           @db.Text
+  category       InventoryCategory
+  status         InventoryStatus   @default(in_use)
+  brand          String?
+  model          String?
+  serialNumber   String?           @map("serial_number")
+  assignedTo     String?           @map("assigned_to")
+  officeId       String?           @map("office_id") @db.Char(36)
+  purchaseDate   DateTime?         @map("purchase_date")
+  warrantyExpiry DateTime?         @map("warranty_expiry")
+  notes          String?           @db.Text
+  createdAt      DateTime          @default(now()) @map("created_at")
+  updatedAt      DateTime          @updatedAt @map("updated_at")
+
+  office Office? @relation(fields: [officeId], references: [id], onDelete: SetNull)
+
+  @@index([officeId])
+  @@map("inventory_items")
 }
 
 model Department {
@@ -216,6 +257,7 @@ model Department {
   documentAccessGrants DocumentAccessGrant[]
   tenders              Tender[]
   clientRequests       ClientRequest[]
+  serviceLines         ServiceLine[]
 
   @@map("departments")
 }
@@ -365,20 +407,23 @@ model ClientContact {
 }
 
 model ServiceLine {
-  id          String   @id @default(uuid()) @db.Char(36)
-  code        String   @unique
-  name        String
-  isRecurring Boolean  @default(false) @map("is_recurring")
-  isActive    Boolean  @default(true) @map("is_active")
-  sortOrder   Int      @default(0) @map("sort_order")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id           String   @id @default(uuid()) @db.Char(36)
+  code         String   @unique
+  name         String
+  departmentId String   @map("department_id") @db.Char(36)
+  isRecurring  Boolean  @default(false) @map("is_recurring")
+  isActive     Boolean  @default(true) @map("is_active")
+  sortOrder    Int      @default(0) @map("sort_order")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
+  department     Department      @relation(fields: [departmentId], references: [id])
   invoices       Invoice[]
   contracts      Contract[]
   tenders        Tender[]
   clientRequests ClientRequest[]
 
+  @@index([departmentId])
   @@map("service_lines")
 }
 
