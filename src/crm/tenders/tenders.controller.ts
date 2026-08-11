@@ -22,6 +22,7 @@ import { SaveAsTemplateDto } from "./dto/save-as-template.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
+import { PaginationQueryDto } from "../../common/pagination";
 
 const WRITE_ROLES = ["finance", "hr", "it", "marketing", "tender"] as const;
 
@@ -41,6 +42,7 @@ export class TendersController {
     @Query("q") q?: string,
     @Query("deadlineFrom") deadlineFrom?: string,
     @Query("deadlineTo") deadlineTo?: string,
+    @Query() pagination?: PaginationQueryDto,
     @CurrentUser() user?: AuthenticatedUser,
   ) {
     return this.tendersService.findAll(
@@ -54,6 +56,7 @@ export class TendersController {
         deadlineTo,
       },
       user!,
+      pagination,
     );
   }
 
@@ -65,7 +68,12 @@ export class TendersController {
     @Query("deadlineFrom") deadlineFrom?: string,
     @Query("deadlineTo") deadlineTo?: string,
   ) {
-    return this.tendersService.pipelineSummary({ departmentId, serviceLineId, deadlineFrom, deadlineTo });
+    return this.tendersService.pipelineSummary({
+      departmentId,
+      serviceLineId,
+      deadlineFrom,
+      deadlineTo,
+    });
   }
 
   @Get("time-metrics")
@@ -76,7 +84,12 @@ export class TendersController {
     @Query("deadlineFrom") deadlineFrom?: string,
     @Query("deadlineTo") deadlineTo?: string,
   ) {
-    return this.tendersService.timeMetrics({ departmentId, serviceLineId, deadlineFrom, deadlineTo });
+    return this.tendersService.timeMetrics({
+      departmentId,
+      serviceLineId,
+      deadlineFrom,
+      deadlineTo,
+    });
   }
 
   @Get(":id")
@@ -93,7 +106,11 @@ export class TendersController {
 
   @Patch(":id")
   @Roles(...WRITE_ROLES)
-  update(@Param("id") id: string, @Body() dto: UpdateTenderDto, @CurrentUser() user: AuthenticatedUser) {
+  update(
+    @Param("id") id: string,
+    @Body() dto: UpdateTenderDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
     return this.tendersService.update(id, dto, user);
   }
 
@@ -237,7 +254,11 @@ export class TendersController {
 
   @Post(":id/bonds")
   @Roles(...WRITE_ROLES)
-  createBond(@Param("id") id: string, @Body() dto: CreateTenderBondDto, @CurrentUser() user: AuthenticatedUser) {
+  createBond(
+    @Param("id") id: string,
+    @Body() dto: CreateTenderBondDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
     return this.tendersService.createBond(id, dto, user);
   }
 

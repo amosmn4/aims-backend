@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import { TicketsService } from "./tickets.service";
 import { CreateTicketDto } from "./dto/create-ticket.dto";
 import { UpdateTicketDto } from "./dto/update-ticket.dto";
@@ -6,6 +6,7 @@ import { UpdateTicketStatusDto } from "./dto/update-ticket-status.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
+import { PaginationQueryDto } from "../../common/pagination";
 
 @Controller("tickets")
 export class TicketsController {
@@ -13,8 +14,8 @@ export class TicketsController {
 
   @Get()
   @Roles()
-  findAll(@CurrentUser() user: AuthenticatedUser) {
-    return this.ticketsService.findAll(user);
+  findAll(@CurrentUser() user: AuthenticatedUser, @Query() pagination?: PaginationQueryDto) {
+    return this.ticketsService.findAll(user, pagination);
   }
 
   @Get(":id")

@@ -5,6 +5,7 @@ import * as bcrypt from "bcrypt";
 import * as crypto from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import type { AuthenticatedUser } from "./types/authenticated-user";
+import type { TtlString } from "./ttl.util";
 
 const SALT_ROUNDS = 10;
 
@@ -77,15 +78,19 @@ export class AuthService {
     const payload = { sub: user.id };
     const accessToken = this.jwt.sign(payload, {
       secret: this.config.getOrThrow<string>("JWT_ACCESS_SECRET"),
-      expiresIn: this.config.get<string>("JWT_ACCESS_TTL", "15m") as `${number}m`,
+      expiresIn: this.config.get<string>("JWT_ACCESS_TTL", "15m") as TtlString,
     });
     const refreshToken = this.jwt.sign(payload, {
       secret: this.config.getOrThrow<string>("JWT_REFRESH_SECRET"),
-      expiresIn: this.config.get<string>("JWT_REFRESH_TTL", "7d") as `${number}d`,
+      expiresIn: this.config.get<string>("JWT_REFRESH_TTL", "7d") as TtlString,
     });
     return { accessToken, refreshToken };
   }
 
+  // Deliberately does NOT issue a new refresh token — only a new access token. The refresh
+  // token (and its cookie) set at login is left untouched here, so JWT_REFRESH_TTL is a real
+  // absolute ceiling on how long a session can last without a fresh login: "reload the tab every
+  // few minutes forever" no longer resets the clock to another full week every time it does.
   async refreshAccessToken(refreshToken: string) {
     let payload: { sub: string };
     try {
@@ -104,12 +109,14 @@ export class AuthService {
       throw new UnauthorizedException("Invalid or expired refresh token");
     }
 
-    return this.issueTokens({
-      id: user.id,
-      email: user.email,
-      roles: user.roles.map((r) => r.role),
-      departmentId: user.departmentId,
-    });
+    const accessToken = this.jwt.sign(
+      { sub: user.id },
+      {
+        secret: this.config.getOrThrow<string>("JWT_ACCESS_SECRET"),
+        expiresIn: this.config.get<string>("JWT_ACCESS_TTL", "15m") as TtlString,
+      },
+    );
+    return { accessToken };
   }
 
   async getProfile(userId: string) {

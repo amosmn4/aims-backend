@@ -6,6 +6,7 @@ import { CreateFollowUpDto } from "./dto/create-follow-up.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
+import { PaginationQueryDto } from "../../common/pagination";
 
 @Controller("invoices")
 @Roles("finance")
@@ -13,8 +14,8 @@ export class InvoicesController {
   constructor(private readonly invoicesService: InvoicesService) {}
 
   @Get()
-  findAll(@Query("departmentId") departmentId?: string) {
-    return this.invoicesService.findAll({ departmentId });
+  findAll(@Query("departmentId") departmentId?: string, @Query() pagination?: PaginationQueryDto) {
+    return this.invoicesService.findAll({ departmentId }, pagination);
   }
 
   @Post()

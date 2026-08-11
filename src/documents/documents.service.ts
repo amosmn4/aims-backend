@@ -1,5 +1,15 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import type { Document, DocumentAccessGrant, DocumentResourceType, DocumentVersion } from "@prisma/client";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
+import type {
+  Document,
+  DocumentAccessGrant,
+  DocumentResourceType,
+  DocumentVersion,
+} from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { StorageService } from "../storage/storage.service";
 import { assertDepartmentAccess } from "../common/assert-department-access";
@@ -132,13 +142,17 @@ export class DocumentsService {
   }
 
   /** Zero grants = visible to everyone; otherwise a match on the grant set is required. */
-  private canView(doc: { createdBy: string | null; accessGrants: DocumentAccessGrant[] }, user: AuthenticatedUser) {
+  private canView(
+    doc: { createdBy: string | null; accessGrants: DocumentAccessGrant[] },
+    user: AuthenticatedUser,
+  ) {
     if (isAdminOrCeo(user)) return true;
     if (doc.createdBy === user.id) return true;
     if (doc.accessGrants.length === 0) return true;
     return doc.accessGrants.some((g) => {
       if (g.accessType === "everyone") return true;
-      if (g.accessType === "department") return !!user.departmentId && g.departmentId === user.departmentId;
+      if (g.accessType === "department")
+        return !!user.departmentId && g.departmentId === user.departmentId;
       if (g.accessType === "user") return g.userId === user.id;
       return false;
     });
@@ -165,7 +179,9 @@ export class DocumentsService {
     const documents = await this.prisma.document.findMany({
       where: {
         ...(filters.resourceType &&
-          filters.resourceType !== "contract" && { resourceType: filters.resourceType as DocumentResourceType }),
+          filters.resourceType !== "contract" && {
+            resourceType: filters.resourceType as DocumentResourceType,
+          }),
         ...(filters.resourceId && { resourceId: filters.resourceId }),
         ...(filters.mine && { createdBy: user.id }),
         ...(filters.q && {
@@ -182,7 +198,11 @@ export class DocumentsService {
     let entries: LibraryEntry[] = documents
       .filter((doc) => this.canView(doc, user))
       .map((doc) => ({ ...serializeDocument(doc), resourceType: doc.resourceType }))
-      .filter((doc) => !filters.tag || (Array.isArray(doc.tags) && (doc.tags as string[]).includes(filters.tag!)));
+      .filter(
+        (doc) =>
+          !filters.tag ||
+          (Array.isArray(doc.tags) && (doc.tags as string[]).includes(filters.tag!)),
+      );
 
     if (filters.sharedWithMe) {
       entries = entries.filter(
@@ -197,22 +217,31 @@ export class DocumentsService {
     // since Document has no direct department column.
     if (filters.departmentId) {
       const [projectIds, taskProjectIds] = await Promise.all([
-        this.prisma.project.findMany({ where: { departmentId: filters.departmentId }, select: { id: true } }),
+        this.prisma.project.findMany({
+          where: { departmentId: filters.departmentId },
+          select: { id: true },
+        }),
         this.prisma.task.findMany({
           where: { project: { departmentId: filters.departmentId } },
           select: { id: true },
         }),
       ]);
-      const allowedIds = new Set([...projectIds.map((p) => p.id), ...taskProjectIds.map((t) => t.id)]);
-      entries = entries.filter(
-        (doc) => doc.resourceType !== "project" && doc.resourceType !== "task" ? true : allowedIds.has(doc.resourceId),
+      const allowedIds = new Set([
+        ...projectIds.map((p) => p.id),
+        ...taskProjectIds.map((t) => t.id),
+      ]);
+      entries = entries.filter((doc) =>
+        doc.resourceType !== "project" && doc.resourceType !== "task"
+          ? true
+          : allowedIds.has(doc.resourceId),
       );
     }
 
     // Contracts documents live in the legacy ContractDocument table — merge them in so the
     // central library shows everything, unless the caller explicitly scoped to a non-contract
     // resourceType or a specific resourceId (contracts have no resourceId query support here).
-    const includeContracts = !filters.resourceId && (!filters.resourceType || filters.resourceType === "contract");
+    const includeContracts =
+      !filters.resourceId && (!filters.resourceType || filters.resourceType === "contract");
     if (includeContracts && !filters.tag) {
       const contractDocs = await this.prisma.contractDocument.findMany({
         where: {
@@ -247,7 +276,9 @@ export class DocumentsService {
           createdAt: cd.createdAt,
         },
       }));
-      entries = [...entries, ...mapped].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      entries = [...entries, ...mapped].sort(
+        (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+      );
     }
 
     // Filtering/merging above happens in application code (visibility check, tag filter, legacy
@@ -255,7 +286,8 @@ export class DocumentsService {
     // to slice the final assembled array rather than push skip/take into the query itself.
     if (!filters.page && !filters.pageSize) return entries;
     const page = filters.page && filters.page > 0 ? filters.page : 1;
-    const pageSize = filters.pageSize && filters.pageSize > 0 ? Math.min(filters.pageSize, 100) : 25;
+    const pageSize =
+      filters.pageSize && filters.pageSize > 0 ? Math.min(filters.pageSize, 100) : 25;
     const start = (page - 1) * pageSize;
     return { data: entries.slice(start, start + pageSize), total: entries.length, page, pageSize };
   }
@@ -306,12 +338,23 @@ export class DocumentsService {
         title: dto.title ?? file.originalname,
         description: dto.description,
         category: dto.category ?? "other",
-        tags: dto.tags ? dto.tags.split(",").map((t) => t.trim()).filter(Boolean) : undefined,
+        tags: dto.tags
+          ? dto.tags
+              .split(",")
+              .map((t) => t.trim())
+              .filter(Boolean)
+          : undefined,
         createdBy: user.id,
       },
     });
 
-    const storagePath = await this.writeVersionFile(dto.resourceType, dto.resourceId, doc.id, 1, file);
+    const storagePath = await this.writeVersionFile(
+      dto.resourceType,
+      dto.resourceId,
+      doc.id,
+      1,
+      file,
+    );
     const version = await this.prisma.documentVersion.create({
       data: {
         documentId: doc.id,
@@ -337,12 +380,21 @@ export class DocumentsService {
     const doc = await this.prisma.document.findUniqueOrThrow({ where: { id: documentId } });
     await this.assertCanAttach(doc.resourceType, doc.resourceId, user);
 
-    const versionNo = ((await this.prisma.documentVersion.aggregate({
-      where: { documentId },
-      _max: { versionNo: true },
-    }))._max.versionNo ?? 0) + 1;
+    const versionNo =
+      ((
+        await this.prisma.documentVersion.aggregate({
+          where: { documentId },
+          _max: { versionNo: true },
+        })
+      )._max.versionNo ?? 0) + 1;
 
-    const storagePath = await this.writeVersionFile(doc.resourceType, doc.resourceId, doc.id, versionNo, file);
+    const storagePath = await this.writeVersionFile(
+      doc.resourceType,
+      doc.resourceId,
+      doc.id,
+      versionNo,
+      file,
+    );
     const version = await this.prisma.documentVersion.create({
       data: {
         documentId: doc.id,
@@ -378,7 +430,11 @@ export class DocumentsService {
     return versions.map(serializeVersion);
   }
 
-  async getFileForDownload(documentId: string, versionId: string | undefined, user: AuthenticatedUser) {
+  async getFileForDownload(
+    documentId: string,
+    versionId: string | undefined,
+    user: AuthenticatedUser,
+  ) {
     const doc = await this.prisma.document.findUniqueOrThrow({
       where: { id: documentId },
       include: { accessGrants: true },
@@ -389,7 +445,9 @@ export class DocumentsService {
 
     const version = versionId
       ? await this.prisma.documentVersion.findUniqueOrThrow({ where: { id: versionId } })
-      : await this.prisma.documentVersion.findUniqueOrThrow({ where: { id: doc.latestVersionId! } });
+      : await this.prisma.documentVersion.findUniqueOrThrow({
+          where: { id: doc.latestVersionId! },
+        });
 
     return { fileName: version.fileName, key: `${KEY_PREFIX}/${version.storagePath}` };
   }
@@ -419,20 +477,40 @@ export class DocumentsService {
     await Promise.all(versions.map((v) => this.storage.delete(`${KEY_PREFIX}/${v.storagePath}`)));
     // latestVersionId points at a DocumentVersion row, so it must be cleared before the
     // version rows (and then the document itself) can be deleted.
-    await this.prisma.document.update({ where: { id: documentId }, data: { latestVersionId: null } });
+    await this.prisma.document.update({
+      where: { id: documentId },
+      data: { latestVersionId: null },
+    });
     return this.prisma.document.delete({ where: { id: documentId } });
   }
 
   /** Called by Projects/Tasks/FinanceReports services before deleting the parent resource,
    * since there is no DB-level FK from Document to those tables (resourceId is polymorphic). */
   async deleteAllForResource(resourceType: DocumentResourceType, resourceId: string) {
-    const docs = await this.prisma.document.findMany({ where: { resourceType, resourceId } });
-    for (const doc of docs) {
-      const versions = await this.prisma.documentVersion.findMany({ where: { documentId: doc.id } });
-      await Promise.all(versions.map((v) => this.storage.delete(`${KEY_PREFIX}/${v.storagePath}`)));
-      await this.prisma.document.update({ where: { id: doc.id }, data: { latestVersionId: null } });
-      await this.prisma.document.delete({ where: { id: doc.id } });
-    }
+    const docs = await this.prisma.document.findMany({
+      where: { resourceType, resourceId },
+      select: { id: true },
+    });
+    if (docs.length === 0) return;
+    const docIds = docs.map((d) => d.id);
+
+    // Batched instead of one findMany/update/delete per document — a project with dozens of
+    // attached documents used to mean dozens of sequential round trips here. DocumentVersion
+    // rows cascade-delete with their Document at the DB level (see the schema's onDelete:
+    // Cascade), so the only reason to fetch versions up front is to know their storage paths
+    // before the rows disappear.
+    const versions = await this.prisma.documentVersion.findMany({
+      where: { documentId: { in: docIds } },
+      select: { storagePath: true },
+    });
+    await Promise.all(versions.map((v) => this.storage.delete(`${KEY_PREFIX}/${v.storagePath}`)));
+    // latestVersionId points at a DocumentVersion row, so it must be cleared before the
+    // version rows (and then the documents themselves) can be deleted.
+    await this.prisma.document.updateMany({
+      where: { id: { in: docIds } },
+      data: { latestVersionId: null },
+    });
+    await this.prisma.document.deleteMany({ where: { id: { in: docIds } } });
   }
 
   async getAccess(documentId: string, user: AuthenticatedUser) {

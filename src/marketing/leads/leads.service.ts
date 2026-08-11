@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { maskUserRef } from "../../common/mask-user-ref";
+import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import { ClientRequestsService } from "../../crm/client-requests/client-requests.service";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateLeadDto } from "./dto/create-lead.dto";
@@ -15,11 +16,15 @@ export class LeadsService {
     private readonly clientRequestsService: ClientRequestsService,
   ) {}
 
-  findAll(filters: { stage?: string } = {}) {
-    return this.prisma.lead.findMany({
-      where: filters.stage ? { stage: filters.stage as never } : undefined,
-      orderBy: { createdAt: "desc" },
-    });
+  findAll(filters: { stage?: string } = {}, pagination: PaginationQueryDto = {}) {
+    return maybePaginate(
+      this.prisma.lead,
+      {
+        where: filters.stage ? { stage: filters.stage as never } : undefined,
+        orderBy: { createdAt: "desc" },
+      },
+      pagination,
+    );
   }
 
   findOne(id: string) {
@@ -42,11 +47,16 @@ export class LeadsService {
     const activities = await this.prisma.leadActivity.findMany({
       where: { leadId },
       include: {
-        creator: { select: { id: true, fullName: true, email: true, roles: { select: { role: true } } } },
+        creator: {
+          select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+        },
       },
       orderBy: { occurredAt: "desc" },
     });
-    return activities.map((a) => ({ ...a, creator: a.creator ? maskUserRef(a.creator, viewer) : null }));
+    return activities.map((a) => ({
+      ...a,
+      creator: a.creator ? maskUserRef(a.creator, viewer) : null,
+    }));
   }
 
   createActivity(leadId: string, dto: CreateLeadActivityDto, user: AuthenticatedUser) {
@@ -67,7 +77,11 @@ export class LeadsService {
   // If the converting marketer already knows which department this is for, dto.departmentId
   // routes it immediately (ClientRequestsService.create stamps stage "assigned" for us) instead
   // of leaving it unrouted for Operations/Tender to triage separately.
-  async convertToRequest(leadId: string, user: AuthenticatedUser, dto: ConvertLeadToRequestDto = {}) {
+  async convertToRequest(
+    leadId: string,
+    user: AuthenticatedUser,
+    dto: ConvertLeadToRequestDto = {},
+  ) {
     const lead = await this.prisma.lead.findUniqueOrThrow({ where: { id: leadId } });
     if (lead.convertedRequestId) {
       throw new BadRequestException("This lead has already been converted");

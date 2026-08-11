@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
+import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import type { CreateInvoiceDto } from "./dto/create-invoice.dto";
 import type { CreatePaymentDto } from "./dto/create-payment.dto";
 import type { CreateFollowUpDto } from "./dto/create-follow-up.dto";
@@ -10,13 +11,17 @@ export class InvoicesService {
 
   // departmentId filters via Invoice.contract.departmentId — Invoice has no direct department
   // column, it's only reachable through its (nullable) linked Contract.
-  findAll(filters: { departmentId?: string } = {}) {
-    return this.prisma.invoice.findMany({
-      where: {
-        ...(filters.departmentId && { contract: { departmentId: filters.departmentId } }),
+  findAll(filters: { departmentId?: string } = {}, pagination: PaginationQueryDto = {}) {
+    return maybePaginate(
+      this.prisma.invoice,
+      {
+        where: {
+          ...(filters.departmentId && { contract: { departmentId: filters.departmentId } }),
+        },
+        orderBy: { issueDate: "desc" },
       },
-      orderBy: { issueDate: "desc" },
-    });
+      pagination,
+    );
   }
 
   create(dto: CreateInvoiceDto, userId: string) {

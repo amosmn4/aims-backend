@@ -17,6 +17,7 @@ import { SetPasswordDto } from "./dto/set-password.dto";
 import { Public } from "./decorators/public.decorator";
 import { CurrentUser } from "./decorators/current-user.decorator";
 import type { AuthenticatedUser } from "./types/authenticated-user";
+import { parseTtlToMs } from "./ttl.util";
 
 const REFRESH_COOKIE = "aims_refresh_token";
 
@@ -33,7 +34,7 @@ export class AuthController {
       sameSite: "lax",
       secure: this.config.get("NODE_ENV") === "production",
       path: "/api/v1/auth",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      maxAge: parseTtlToMs(this.config.get<string>("JWT_REFRESH_TTL", "24h")),
     };
   }
 
@@ -55,16 +56,17 @@ export class AuthController {
     return { accessToken, user: authUser };
   }
 
+  // No `res.cookie(...)` here on purpose — see AuthService.refreshAccessToken's own comment.
+  // The refresh cookie set at login is left exactly as it was; this only ever hands back a new
+  // access token, so the session's real ceiling is JWT_REFRESH_TTL from the original login.
   @Public()
   @Post("refresh")
   @HttpCode(200)
-  async refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+  async refresh(@Req() req: Request) {
     const refreshToken = req.cookies?.[REFRESH_COOKIE];
     if (!refreshToken) throw new UnauthorizedException("No refresh token provided");
 
-    const { accessToken, refreshToken: newRefreshToken } =
-      await this.authService.refreshAccessToken(refreshToken);
-    res.cookie(REFRESH_COOKIE, newRefreshToken, this.refreshCookieOptions());
+    const { accessToken } = await this.authService.refreshAccessToken(refreshToken);
     return { accessToken };
   }
 

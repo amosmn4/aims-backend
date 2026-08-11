@@ -457,6 +457,8 @@ model Invoice {
   @@index([serviceLineId])
   @@index([contractId])
   @@index([issueDate])
+  // Backs the Debtors screen's overdue/outstanding filter (status + dueDate together).
+  @@index([status, dueDate])
   @@map("invoices")
 }
 
@@ -565,6 +567,10 @@ model Contract {
   invoices       Invoice[]
   projects       Project[]
 
+  // Unlike most FK columns here, status/end_date aren't foreign keys — MySQL doesn't index them
+  // for free, and both are hot: the Calendar's renewal-deadline query filters exactly this pair
+  // (status = active AND end_date BETWEEN …), and status alone backs every contracts-list filter.
+  @@index([status, endDate])
   @@map("contracts")
 }
 

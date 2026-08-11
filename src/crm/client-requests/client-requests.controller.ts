@@ -11,6 +11,7 @@ import { CreateActivityDto } from "./dto/create-activity.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
+import { PaginationQueryDto } from "../../common/pagination";
 
 // Any of the 5 delivery departments can be *routed* a request and then manage it from there.
 // Operations owns intake — creating and routing a request is restricted to operations — but
@@ -32,8 +33,12 @@ export class ClientRequestsController {
     @Query("q") q?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
+    @Query() pagination?: PaginationQueryDto,
   ) {
-    return this.requestsService.findAll({ departmentId, serviceLineId, stage, source, clientId, q, dateFrom, dateTo });
+    return this.requestsService.findAll(
+      { departmentId, serviceLineId, stage, source, clientId, q, dateFrom, dateTo },
+      pagination,
+    );
   }
 
   @Get("pipeline-summary")
@@ -83,13 +88,21 @@ export class ClientRequestsController {
 
   @Patch(":id")
   @Roles(...DEPT_WRITE_ROLES)
-  update(@Param("id") id: string, @Body() dto: UpdateClientRequestDto, @CurrentUser() user: AuthenticatedUser) {
+  update(
+    @Param("id") id: string,
+    @Body() dto: UpdateClientRequestDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
     return this.requestsService.update(id, dto, user);
   }
 
   @Patch(":id/route")
   @Roles("operations")
-  route(@Param("id") id: string, @Body() dto: RouteClientRequestDto, @CurrentUser() user: AuthenticatedUser) {
+  route(
+    @Param("id") id: string,
+    @Body() dto: RouteClientRequestDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
     return this.requestsService.route(id, dto, user);
   }
 

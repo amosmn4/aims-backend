@@ -4,6 +4,8 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { DocumentsService } from "../../documents/documents.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
 import { maskUserRef } from "../../common/mask-user-ref";
+import { TtlCache } from "../../common/ttl-cache";
+import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateTenderDto } from "./dto/create-tender.dto";
 import type { UpdateTenderDto } from "./dto/update-tender.dto";
@@ -23,7 +25,15 @@ import type { CreateTenderRequirementDto } from "./dto/create-tender-requirement
 import type { UpdateTenderRequirementDto } from "./dto/update-tender-requirement.dto";
 import type { SaveAsTemplateDto } from "./dto/save-as-template.dto";
 
-const ALL_STAGES: TenderStage[] = ["identified", "applying", "submitted", "evaluation", "won", "lost", "withdrawn"];
+const ALL_STAGES: TenderStage[] = [
+  "identified",
+  "applying",
+  "submitted",
+  "evaluation",
+  "won",
+  "lost",
+  "withdrawn",
+];
 
 export interface TenderFilters {
   departmentId?: string;
@@ -57,38 +67,64 @@ function buildWhere(filters: TenderFilters): Prisma.TenderWhereInput {
 
 @Injectable()
 export class TendersService {
+  private readonly pipelineSummaryCache = new TtlCache<
+    { stage: TenderStage; count: number; totalValue: number }[]
+  >(30_000);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly documentsService: DocumentsService,
   ) {}
 
-  async findAll(filters: TenderFilters, viewer: AuthenticatedUser) {
-    const tenders = await this.prisma.tender.findMany({
-      where: buildWhere(filters),
-      include: {
-        client: { select: { id: true, name: true } },
-        department: { select: { id: true, name: true, code: true } },
-        serviceLine: { select: { id: true, name: true } },
-        accountManager: {
-          select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+  async findAll(
+    filters: TenderFilters,
+    viewer: AuthenticatedUser,
+    pagination: PaginationQueryDto = {},
+  ) {
+    const result = await maybePaginate(
+      this.prisma.tender,
+      {
+        where: buildWhere(filters),
+        include: {
+          client: { select: { id: true, name: true } },
+          department: { select: { id: true, name: true, code: true } },
+          serviceLine: { select: { id: true, name: true } },
+          accountManager: {
+            select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+          },
+          // Just the status column, not the full checklist — cheap enough to include on every
+          // row so the pipeline board can show "X of Y requirements resolved" without an N+1
+          // request per card. Percent-complete is computed client-side from this, same as the
+          // Project Workspace's EVM/Gantt stats.
+          requirements: { select: { status: true } },
         },
-        // Just the status column, not the full checklist — cheap enough to include on every
-        // row so the pipeline board can show "X of Y requirements resolved" without an N+1
-        // request per card. Percent-complete is computed client-side from this, same as the
-        // Project Workspace's EVM/Gantt stats.
-        requirements: { select: { status: true } },
+        orderBy: { createdAt: "desc" },
       },
-      orderBy: { createdAt: "desc" },
-    });
-    return tenders.map((t) => ({
+      pagination,
+    );
+    // `maybePaginate`'s `any`-typed model param (see its own comment) widens the inferred row
+    // type past what `include` actually produced — cast at this one boundary rather than fight it.
+    const mask = (t: { accountManager: Parameters<typeof maskUserRef>[0] | null }) => ({
       ...t,
       accountManager: t.accountManager ? maskUserRef(t.accountManager, viewer) : null,
-    }));
+    });
+    const rows = (Array.isArray(result) ? result : result.data) as unknown as Parameters<
+      typeof mask
+    >[0][];
+    return Array.isArray(result) ? rows.map(mask) : { ...result, data: rows.map(mask) };
   }
 
   // Real backend-side aggregation (Prisma groupBy), not client-side math — backs both the
-  // Tender module's own funnel and the CEO dashboard's fixed funnel widget.
-  async pipelineSummary(filters: TenderFilters) {
+  // Tender module's own funnel and the CEO dashboard's fixed funnel widget. Cached for 30s per
+  // distinct filter set: this scan re-runs on every dashboard/reports/tender-index load, and the
+  // underlying counts change on the order of minutes, not seconds.
+  pipelineSummary(filters: TenderFilters) {
+    return this.pipelineSummaryCache.getOrSet(JSON.stringify(filters), () =>
+      this.computePipelineSummary(filters),
+    );
+  }
+
+  private async computePipelineSummary(filters: TenderFilters) {
     const rows = await this.prisma.tender.groupBy({
       by: ["stage"],
       where: buildWhere(filters),
@@ -137,12 +173,18 @@ export class TendersService {
         const decidedAt = t.wonAt ?? t.lostAt;
         if (decidedAt) toDecision.push(daysBetween(t.submittedAt, decidedAt.getTime()));
       } else if (t.stage === "identified" || t.stage === "applying") {
-        stalled.push({ id: t.id, title: t.title, stage: t.stage, days: daysBetween(t.createdAt, now) });
+        stalled.push({
+          id: t.id,
+          title: t.title,
+          stage: t.stage,
+          days: daysBetween(t.createdAt, now),
+        });
       }
     }
     stalled.sort((a, b) => b.days - a.days);
 
-    const avg = (xs: number[]) => (xs.length ? Math.round((xs.reduce((s, d) => s + d, 0) / xs.length) * 10) / 10 : null);
+    const avg = (xs: number[]) =>
+      xs.length ? Math.round((xs.reduce((s, d) => s + d, 0) / xs.length) * 10) / 10 : null;
 
     return {
       avgDaysToSubmit: avg(toSubmit),
@@ -172,7 +214,9 @@ export class TendersService {
   }
 
   private async assertTenderDeptAccess(departmentId: string, user: AuthenticatedUser) {
-    const department = await this.prisma.department.findUniqueOrThrow({ where: { id: departmentId } });
+    const department = await this.prisma.department.findUniqueOrThrow({
+      where: { id: departmentId },
+    });
     assertDepartmentAccess(department, user);
   }
 
@@ -213,7 +257,8 @@ export class TendersService {
         wonAt: dto.stage === "won" ? (dto.wonAt ? new Date(dto.wonAt) : now) : existing.wonAt,
         lostAt: dto.stage === "lost" ? now : existing.lostAt,
         withdrawnAt: dto.stage === "withdrawn" ? now : existing.withdrawnAt,
-        lostReason: dto.stage === "lost" || dto.stage === "withdrawn" ? dto.lostReason : existing.lostReason,
+        lostReason:
+          dto.stage === "lost" || dto.stage === "withdrawn" ? dto.lostReason : existing.lostReason,
       },
     });
   }
@@ -292,7 +337,9 @@ export class TendersService {
       tender.contract ??
       (await this.prisma.contract.create({
         data: {
-          contractNumber: dto.contractNumber ?? `CTR-${tender.referenceNumber ?? tender.id.slice(0, 8).toUpperCase()}`,
+          contractNumber:
+            dto.contractNumber ??
+            `CTR-${tender.referenceNumber ?? tender.id.slice(0, 8).toUpperCase()}`,
           title: tender.title,
           description: tender.description,
           clientId,
@@ -330,7 +377,11 @@ export class TendersService {
   async listResources(tenderId: string, viewer: AuthenticatedUser) {
     const resources = await this.prisma.tenderResource.findMany({
       where: { tenderId },
-      include: { user: { select: { id: true, fullName: true, email: true, roles: { select: { role: true } } } } },
+      include: {
+        user: {
+          select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+        },
+      },
       orderBy: { createdAt: "asc" },
     });
     return resources.map((r) => ({ ...r, user: maskUserRef(r.user, viewer) }));
@@ -342,7 +393,11 @@ export class TendersService {
 
     const resource = await this.prisma.tenderResource.create({
       data: { tenderId, ...dto },
-      include: { user: { select: { id: true, fullName: true, email: true, roles: { select: { role: true } } } } },
+      include: {
+        user: {
+          select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+        },
+      },
     });
     return { ...resource, user: maskUserRef(resource.user, user) };
   }
@@ -357,7 +412,11 @@ export class TendersService {
     const updated = await this.prisma.tenderResource.update({
       where: { id: resourceId },
       data: dto,
-      include: { user: { select: { id: true, fullName: true, email: true, roles: { select: { role: true } } } } },
+      include: {
+        user: {
+          select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+        },
+      },
     });
     return { ...updated, user: maskUserRef(updated.user, user) };
   }
@@ -376,7 +435,11 @@ export class TendersService {
   async listTimeEntries(tenderId: string, viewer: AuthenticatedUser) {
     const entries = await this.prisma.tenderTimeEntry.findMany({
       where: { tenderId },
-      include: { user: { select: { id: true, fullName: true, email: true, roles: { select: { role: true } } } } },
+      include: {
+        user: {
+          select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+        },
+      },
       orderBy: { entryDate: "desc" },
     });
     return entries.map((e) => ({ ...e, user: maskUserRef(e.user, viewer) }));
@@ -396,7 +459,11 @@ export class TendersService {
         notes: dto.notes,
         createdBy: user.id,
       },
-      include: { user: { select: { id: true, fullName: true, email: true, roles: { select: { role: true } } } } },
+      include: {
+        user: {
+          select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+        },
+      },
     });
     return { ...entry, user: maskUserRef(entry.user, user) };
   }
@@ -417,7 +484,11 @@ export class TendersService {
     const [resources, hoursByUser] = await Promise.all([
       this.prisma.tenderResource.findMany({
         where: { tenderId },
-        include: { user: { select: { id: true, fullName: true, email: true, roles: { select: { role: true } } } } },
+        include: {
+          user: {
+            select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+          },
+        },
       }),
       this.prisma.tenderTimeEntry.groupBy({
         by: ["userId"],
@@ -426,12 +497,19 @@ export class TendersService {
       }),
     ]);
 
-    const rateByUser = new Map(resources.map((r) => [r.userId, r.hourlyRate ? Number(r.hourlyRate) : null]));
+    const rateByUser = new Map(
+      resources.map((r) => [r.userId, r.hourlyRate ? Number(r.hourlyRate) : null]),
+    );
     const budgetedCost = resources.reduce(
-      (sum, r) => sum + (r.allocatedHours && r.hourlyRate ? Number(r.allocatedHours) * Number(r.hourlyRate) : 0),
+      (sum, r) =>
+        sum +
+        (r.allocatedHours && r.hourlyRate ? Number(r.allocatedHours) * Number(r.hourlyRate) : 0),
       0,
     );
-    const budgetedHours = resources.reduce((sum, r) => sum + (r.allocatedHours ? Number(r.allocatedHours) : 0), 0);
+    const budgetedHours = resources.reduce(
+      (sum, r) => sum + (r.allocatedHours ? Number(r.allocatedHours) : 0),
+      0,
+    );
 
     let actualCost = 0;
     let ratedHours = 0;
@@ -470,7 +548,10 @@ export class TendersService {
   /* ---------- Cost items (non-staff pursuit cost) ---------- */
 
   listCostItems(tenderId: string) {
-    return this.prisma.tenderCostItem.findMany({ where: { tenderId }, orderBy: { createdAt: "asc" } });
+    return this.prisma.tenderCostItem.findMany({
+      where: { tenderId },
+      orderBy: { createdAt: "asc" },
+    });
   }
 
   async createCostItem(tenderId: string, dto: CreateTenderCostItemDto, user: AuthenticatedUser) {
@@ -544,17 +625,28 @@ export class TendersService {
   /* ---------- Pricing items (bid price breakdown) ---------- */
 
   listPricingItems(tenderId: string) {
-    return this.prisma.tenderPricingItem.findMany({ where: { tenderId }, orderBy: { sortOrder: "asc" } });
+    return this.prisma.tenderPricingItem.findMany({
+      where: { tenderId },
+      orderBy: { sortOrder: "asc" },
+    });
   }
 
-  async createPricingItem(tenderId: string, dto: CreateTenderPricingItemDto, user: AuthenticatedUser) {
+  async createPricingItem(
+    tenderId: string,
+    dto: CreateTenderPricingItemDto,
+    user: AuthenticatedUser,
+  ) {
     const tender = await this.prisma.tender.findUniqueOrThrow({ where: { id: tenderId } });
     await this.assertTenderDeptAccess(tender.departmentId, user);
     const count = await this.prisma.tenderPricingItem.count({ where: { tenderId } });
     return this.prisma.tenderPricingItem.create({ data: { tenderId, ...dto, sortOrder: count } });
   }
 
-  async updatePricingItem(itemId: string, dto: UpdateTenderPricingItemDto, user: AuthenticatedUser) {
+  async updatePricingItem(
+    itemId: string,
+    dto: UpdateTenderPricingItemDto,
+    user: AuthenticatedUser,
+  ) {
     const item = await this.prisma.tenderPricingItem.findUniqueOrThrow({
       where: { id: itemId },
       include: { tender: true },
@@ -584,7 +676,10 @@ export class TendersService {
     ]);
 
     const otherCostTotal = costItems.reduce((sum, c) => sum + Number(c.amount), 0);
-    const bidPrice = pricingItems.reduce((sum, p) => sum + Number(p.quantity) * Number(p.unitPrice), 0);
+    const bidPrice = pricingItems.reduce(
+      (sum, p) => sum + Number(p.quantity) * Number(p.unitPrice),
+      0,
+    );
 
     return {
       humanCost: humanCost.budgetedCost,
@@ -599,7 +694,9 @@ export class TendersService {
   private async getCostSummaryTotalsOnly(tenderId: string) {
     const resources = await this.prisma.tenderResource.findMany({ where: { tenderId } });
     const budgetedCost = resources.reduce(
-      (sum, r) => sum + (r.allocatedHours && r.hourlyRate ? Number(r.allocatedHours) * Number(r.hourlyRate) : 0),
+      (sum, r) =>
+        sum +
+        (r.allocatedHours && r.hourlyRate ? Number(r.allocatedHours) * Number(r.hourlyRate) : 0),
       0,
     );
     return { budgetedCost };
@@ -614,7 +711,11 @@ export class TendersService {
     });
   }
 
-  async createRequirement(tenderId: string, dto: CreateTenderRequirementDto, user: AuthenticatedUser) {
+  async createRequirement(
+    tenderId: string,
+    dto: CreateTenderRequirementDto,
+    user: AuthenticatedUser,
+  ) {
     const tender = await this.prisma.tender.findUniqueOrThrow({ where: { id: tenderId } });
     await this.assertTenderDeptAccess(tender.departmentId, user);
     const count = await this.prisma.tenderRequirement.count({ where: { tenderId } });
@@ -660,7 +761,11 @@ export class TendersService {
     return this.listRequirements(tenderId);
   }
 
-  async saveRequirementsAsTemplate(tenderId: string, dto: SaveAsTemplateDto, user: AuthenticatedUser) {
+  async saveRequirementsAsTemplate(
+    tenderId: string,
+    dto: SaveAsTemplateDto,
+    user: AuthenticatedUser,
+  ) {
     const tender = await this.prisma.tender.findUniqueOrThrow({ where: { id: tenderId } });
     await this.assertTenderDeptAccess(tender.departmentId, user);
 
@@ -678,7 +783,11 @@ export class TendersService {
         description: dto.description,
         createdBy: user.id,
         items: {
-          create: requirements.map((r, i) => ({ title: r.title, category: r.category, sortOrder: i })),
+          create: requirements.map((r, i) => ({
+            title: r.title,
+            category: r.category,
+            sortOrder: i,
+          })),
         },
       },
       include: { items: true },
@@ -691,11 +800,16 @@ export class TendersService {
     const activities = await this.prisma.tenderActivity.findMany({
       where: { tenderId },
       include: {
-        creator: { select: { id: true, fullName: true, email: true, roles: { select: { role: true } } } },
+        creator: {
+          select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+        },
       },
       orderBy: { occurredAt: "desc" },
     });
-    return activities.map((a) => ({ ...a, creator: a.creator ? maskUserRef(a.creator, viewer) : null }));
+    return activities.map((a) => ({
+      ...a,
+      creator: a.creator ? maskUserRef(a.creator, viewer) : null,
+    }));
   }
 
   async createActivity(
@@ -715,14 +829,18 @@ export class TendersService {
         createdBy: user.id,
       },
       include: {
-        creator: { select: { id: true, fullName: true, email: true, roles: { select: { role: true } } } },
+        creator: {
+          select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+        },
       },
     });
     return { ...activity, creator: activity.creator ? maskUserRef(activity.creator, user) : null };
   }
 
   async deleteActivity(activityId: string, user: AuthenticatedUser) {
-    const activity = await this.prisma.tenderActivity.findUniqueOrThrow({ where: { id: activityId } });
+    const activity = await this.prisma.tenderActivity.findUniqueOrThrow({
+      where: { id: activityId },
+    });
     const isAdminOrCeo = user.roles.includes("system_admin") || user.roles.includes("ceo");
     if (activity.createdBy !== user.id && !isAdminOrCeo) {
       throw new ForbiddenException("You can only delete your own activity entries");

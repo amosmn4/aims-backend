@@ -22,39 +22,52 @@ export class CalendarService {
   constructor(private readonly prisma: PrismaService) {}
 
   // CEO/system_admin get the department (or company-wide) calendar, same as before. Everyone
-  // else gets *their own* calendar only — deadlines on tenders/contracts they account-manage,
-  // and tasks assigned to them — not everything the rest of their department has on deadline.
+  // else gets *their own* calendar only — tasks assigned to them and contracts they
+  // account-manage, not everything the rest of their department has on deadline.
+  //
+  // Tender submission/bond deadlines are a further special case: tracking an open bid is the
+  // Tender department's job, not whichever department the opportunity is destined for — a
+  // Finance/IT/HR person seeing "tender submission due" on their calendar for a deal they aren't
+  // actually running the bid on is noise, not a personal deadline. So those two item types are
+  // shown only to Tender department members (and admin/CEO); once a tender is Awarded it becomes
+  // a Project, and Project/Task deadlines pick up the baton for the delivering department.
   async listDeadlines(
     from: Date,
     to: Date,
     departmentId: string | undefined,
     viewer: AuthenticatedUser,
   ): Promise<DeadlineItem[]> {
-    const mine = !isAdminOrCeo(viewer);
+    const admin = isAdminOrCeo(viewer);
+    const mine = !admin;
+    const seesTenderPipeline = admin || viewer.roles.includes("tender");
 
     const [tenders, bonds, contracts, tasks] = await Promise.all([
-      this.prisma.tender.findMany({
-        where: {
-          stage: { in: OPEN_TENDER_STAGES },
-          submissionDeadline: { gte: from, lte: to },
-          ...(departmentId && { departmentId }),
-          ...(mine && { accountManagerId: viewer.id }),
-        },
-        select: { id: true, title: true, submissionDeadline: true },
-      }),
-      this.prisma.tenderBond.findMany({
-        where: {
-          expiryDate: { gte: from, lte: to },
-          ...(departmentId && { tender: { departmentId } }),
-          ...(mine && { tender: { accountManagerId: viewer.id } }),
-        },
-        select: {
-          id: true,
-          expiryDate: true,
-          bondType: true,
-          tender: { select: { id: true, title: true } },
-        },
-      }),
+      seesTenderPipeline
+        ? this.prisma.tender.findMany({
+            where: {
+              stage: { in: OPEN_TENDER_STAGES },
+              submissionDeadline: { gte: from, lte: to },
+              ...(departmentId && { departmentId }),
+              ...(mine && { accountManagerId: viewer.id }),
+            },
+            select: { id: true, title: true, submissionDeadline: true },
+          })
+        : Promise.resolve([]),
+      seesTenderPipeline
+        ? this.prisma.tenderBond.findMany({
+            where: {
+              expiryDate: { gte: from, lte: to },
+              ...(departmentId && { tender: { departmentId } }),
+              ...(mine && { tender: { accountManagerId: viewer.id } }),
+            },
+            select: {
+              id: true,
+              expiryDate: true,
+              bondType: true,
+              tender: { select: { id: true, title: true } },
+            },
+          })
+        : Promise.resolve([]),
       this.prisma.contract.findMany({
         where: {
           status: "active",

@@ -4,6 +4,8 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { DocumentsService } from "../../documents/documents.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
 import { maskUserRef } from "../../common/mask-user-ref";
+import { TtlCache } from "../../common/ttl-cache";
+import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateClientRequestDto } from "./dto/create-client-request.dto";
 import type { UpdateClientRequestDto } from "./dto/update-client-request.dto";
@@ -13,7 +15,15 @@ import type { ConvertToProjectDto } from "./dto/convert-to-project.dto";
 import type { ConvertToContractDto } from "./dto/convert-to-contract.dto";
 import type { CreateActivityDto } from "./dto/create-activity.dto";
 
-const ALL_STAGES: ClientRequestStage[] = ["new", "assigned", "engaging", "proposal", "won", "lost", "withdrawn"];
+const ALL_STAGES: ClientRequestStage[] = [
+  "new",
+  "assigned",
+  "engaging",
+  "proposal",
+  "won",
+  "lost",
+  "withdrawn",
+];
 const LOST_STAGES: ClientRequestStage[] = ["lost", "withdrawn"];
 
 export interface ClientRequestFilters {
@@ -52,24 +62,39 @@ const userSelect = { id: true, fullName: true, email: true, roles: { select: { r
 
 @Injectable()
 export class ClientRequestsService {
+  private readonly pipelineSummaryCache = new TtlCache<
+    { stage: ClientRequestStage; count: number; totalValue: number }[]
+  >(30_000);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly documentsService: DocumentsService,
   ) {}
 
-  findAll(filters: ClientRequestFilters) {
-    return this.prisma.clientRequest.findMany({
-      where: buildWhere(filters),
-      include: {
-        client: { select: { id: true, name: true } },
-        department: { select: { id: true, name: true, code: true } },
-        serviceLine: { select: { id: true, name: true } },
+  findAll(filters: ClientRequestFilters, pagination: PaginationQueryDto = {}) {
+    return maybePaginate(
+      this.prisma.clientRequest,
+      {
+        where: buildWhere(filters),
+        include: {
+          client: { select: { id: true, name: true } },
+          department: { select: { id: true, name: true, code: true } },
+          serviceLine: { select: { id: true, name: true } },
+        },
+        orderBy: { createdAt: "desc" },
       },
-      orderBy: { createdAt: "desc" },
-    });
+      pagination,
+    );
   }
 
-  async pipelineSummary(filters: ClientRequestFilters) {
+  // Cached for 30s per distinct filter set — same reasoning as TendersService.pipelineSummary.
+  pipelineSummary(filters: ClientRequestFilters) {
+    return this.pipelineSummaryCache.getOrSet(JSON.stringify(filters), () =>
+      this.computePipelineSummary(filters),
+    );
+  }
+
+  private async computePipelineSummary(filters: ClientRequestFilters) {
     const rows = await this.prisma.clientRequest.groupBy({
       by: ["stage"],
       where: buildWhere(filters),
@@ -158,10 +183,14 @@ export class ClientRequestsService {
       stuck.sort((a, b) => b.days - a.days);
       return {
         stage,
-        avgDays: completed.length ? Math.round((completed.reduce((s, d) => s + d, 0) / completed.length) * 10) / 10 : null,
+        avgDays: completed.length
+          ? Math.round((completed.reduce((s, d) => s + d, 0) / completed.length) * 10) / 10
+          : null,
         sampleSize: completed.length,
         stuckCount: stuck.length,
-        oldestStuck: stuck[0] ? { id: stuck[0].id, title: stuck[0].title, days: Math.round(stuck[0].days * 10) / 10 } : null,
+        oldestStuck: stuck[0]
+          ? { id: stuck[0].id, title: stuck[0].title, days: Math.round(stuck[0].days * 10) / 10 }
+          : null,
       };
     });
   }
@@ -179,7 +208,10 @@ export class ClientRequestsService {
         convertedFromLead: { select: { id: true, name: true } },
       },
     });
-    return { ...request, assignedTo: request.assignedTo ? maskUserRef(request.assignedTo, viewer) : null };
+    return {
+      ...request,
+      assignedTo: request.assignedTo ? maskUserRef(request.assignedTo, viewer) : null,
+    };
   }
 
   /** Before routing (no department yet) only tender/admin/ceo can act on a request — Tender
@@ -190,7 +222,9 @@ export class ClientRequestsService {
       if (isAdminOrCeo(user) || user.roles.includes("tender")) return;
       throw new ForbiddenException("Only Tender can manage an unrouted request");
     }
-    const department = await this.prisma.department.findUniqueOrThrow({ where: { id: request.departmentId } });
+    const department = await this.prisma.department.findUniqueOrThrow({
+      where: { id: request.departmentId },
+    });
     assertDepartmentAccess(department, user);
   }
 
@@ -343,7 +377,10 @@ export class ClientRequestsService {
       include: { creator: { select: userSelect } },
       orderBy: { occurredAt: "desc" },
     });
-    return activities.map((a) => ({ ...a, creator: a.creator ? maskUserRef(a.creator, viewer) : null }));
+    return activities.map((a) => ({
+      ...a,
+      creator: a.creator ? maskUserRef(a.creator, viewer) : null,
+    }));
   }
 
   async createActivity(requestId: string, dto: CreateActivityDto, user: AuthenticatedUser) {
@@ -364,7 +401,9 @@ export class ClientRequestsService {
   }
 
   async deleteActivity(activityId: string, user: AuthenticatedUser) {
-    const activity = await this.prisma.clientRequestActivity.findUniqueOrThrow({ where: { id: activityId } });
+    const activity = await this.prisma.clientRequestActivity.findUniqueOrThrow({
+      where: { id: activityId },
+    });
     if (activity.createdBy !== user.id && !isAdminOrCeo(user)) {
       throw new ForbiddenException("You can only delete your own activity entries");
     }

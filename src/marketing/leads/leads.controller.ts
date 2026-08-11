@@ -7,6 +7,7 @@ import { ConvertLeadToRequestDto } from "./dto/convert-lead-to-request.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
+import { PaginationQueryDto } from "../../common/pagination";
 
 @Controller("leads")
 export class LeadsController {
@@ -14,8 +15,8 @@ export class LeadsController {
 
   @Get()
   @Roles()
-  findAll(@Query("stage") stage?: string) {
-    return this.leadsService.findAll({ stage });
+  findAll(@Query("stage") stage?: string, @Query() pagination?: PaginationQueryDto) {
+    return this.leadsService.findAll({ stage }, pagination);
   }
 
   @Get(":id")

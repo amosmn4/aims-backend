@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { maskUserRef } from "../../common/mask-user-ref";
+import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateTicketDto } from "./dto/create-ticket.dto";
 import type { UpdateTicketDto } from "./dto/update-ticket.dto";
@@ -12,16 +13,26 @@ const userSelect = { id: true, fullName: true, email: true, roles: { select: { r
 export class TicketsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(viewer: AuthenticatedUser) {
-    const tickets = await this.prisma.ticket.findMany({
-      include: {
-        system: { select: { id: true, name: true } },
-        requester: { select: userSelect },
-        assignee: { select: userSelect },
+  async findAll(viewer: AuthenticatedUser, pagination: PaginationQueryDto = {}) {
+    const result = await maybePaginate(
+      this.prisma.ticket,
+      {
+        include: {
+          system: { select: { id: true, name: true } },
+          requester: { select: userSelect },
+          assignee: { select: userSelect },
+        },
+        orderBy: { createdAt: "desc" },
       },
-      orderBy: { createdAt: "desc" },
-    });
-    return tickets.map((t) => this.mask(t, viewer));
+      pagination,
+    );
+    // `maybePaginate`'s `any`-typed model param (see its own comment) widens the inferred row
+    // type past what `include` actually produced — cast at this one boundary rather than fight it.
+    type Row = { requester: unknown; assignee: unknown };
+    const rows = (Array.isArray(result) ? result : result.data) as unknown as Row[];
+    return Array.isArray(result)
+      ? rows.map((t) => this.mask(t, viewer))
+      : { ...result, data: rows.map((t) => this.mask(t, viewer)) };
   }
 
   async findOne(id: string, viewer: AuthenticatedUser) {
@@ -43,8 +54,12 @@ export class TicketsService {
     type UserRef = { fullName: string | null; email: string; roles: { role: string }[] } | null;
     return {
       ...ticket,
-      requester: ticket.requester ? maskUserRef(ticket.requester as NonNullable<UserRef>, viewer) : null,
-      assignee: ticket.assignee ? maskUserRef(ticket.assignee as NonNullable<UserRef>, viewer) : null,
+      requester: ticket.requester
+        ? maskUserRef(ticket.requester as NonNullable<UserRef>, viewer)
+        : null,
+      assignee: ticket.assignee
+        ? maskUserRef(ticket.assignee as NonNullable<UserRef>, viewer)
+        : null,
     };
   }
 
