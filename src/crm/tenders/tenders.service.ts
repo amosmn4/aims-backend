@@ -41,6 +41,10 @@ const ALL_STAGES: TenderStage[] = [
   "withdrawn",
 ];
 
+// The funnel's actual progression, in order — lost/withdrawn are exits from this line, not
+// steps on it (see computePipelineSummary's cumulative-reach logic below).
+const PROGRESS_STAGES: TenderStage[] = ["identified", "applying", "submitted", "evaluation", "won"];
+
 export interface TenderFilters {
   departmentId?: string;
   serviceLineId?: string;
@@ -83,7 +87,13 @@ function buildWhere(filters: TenderFilters): Prisma.TenderWhereInput {
 @Injectable()
 export class TendersService {
   private readonly pipelineSummaryCache = new TtlCache<
-    { stage: TenderStage; count: number; totalValue: number }[]
+    {
+      stage: TenderStage;
+      count: number;
+      totalValue: number;
+      cumulativeCount: number;
+      conversionPct: number | null;
+    }[]
   >(30_000);
 
   constructor(
@@ -141,20 +151,69 @@ export class TendersService {
     );
   }
 
+  // The funnel is a pass-through, not a Kanban snapshot: a tender that's reached "submitted"
+  // stays counted in "identified" and "applying" too — those stages don't shrink as tenders
+  // advance, they only grow (or hold steady), same as a real conversion funnel. A live count of
+  // "currently sitting in stage X" would make earlier stages look like they're draining out,
+  // which is exactly backwards for answering "of everything that came in, how much made it this
+  // far" — that reading only comes from stage totals that never decrease once counted, and only
+  // ever go down if the underlying tender is deleted.
+  //
+  // `count`/`totalValue` stay as the live "currently in this exact stage" figures (still useful
+  // for "what needs attention right now" elsewhere) — `cumulativeCount`/`conversionPct` are the
+  // new funnel-specific fields. A tender lost/withdrawn from stage X reached X (and everything
+  // before it) even though its current `stage` is "lost", so it's attributed via
+  // `lostFromStage`, not the live `stage` column.
   private async computePipelineSummary(filters: TenderFilters, viewer: AuthenticatedUser) {
-    const rows = await this.prisma.tender.groupBy({
-      by: ["stage"],
-      where: { ...buildWhere(filters), ...tenderDeptFilter(viewer) },
-      _count: { _all: true },
-      _sum: { estimatedValue: true },
-    });
+    const where = { ...buildWhere(filters), ...tenderDeptFilter(viewer) };
+    const [liveRows, lostRows] = await Promise.all([
+      this.prisma.tender.groupBy({
+        by: ["stage"],
+        where,
+        _count: { _all: true },
+        _sum: { estimatedValue: true },
+      }),
+      this.prisma.tender.groupBy({
+        by: ["lostFromStage"],
+        where: { ...where, stage: { in: ["lost", "withdrawn"] } },
+        _count: { _all: true },
+      }),
+    ]);
+
+    const reachAtLeast = (progressIndex: number) => {
+      let count = 0;
+      for (const row of liveRows) {
+        const idx = PROGRESS_STAGES.indexOf(row.stage);
+        if (idx >= 0 && idx >= progressIndex) count += row._count._all;
+      }
+      for (const row of lostRows) {
+        // Every tender — won, lost, or withdrawn — passed through the first stage; beyond that,
+        // only `lostFromStage` says how much further a lost/withdrawn one actually got.
+        if (progressIndex === 0) {
+          count += row._count._all;
+          continue;
+        }
+        const idx = row.lostFromStage ? PROGRESS_STAGES.indexOf(row.lostFromStage) : -1;
+        if (idx >= progressIndex) count += row._count._all;
+      }
+      return count;
+    };
+
+    const cumulativeByStage = new Map(PROGRESS_STAGES.map((stage, i) => [stage, reachAtLeast(i)]));
+
     return ALL_STAGES.map((stage) => {
-      const row = rows.find((r) => r.stage === stage);
-      return {
-        stage,
-        count: row?._count._all ?? 0,
-        totalValue: row?._sum.estimatedValue ? Number(row._sum.estimatedValue) : 0,
-      };
+      const row = liveRows.find((r) => r.stage === stage);
+      const count = row?._count._all ?? 0;
+      const totalValue = row?._sum.estimatedValue ? Number(row._sum.estimatedValue) : 0;
+      const progressIndex = PROGRESS_STAGES.indexOf(stage);
+      const cumulativeCount = progressIndex >= 0 ? (cumulativeByStage.get(stage) ?? 0) : count;
+      const prevCumulative =
+        progressIndex > 0 ? (cumulativeByStage.get(PROGRESS_STAGES[progressIndex - 1]) ?? 0) : null;
+      const conversionPct =
+        prevCumulative != null && prevCumulative > 0
+          ? (cumulativeCount / prevCumulative) * 100
+          : null;
+      return { stage, count, totalValue, cumulativeCount, conversionPct };
     });
   }
 
@@ -278,6 +337,7 @@ export class TendersService {
     await this.assertTenderDeptAccess(existing.departmentId, user);
 
     const now = new Date();
+    const movingToLost = dto.stage === "lost" || dto.stage === "withdrawn";
     return this.prisma.tender.update({
       where: { id },
       data: {
@@ -286,8 +346,8 @@ export class TendersService {
         wonAt: dto.stage === "won" ? (dto.wonAt ? new Date(dto.wonAt) : now) : existing.wonAt,
         lostAt: dto.stage === "lost" ? now : existing.lostAt,
         withdrawnAt: dto.stage === "withdrawn" ? now : existing.withdrawnAt,
-        lostReason:
-          dto.stage === "lost" || dto.stage === "withdrawn" ? dto.lostReason : existing.lostReason,
+        lostFromStage: movingToLost ? existing.stage : existing.lostFromStage,
+        lostReason: movingToLost ? dto.lostReason : existing.lostReason,
       },
     });
   }

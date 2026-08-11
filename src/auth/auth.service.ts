@@ -17,14 +17,27 @@ export class AuthService {
     private readonly config: ConfigService,
   ) {}
 
+  // Distinct messages per failure (not a blanket "invalid email or password") — this is an
+  // invite-only internal system with no public signup, so telling someone their work email
+  // isn't registered doesn't expose anything a stranger could act on the way it would on a
+  // public consumer app; the usability win for staff who mistype their email or forget which
+  // address they were invited on is worth more here than the marginal enumeration risk.
   async validateCredentials(email: string, password: string) {
     const user = await this.prisma.user.findUnique({
       where: { email: email.toLowerCase() },
       include: { roles: true, department: true, office: true },
     });
 
-    if (!user || !user.isActive) {
-      throw new UnauthorizedException("Invalid email or password");
+    if (!user) {
+      throw new UnauthorizedException(
+        "This email isn't registered. Check the address, or ask your administrator for an invite.",
+      );
+    }
+
+    if (!user.isActive) {
+      throw new UnauthorizedException(
+        "This account has been deactivated. Contact your administrator.",
+      );
     }
 
     if (!user.passwordHash) {
@@ -35,7 +48,7 @@ export class AuthService {
 
     const passwordMatches = await bcrypt.compare(password, user.passwordHash);
     if (!passwordMatches) {
-      throw new UnauthorizedException("Invalid email or password");
+      throw new UnauthorizedException("That password is incorrect. Please try again.");
     }
 
     return user;

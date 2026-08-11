@@ -1030,28 +1030,33 @@ model DocumentAccessGrant {
 // won / lost / withdrawn. A won tender is converted to a Contract via an explicit action
 // (ContractsService/TendersService), never automatically — see Contract.tenderId.
 model Tender {
-  id                 String      @id @default(uuid()) @db.Char(36)
-  referenceNumber    String?     @unique @map("reference_number")
+  id                 String       @id @default(uuid()) @db.Char(36)
+  referenceNumber    String?      @unique @map("reference_number")
   title              String
-  description        String?     @db.Text
-  clientId           String?     @map("client_id") @db.Char(36)
-  prospectClientName String?     @map("prospect_client_name")
-  departmentId       String      @map("department_id") @db.Char(36)
-  serviceLineId      String?     @map("service_line_id") @db.Char(36)
-  accountManagerId   String?     @map("account_manager_id") @db.Char(36)
-  stage              TenderStage @default(identified)
-  estimatedValue     Decimal?    @map("estimated_value") @db.Decimal(14, 2)
-  currency           String      @default("KES")
-  submissionDeadline DateTime?   @map("submission_deadline") @db.Date
-  submittedAt        DateTime?   @map("submitted_at")
-  wonAt              DateTime?   @map("won_at")
-  lostAt             DateTime?   @map("lost_at")
-  withdrawnAt        DateTime?   @map("withdrawn_at")
-  lostReason         String?     @map("lost_reason") @db.Text
-  notes              String?     @db.Text
-  createdBy          String?     @map("created_by") @db.Char(36)
-  createdAt          DateTime    @default(now()) @map("created_at")
-  updatedAt          DateTime    @updatedAt @map("updated_at")
+  description        String?      @db.Text
+  clientId           String?      @map("client_id") @db.Char(36)
+  prospectClientName String?      @map("prospect_client_name")
+  departmentId       String       @map("department_id") @db.Char(36)
+  serviceLineId      String?      @map("service_line_id") @db.Char(36)
+  accountManagerId   String?      @map("account_manager_id") @db.Char(36)
+  stage              TenderStage  @default(identified)
+  estimatedValue     Decimal?     @map("estimated_value") @db.Decimal(14, 2)
+  currency           String       @default("KES")
+  submissionDeadline DateTime?    @map("submission_deadline") @db.Date
+  submittedAt        DateTime?    @map("submitted_at")
+  wonAt              DateTime?    @map("won_at")
+  lostAt             DateTime?    @map("lost_at")
+  withdrawnAt        DateTime?    @map("withdrawn_at")
+  // Snapshot of the stage right before the tender was marked lost/withdrawn — same purpose as
+  // ClientRequest.lostFromStage: a tender lost from "evaluation" reached further than one lost
+  // from "identified", and the funnel needs that to count it toward every stage it actually
+  // passed through, not just bucket it under a flat "lost" total.
+  lostFromStage      TenderStage? @map("lost_from_stage")
+  lostReason         String?      @map("lost_reason") @db.Text
+  notes              String?      @db.Text
+  createdBy          String?      @map("created_by") @db.Char(36)
+  createdAt          DateTime     @default(now()) @map("created_at")
+  updatedAt          DateTime     @updatedAt @map("updated_at")
 
   client         Client?             @relation(fields: [clientId], references: [id], onDelete: SetNull)
   department     Department          @relation(fields: [departmentId], references: [id], onDelete: Restrict)

@@ -32,6 +32,10 @@ const ALL_STAGES: ClientRequestStage[] = [
 ];
 const LOST_STAGES: ClientRequestStage[] = ["lost", "withdrawn"];
 
+// The funnel's actual progression, in order — lost/withdrawn are exits from this line, not
+// steps on it (see computePipelineSummary's cumulative-reach logic below).
+const PROGRESS_STAGES: ClientRequestStage[] = ["new", "assigned", "engaging", "proposal", "won"];
+
 export interface ClientRequestFilters {
   departmentId?: string;
   serviceLineId?: string;
@@ -80,7 +84,13 @@ const userSelect = { id: true, fullName: true, email: true, roles: { select: { r
 @Injectable()
 export class ClientRequestsService {
   private readonly pipelineSummaryCache = new TtlCache<
-    { stage: ClientRequestStage; count: number; totalValue: number }[]
+    {
+      stage: ClientRequestStage;
+      count: number;
+      totalValue: number;
+      cumulativeCount: number;
+      conversionPct: number | null;
+    }[]
   >(30_000);
 
   constructor(
@@ -116,20 +126,59 @@ export class ClientRequestsService {
     );
   }
 
+  // The funnel is a pass-through, not a Kanban snapshot — see TendersService.computePipelineSummary
+  // for the full reasoning, identical here. `count`/`totalValue` stay as the live "currently in
+  // this exact stage" figures; `cumulativeCount`/`conversionPct` are the funnel-specific fields,
+  // attributing a lost/withdrawn request to every stage it actually reached via `lostFromStage`
+  // rather than just its final `stage`.
   private async computePipelineSummary(filters: ClientRequestFilters, viewer: AuthenticatedUser) {
-    const rows = await this.prisma.clientRequest.groupBy({
-      by: ["stage"],
-      where: { ...buildWhere(filters), ...requestDeptFilter(viewer) },
-      _count: { _all: true },
-      _sum: { estimatedValue: true },
-    });
+    const where = { ...buildWhere(filters), ...requestDeptFilter(viewer) };
+    const [liveRows, lostRows] = await Promise.all([
+      this.prisma.clientRequest.groupBy({
+        by: ["stage"],
+        where,
+        _count: { _all: true },
+        _sum: { estimatedValue: true },
+      }),
+      this.prisma.clientRequest.groupBy({
+        by: ["lostFromStage"],
+        where: { ...where, stage: { in: LOST_STAGES } },
+        _count: { _all: true },
+      }),
+    ]);
+
+    const reachAtLeast = (progressIndex: number) => {
+      let count = 0;
+      for (const row of liveRows) {
+        const idx = PROGRESS_STAGES.indexOf(row.stage);
+        if (idx >= 0 && idx >= progressIndex) count += row._count._all;
+      }
+      for (const row of lostRows) {
+        if (progressIndex === 0) {
+          count += row._count._all;
+          continue;
+        }
+        const idx = row.lostFromStage ? PROGRESS_STAGES.indexOf(row.lostFromStage) : -1;
+        if (idx >= progressIndex) count += row._count._all;
+      }
+      return count;
+    };
+
+    const cumulativeByStage = new Map(PROGRESS_STAGES.map((stage, i) => [stage, reachAtLeast(i)]));
+
     return ALL_STAGES.map((stage) => {
-      const row = rows.find((r) => r.stage === stage);
-      return {
-        stage,
-        count: row?._count._all ?? 0,
-        totalValue: row?._sum.estimatedValue ? Number(row._sum.estimatedValue) : 0,
-      };
+      const row = liveRows.find((r) => r.stage === stage);
+      const count = row?._count._all ?? 0;
+      const totalValue = row?._sum.estimatedValue ? Number(row._sum.estimatedValue) : 0;
+      const progressIndex = PROGRESS_STAGES.indexOf(stage);
+      const cumulativeCount = progressIndex >= 0 ? (cumulativeByStage.get(stage) ?? 0) : count;
+      const prevCumulative =
+        progressIndex > 0 ? (cumulativeByStage.get(PROGRESS_STAGES[progressIndex - 1]) ?? 0) : null;
+      const conversionPct =
+        prevCumulative != null && prevCumulative > 0
+          ? (cumulativeCount / prevCumulative) * 100
+          : null;
+      return { stage, count, totalValue, cumulativeCount, conversionPct };
     });
   }
 
