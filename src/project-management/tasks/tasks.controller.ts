@@ -17,19 +17,24 @@ export class TasksController {
   @Get()
   @Roles()
   findAll(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("projectId") projectId?: string,
     @Query("departmentId") departmentId?: string,
     @Query("assigneeId") assigneeId?: string,
     @Query("status") status?: TaskStatus,
     @Query() pagination?: PaginationQueryDto,
   ) {
-    return this.tasksService.findAll({ projectId, departmentId, assigneeId, status }, pagination);
+    return this.tasksService.findAll(
+      { projectId, departmentId, assigneeId, status },
+      pagination,
+      user,
+    );
   }
 
   @Get(":id")
   @Roles()
-  findOne(@Param("id") id: string) {
-    return this.tasksService.findOne(id);
+  findOne(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.tasksService.findOne(id, user);
   }
 
   @Post()

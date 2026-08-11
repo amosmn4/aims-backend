@@ -1,8 +1,14 @@
-import { BadRequestException, ForbiddenException, Injectable } from "@nestjs/common";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import type { ClientRequestSource, ClientRequestStage, Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { DocumentsService } from "../../documents/documents.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
+import { viewerDepartmentCodes } from "../../common/department-scope";
 import { maskUserRef } from "../../common/mask-user-ref";
 import { TtlCache } from "../../common/ttl-cache";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
@@ -41,6 +47,17 @@ function isAdminOrCeo(user: AuthenticatedUser) {
   return user.roles.includes("system_admin") || user.roles.includes("ceo");
 }
 
+// Operations owns intake (creates/routes every request) and Tender also acts on unrouted ones
+// (see assertAccess below) — both need to see the whole intake queue, not just their own
+// department's slice. Every other department only sees requests actually routed to it.
+function requestDeptFilter(viewer: AuthenticatedUser): Prisma.ClientRequestWhereInput {
+  const deptCodes = viewerDepartmentCodes(viewer);
+  if (deptCodes === null || deptCodes.includes("operations") || deptCodes.includes("tender")) {
+    return {};
+  }
+  return { department: { code: { in: deptCodes } } };
+}
+
 function buildWhere(filters: ClientRequestFilters): Prisma.ClientRequestWhereInput {
   return {
     ...(filters.departmentId && { departmentId: filters.departmentId }),
@@ -71,11 +88,15 @@ export class ClientRequestsService {
     private readonly documentsService: DocumentsService,
   ) {}
 
-  findAll(filters: ClientRequestFilters, pagination: PaginationQueryDto = {}) {
+  findAll(
+    filters: ClientRequestFilters,
+    viewer: AuthenticatedUser,
+    pagination: PaginationQueryDto = {},
+  ) {
     return maybePaginate(
       this.prisma.clientRequest,
       {
-        where: buildWhere(filters),
+        where: { ...buildWhere(filters), ...requestDeptFilter(viewer) },
         include: {
           client: { select: { id: true, name: true } },
           department: { select: { id: true, name: true, code: true } },
@@ -87,17 +108,18 @@ export class ClientRequestsService {
     );
   }
 
-  // Cached for 30s per distinct filter set — same reasoning as TendersService.pipelineSummary.
-  pipelineSummary(filters: ClientRequestFilters) {
-    return this.pipelineSummaryCache.getOrSet(JSON.stringify(filters), () =>
-      this.computePipelineSummary(filters),
+  // Cached for 30s per distinct filter set *and* viewer scope — see TendersService.pipelineSummary.
+  pipelineSummary(filters: ClientRequestFilters, viewer: AuthenticatedUser) {
+    const cacheKey = JSON.stringify({ filters, scope: viewerDepartmentCodes(viewer) });
+    return this.pipelineSummaryCache.getOrSet(cacheKey, () =>
+      this.computePipelineSummary(filters, viewer),
     );
   }
 
-  private async computePipelineSummary(filters: ClientRequestFilters) {
+  private async computePipelineSummary(filters: ClientRequestFilters, viewer: AuthenticatedUser) {
     const rows = await this.prisma.clientRequest.groupBy({
       by: ["stage"],
-      where: buildWhere(filters),
+      where: { ...buildWhere(filters), ...requestDeptFilter(viewer) },
       _count: { _all: true },
       _sum: { estimatedValue: true },
     });
@@ -113,10 +135,10 @@ export class ClientRequestsService {
 
   // Answers "where do requests fail" — counts grouped by the stage they were AT right before
   // being marked lost/withdrawn, not just the final "lost" state.
-  async lostBreakdown(filters: ClientRequestFilters) {
+  async lostBreakdown(filters: ClientRequestFilters, viewer: AuthenticatedUser) {
     const rows = await this.prisma.clientRequest.groupBy({
       by: ["lostFromStage"],
-      where: { ...buildWhere(filters), stage: { in: LOST_STAGES } },
+      where: { ...buildWhere(filters), ...requestDeptFilter(viewer), stage: { in: LOST_STAGES } },
       _count: { _all: true },
     });
     return rows
@@ -131,9 +153,9 @@ export class ClientRequestsService {
   // schema change. `stuck` covers requests still sitting in that stage right now, which is
   // the actionable half of this: not "how long did it take historically" but "what's overdue
   // today."
-  async timeInStage(filters: ClientRequestFilters) {
+  async timeInStage(filters: ClientRequestFilters, viewer: AuthenticatedUser) {
     const rows = await this.prisma.clientRequest.findMany({
-      where: buildWhere(filters),
+      where: { ...buildWhere(filters), ...requestDeptFilter(viewer) },
       select: {
         id: true,
         title: true,
@@ -195,6 +217,7 @@ export class ClientRequestsService {
     });
   }
 
+  // 404 (not 403) for an out-of-scope request, same convention as Projects.findOne.
   async findOne(id: string, viewer: AuthenticatedUser) {
     const request = await this.prisma.clientRequest.findUniqueOrThrow({
       where: { id },
@@ -208,6 +231,16 @@ export class ClientRequestsService {
         convertedFromLead: { select: { id: true, name: true } },
       },
     });
+    const deptCodes = viewerDepartmentCodes(viewer);
+    if (
+      deptCodes &&
+      !deptCodes.includes("operations") &&
+      !deptCodes.includes("tender") &&
+      (!request.department || !deptCodes.includes(request.department.code)) &&
+      request.assignedToId !== viewer.id
+    ) {
+      throw new NotFoundException("Client request not found");
+    }
     return {
       ...request,
       assignedTo: request.assignedTo ? maskUserRef(request.assignedTo, viewer) : null,

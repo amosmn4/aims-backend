@@ -1,7 +1,8 @@
-import { ForbiddenException, Injectable } from "@nestjs/common";
+import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { StorageService } from "../../storage/storage.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
+import { viewerDepartmentCodes } from "../../common/department-scope";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateContractDto } from "./dto/create-contract.dto";
@@ -23,13 +24,23 @@ export class ContractsService {
     private readonly storage: StorageService,
   ) {}
 
-  findAll(filters: { departmentId?: string; clientId?: string }, pagination: PaginationQueryDto = {}) {
+  // Visibility is scoped to the viewer's own department(s) — admin/CEO see every contract, a
+  // department-scoped viewer only their own department's. A department-less contract (rare —
+  // see assertContractDeptAccess below) is admin/CEO-only for the same reason it's admin/CEO-only
+  // to manage: nobody's department claims it.
+  findAll(
+    filters: { departmentId?: string; clientId?: string },
+    pagination: PaginationQueryDto = {},
+    viewer: AuthenticatedUser,
+  ) {
+    const deptCodes = viewerDepartmentCodes(viewer);
     return maybePaginate(
       this.prisma.contract,
       {
         where: {
           ...(filters.departmentId && { departmentId: filters.departmentId }),
           ...(filters.clientId && { clientId: filters.clientId }),
+          ...(deptCodes && { department: { code: { in: deptCodes } } }),
         },
         orderBy: { createdAt: "desc" },
       },
@@ -37,7 +48,8 @@ export class ContractsService {
     );
   }
 
-  async findOne(id: string) {
+  // 404 (not 403) for an out-of-scope contract, same convention as Projects.findOne.
+  async findOne(id: string, viewer: AuthenticatedUser) {
     const contract = await this.prisma.contract.findUniqueOrThrow({
       where: { id },
       include: {
@@ -51,6 +63,10 @@ export class ContractsService {
         _count: { select: { invoices: true } },
       },
     });
+    const deptCodes = viewerDepartmentCodes(viewer);
+    if (deptCodes && (!contract.department || !deptCodes.includes(contract.department.code))) {
+      throw new NotFoundException("Contract not found");
+    }
     return { ...contract, documents: contract.documents.map(serializeDocument) };
   }
 

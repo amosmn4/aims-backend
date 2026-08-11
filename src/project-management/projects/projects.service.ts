@@ -1,7 +1,8 @@
-import { ForbiddenException, Injectable } from "@nestjs/common";
+import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import type { ClientRequestActivityType, ProjectStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
+import { viewerDepartmentCodes } from "../../common/department-scope";
 import { maskUserRef } from "../../common/mask-user-ref";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import { DocumentsService } from "../../documents/documents.service";
@@ -28,22 +29,22 @@ export class ProjectsService {
     private readonly documentsService: DocumentsService,
   ) {}
 
-  // Visibility is open cross-department ("staff in one department can be involved in
-  // another department's activity") — only mutations are department-gated.
+  // Visibility is scoped to the viewer's own department(s) — admin/CEO see everything, a
+  // department-scoped viewer sees only their own department's projects, full stop. The one
+  // deliberate exception is `sharedWithMe`: a project outside the viewer's department they've
+  // been explicitly added to as a team member — an opt-in grant, not a blanket leak, so it uses
+  // its own narrower authorization (team membership) instead of the department-code check.
   findAll(
     filters: {
       departmentId?: string;
       status?: ProjectStatus;
       clientId?: string;
-      // Google-Drive-style "Shared with me": projects outside the viewer's own department that
-      // they've been added to as a team member, rather than blended into a department's normal
-      // project list. Requires the viewer (their id + home department) since it's relative to
-      // who's asking, not a static filter value.
       sharedWithMe?: boolean;
     },
     pagination: PaginationQueryDto = {},
-    viewer?: AuthenticatedUser,
+    viewer: AuthenticatedUser,
   ) {
+    const deptCodes = viewerDepartmentCodes(viewer);
     return maybePaginate(
       this.prisma.project,
       {
@@ -51,11 +52,12 @@ export class ProjectsService {
           ...(filters.departmentId && { departmentId: filters.departmentId }),
           ...(filters.status && { status: filters.status }),
           ...(filters.clientId && { clientId: filters.clientId }),
-          ...(filters.sharedWithMe &&
-            viewer && {
-              departmentId: { not: viewer.departmentId ?? undefined },
-              team: { some: { userId: viewer.id } },
-            }),
+          ...(filters.sharedWithMe
+            ? {
+                departmentId: { not: viewer.departmentId ?? undefined },
+                team: { some: { userId: viewer.id } },
+              }
+            : deptCodes && { department: { code: { in: deptCodes } } }),
         },
         include: {
           department: true,
@@ -70,8 +72,11 @@ export class ProjectsService {
     );
   }
 
-  findOne(id: string) {
-    return this.prisma.project.findUniqueOrThrow({
+  // 404 (not 403) for an out-of-scope project — it shouldn't even register as existing to a
+  // viewer who can't see it, matching the "invisible, not just access-denied" convention already
+  // used for system_admin visibility elsewhere in this app.
+  async findOne(id: string, viewer: AuthenticatedUser) {
+    const project = await this.prisma.project.findUniqueOrThrow({
       where: { id },
       include: {
         department: true,
@@ -81,6 +86,15 @@ export class ProjectsService {
         clientRequest: { select: { id: true, referenceNumber: true, title: true } },
       },
     });
+    const deptCodes = viewerDepartmentCodes(viewer);
+    if (deptCodes && !deptCodes.includes(project.department.code)) {
+      const isTeamMember = await this.prisma.projectTeamMember.findFirst({
+        where: { projectId: id, userId: viewer.id },
+        select: { id: true },
+      });
+      if (!isTeamMember) throw new NotFoundException("Project not found");
+    }
+    return project;
   }
 
   async create(dto: CreateProjectDto, user: AuthenticatedUser) {

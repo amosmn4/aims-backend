@@ -1,8 +1,14 @@
-import { BadRequestException, ForbiddenException, Injectable } from "@nestjs/common";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import type { Prisma, TenderStage } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { DocumentsService } from "../../documents/documents.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
+import { viewerDepartmentCodes } from "../../common/department-scope";
 import { maskUserRef } from "../../common/mask-user-ref";
 import { TtlCache } from "../../common/ttl-cache";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
@@ -49,6 +55,15 @@ function isAdminOrCeo(user: AuthenticatedUser) {
   return user.roles.includes("system_admin") || user.roles.includes("ceo");
 }
 
+// The Tender department runs the whole company's bid pipeline — a tender's `departmentId` is
+// who it's *destined for* once won, not who's working the bid — so a Tender-role viewer sees
+// every tender same as admin/CEO, while every other department only sees the ones routed to it.
+function tenderDeptFilter(viewer: AuthenticatedUser): Prisma.TenderWhereInput {
+  const deptCodes = viewerDepartmentCodes(viewer);
+  if (deptCodes === null || deptCodes.includes("tender")) return {};
+  return { department: { code: { in: deptCodes } } };
+}
+
 function buildWhere(filters: TenderFilters): Prisma.TenderWhereInput {
   return {
     ...(filters.departmentId && { departmentId: filters.departmentId }),
@@ -84,7 +99,7 @@ export class TendersService {
     const result = await maybePaginate(
       this.prisma.tender,
       {
-        where: buildWhere(filters),
+        where: { ...buildWhere(filters), ...tenderDeptFilter(viewer) },
         include: {
           client: { select: { id: true, name: true } },
           department: { select: { id: true, name: true, code: true } },
@@ -116,18 +131,20 @@ export class TendersService {
 
   // Real backend-side aggregation (Prisma groupBy), not client-side math — backs both the
   // Tender module's own funnel and the CEO dashboard's fixed funnel widget. Cached for 30s per
-  // distinct filter set: this scan re-runs on every dashboard/reports/tender-index load, and the
-  // underlying counts change on the order of minutes, not seconds.
-  pipelineSummary(filters: TenderFilters) {
-    return this.pipelineSummaryCache.getOrSet(JSON.stringify(filters), () =>
-      this.computePipelineSummary(filters),
+  // distinct filter set *and* viewer scope — the cache key includes the viewer's department
+  // codes so a department-scoped viewer can never be served a cached result computed for a
+  // different (wider) visibility scope.
+  pipelineSummary(filters: TenderFilters, viewer: AuthenticatedUser) {
+    const cacheKey = JSON.stringify({ filters, scope: viewerDepartmentCodes(viewer) });
+    return this.pipelineSummaryCache.getOrSet(cacheKey, () =>
+      this.computePipelineSummary(filters, viewer),
     );
   }
 
-  private async computePipelineSummary(filters: TenderFilters) {
+  private async computePipelineSummary(filters: TenderFilters, viewer: AuthenticatedUser) {
     const rows = await this.prisma.tender.groupBy({
       by: ["stage"],
-      where: buildWhere(filters),
+      where: { ...buildWhere(filters), ...tenderDeptFilter(viewer) },
       _count: { _all: true },
       _sum: { estimatedValue: true },
     });
@@ -147,9 +164,9 @@ export class TendersService {
   // columns: how long bids take to get submitted, how long a decision takes once submitted,
   // and which currently-open tenders have been sitting the longest — the "what's stalled
   // right now" list is the actionable half of this metric.
-  async timeMetrics(filters: TenderFilters) {
+  async timeMetrics(filters: TenderFilters, viewer: AuthenticatedUser) {
     const rows = await this.prisma.tender.findMany({
-      where: buildWhere(filters),
+      where: { ...buildWhere(filters), ...tenderDeptFilter(viewer) },
       select: {
         id: true,
         title: true,
@@ -193,6 +210,9 @@ export class TendersService {
     };
   }
 
+  // 404 (not 403) for an out-of-scope tender, same convention as Projects.findOne. The tender's
+  // own account manager can always see it (whatever department they're in) as a narrow escape
+  // hatch, same reasoning as Projects' team-membership exception.
   async findOne(id: string, viewer: AuthenticatedUser) {
     const tender = await this.prisma.tender.findUniqueOrThrow({
       where: { id },
@@ -207,6 +227,15 @@ export class TendersService {
         project: { select: { id: true, name: true } },
       },
     });
+    const deptCodes = viewerDepartmentCodes(viewer);
+    if (
+      deptCodes &&
+      !deptCodes.includes("tender") &&
+      !deptCodes.includes(tender.department.code) &&
+      tender.accountManagerId !== viewer.id
+    ) {
+      throw new NotFoundException("Tender not found");
+    }
     return {
       ...tender,
       accountManager: tender.accountManager ? maskUserRef(tender.accountManager, viewer) : null,

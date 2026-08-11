@@ -13,6 +13,7 @@ import type {
 import { PrismaService } from "../prisma/prisma.service";
 import { StorageService } from "../storage/storage.service";
 import { assertDepartmentAccess } from "../common/assert-department-access";
+import { viewerDepartmentCodes } from "../common/department-scope";
 import type { Paginated } from "../common/pagination";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import type { UploadDocumentDto } from "./dto/upload-document.dto";
@@ -214,7 +215,9 @@ export class DocumentsService {
 
     // Department filter only applies to resource types that actually carry a department;
     // project/task documents are filtered via their parent's department in application code
-    // since Document has no direct department column.
+    // since Document has no direct department column. Explicit opt-in, used by admin/CEO
+    // narrowing to one department on purpose — the *enforced* scope below is separate and
+    // always applies to a department-scoped viewer regardless of what filters were passed.
     if (filters.departmentId) {
       const [projectIds, taskProjectIds] = await Promise.all([
         this.prisma.project.findMany({
@@ -237,17 +240,63 @@ export class DocumentsService {
       );
     }
 
+    // Backend-enforced default scope: "mine" and "sharedWithMe" are already narrow (own uploads,
+    // explicit per-user grants) and skip this entirely. Otherwise, a department-scoped viewer
+    // only ever sees documents attached to a resource in their own department(s) — covering
+    // every resource type this model can attach to, not just project/task like the opt-in
+    // filter above. Operations/Tender see every tender/client_request document regardless of
+    // destination department, same intake-ownership exception used for those resources
+    // themselves; finance_report documents are Finance-only, since that resource type carries
+    // no department at all.
+    if (!filters.mine && !filters.sharedWithMe) {
+      const deptCodes = viewerDepartmentCodes(user);
+      if (deptCodes !== null) {
+        const seesTenderPipeline = deptCodes.includes("tender");
+        const seesIntakeQueue = seesTenderPipeline || deptCodes.includes("operations");
+        const [projects, tasks, tenders, requests] = await Promise.all([
+          this.prisma.project.findMany({
+            where: { department: { code: { in: deptCodes } } },
+            select: { id: true },
+          }),
+          this.prisma.task.findMany({
+            where: { project: { department: { code: { in: deptCodes } } } },
+            select: { id: true },
+          }),
+          this.prisma.tender.findMany({
+            where: seesTenderPipeline ? {} : { department: { code: { in: deptCodes } } },
+            select: { id: true },
+          }),
+          this.prisma.clientRequest.findMany({
+            where: seesIntakeQueue ? {} : { department: { code: { in: deptCodes } } },
+            select: { id: true },
+          }),
+        ]);
+        const allowedByType: Record<string, Set<string>> = {
+          project: new Set(projects.map((p) => p.id)),
+          task: new Set(tasks.map((t) => t.id)),
+          tender: new Set(tenders.map((t) => t.id)),
+          client_request: new Set(requests.map((r) => r.id)),
+        };
+        entries = entries.filter((doc) => {
+          if (doc.resourceType === "finance_report") return deptCodes.includes("finance");
+          return allowedByType[doc.resourceType]?.has(doc.resourceId) ?? true;
+        });
+      }
+    }
+
     // Contracts documents live in the legacy ContractDocument table — merge them in so the
     // central library shows everything, unless the caller explicitly scoped to a non-contract
     // resourceType or a specific resourceId (contracts have no resourceId query support here).
     const includeContracts =
       !filters.resourceId && (!filters.resourceType || filters.resourceType === "contract");
     if (includeContracts && !filters.tag) {
+      const deptCodes = filters.mine ? null : viewerDepartmentCodes(user);
       const contractDocs = await this.prisma.contractDocument.findMany({
         where: {
           ...(filters.mine && { uploadedBy: user.id }),
           ...(filters.q && { fileName: { contains: filters.q } }),
           ...(filters.departmentId && { contract: { departmentId: filters.departmentId } }),
+          ...(deptCodes && { contract: { department: { code: { in: deptCodes } } } }),
         },
         orderBy: { createdAt: "desc" },
       });

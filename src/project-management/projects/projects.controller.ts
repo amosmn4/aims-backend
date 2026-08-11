@@ -44,8 +44,8 @@ export class ProjectsController {
 
   @Get(":id")
   @Roles()
-  findOne(@Param("id") id: string) {
-    return this.projectsService.findOne(id);
+  findOne(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.projectsService.findOne(id, user);
   }
 
   @Post()

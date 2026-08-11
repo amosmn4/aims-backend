@@ -33,17 +33,18 @@ export class ContractsController {
   @Get()
   @Roles()
   findAll(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("clientId") clientId?: string,
     @Query() pagination?: PaginationQueryDto,
   ) {
-    return this.contractsService.findAll({ departmentId, clientId }, pagination);
+    return this.contractsService.findAll({ departmentId, clientId }, pagination, user);
   }
 
   @Get(":id")
   @Roles()
-  findOne(@Param("id") id: string) {
-    return this.contractsService.findOne(id);
+  findOne(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.contractsService.findOne(id, user);
   }
 
   @Post()
@@ -90,7 +91,10 @@ export class ContractsController {
   @Roles()
   async downloadDocument(@Param("documentId") documentId: string, @Res() res: Response) {
     const { doc, key } = await this.contractsService.getDocumentFile(documentId);
-    await this.storage.streamToResponse(key, res, { disposition: "attachment", fileName: doc.fileName });
+    await this.storage.streamToResponse(key, res, {
+      disposition: "attachment",
+      fileName: doc.fileName,
+    });
   }
 
   @Delete("documents/:documentId")

@@ -63,33 +63,31 @@ export class TendersController {
   @Get("pipeline-summary")
   @Roles()
   pipelineSummary(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("serviceLineId") serviceLineId?: string,
     @Query("deadlineFrom") deadlineFrom?: string,
     @Query("deadlineTo") deadlineTo?: string,
   ) {
-    return this.tendersService.pipelineSummary({
-      departmentId,
-      serviceLineId,
-      deadlineFrom,
-      deadlineTo,
-    });
+    return this.tendersService.pipelineSummary(
+      { departmentId, serviceLineId, deadlineFrom, deadlineTo },
+      user,
+    );
   }
 
   @Get("time-metrics")
   @Roles()
   timeMetrics(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("serviceLineId") serviceLineId?: string,
     @Query("deadlineFrom") deadlineFrom?: string,
     @Query("deadlineTo") deadlineTo?: string,
   ) {
-    return this.tendersService.timeMetrics({
-      departmentId,
-      serviceLineId,
-      deadlineFrom,
-      deadlineTo,
-    });
+    return this.tendersService.timeMetrics(
+      { departmentId, serviceLineId, deadlineFrom, deadlineTo },
+      user,
+    );
   }
 
   @Get(":id")

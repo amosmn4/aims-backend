@@ -25,6 +25,7 @@ export class ClientRequestsController {
   @Get()
   @Roles()
   findAll(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("serviceLineId") serviceLineId?: string,
     @Query("stage") stage?: ClientRequestStage,
@@ -37,6 +38,7 @@ export class ClientRequestsController {
   ) {
     return this.requestsService.findAll(
       { departmentId, serviceLineId, stage, source, clientId, q, dateFrom, dateTo },
+      user,
       pagination,
     );
   }
@@ -44,34 +46,46 @@ export class ClientRequestsController {
   @Get("pipeline-summary")
   @Roles()
   pipelineSummary(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("serviceLineId") serviceLineId?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
   ) {
-    return this.requestsService.pipelineSummary({ departmentId, serviceLineId, dateFrom, dateTo });
+    return this.requestsService.pipelineSummary(
+      { departmentId, serviceLineId, dateFrom, dateTo },
+      user,
+    );
   }
 
   @Get("lost-breakdown")
   @Roles()
   lostBreakdown(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("serviceLineId") serviceLineId?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
   ) {
-    return this.requestsService.lostBreakdown({ departmentId, serviceLineId, dateFrom, dateTo });
+    return this.requestsService.lostBreakdown(
+      { departmentId, serviceLineId, dateFrom, dateTo },
+      user,
+    );
   }
 
   @Get("time-in-stage")
   @Roles()
   timeInStage(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("serviceLineId") serviceLineId?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
   ) {
-    return this.requestsService.timeInStage({ departmentId, serviceLineId, dateFrom, dateTo });
+    return this.requestsService.timeInStage(
+      { departmentId, serviceLineId, dateFrom, dateTo },
+      user,
+    );
   }
 
   @Get(":id")
