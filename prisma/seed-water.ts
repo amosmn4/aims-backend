@@ -2,18 +2,22 @@ import { PrismaClient } from "@prisma/client";
 import * as fs from "fs";
 import * as path from "path";
 
-// Import of the real "meters csv.csv" export (Meter, Customer, Amount, Units, Created At)
-// sitting at the AIMS project root, into the Water Project module's own tables. Rows with a
-// blank Amount or Units are skipped — they're incomplete entries, not real transactions. Run via
-// `npm run seed:water` from backend/. Safe to re-run: meters/customers are reused by exact match
-// (meter number / customer name), and each usage record is deduped on
-// (meterId, recordedAt, unitsSold, amountPaid) before insert — the CSV's "Created At" carries
-// sub-millisecond precision, so this combination is effectively a natural transaction key. A
-// re-run over the same CSV imports 0 new records; a CSV with only new rows appended imports just
-// those.
+// Import of the real "meters csv.csv" export (Meter, Customer, Amount, Units, Created At) into
+// the Water Project module's own tables. Rows with a blank Amount or Units are skipped — they're
+// incomplete entries, not real transactions. Run via `npm run seed:water` from backend/. Safe to
+// re-run: meters/customers are reused by exact match (meter number / customer name), and each
+// usage record is deduped on (meterId, recordedAt, unitsSold, amountPaid) before insert — the
+// CSV's "Created At" carries sub-millisecond precision, so this combination is effectively a
+// natural transaction key. A re-run over the same CSV imports 0 new records; a CSV with only new
+// rows appended imports just those.
+//
+// Expects "meters csv.csv" at the backend repo root (backend/meters csv.csv) by default — see
+// WATER_CSV_PATH below to point elsewhere instead.
 const prisma = new PrismaClient();
 
-const CSV_PATH = path.resolve(__dirname, "../../meters csv.csv");
+const CSV_PATH = process.env.WATER_CSV_PATH
+  ? path.resolve(process.env.WATER_CSV_PATH)
+  : path.resolve(__dirname, "..", "meters csv.csv");
 
 // Minimal CSV line splitter that respects double-quoted fields (so a stray comma inside a
 // quoted value doesn't split it) — this file doesn't need more than that.
