@@ -9,7 +9,9 @@ export const INVENTORY_CATEGORIES = [
   "other",
 ] as const;
 
-export const INVENTORY_STATUSES = ["in_use", "in_storage", "under_repair", "retired"] as const;
+export const INVENTORY_STATUSES = ["in_use", "idle"] as const;
+
+export const INVENTORY_CONDITIONS = ["good", "working", "needs_attention", "faulty"] as const;
 
 export class CreateInventoryItemDto {
   @IsString()
@@ -28,6 +30,10 @@ export class CreateInventoryItemDto {
   @IsOptional()
   @IsIn(INVENTORY_STATUSES)
   status?: (typeof INVENTORY_STATUSES)[number];
+
+  @IsOptional()
+  @IsIn(INVENTORY_CONDITIONS)
+  condition?: (typeof INVENTORY_CONDITIONS)[number];
 
   @IsOptional()
   @IsString()

@@ -10,8 +10,6 @@ import { CreateTimeEntryDto } from "./dto/create-time-entry.dto";
 import { ConvertToContractDto } from "./dto/convert-to-contract.dto";
 import { ConvertTenderToProjectDto } from "./dto/convert-to-project.dto";
 import { CreateTenderActivityDto } from "./dto/create-tender-activity.dto";
-import { CreateTenderCostItemDto } from "./dto/create-tender-cost-item.dto";
-import { UpdateTenderCostItemDto } from "./dto/update-tender-cost-item.dto";
 import { CreateTenderBondDto } from "./dto/create-tender-bond.dto";
 import { UpdateTenderBondDto } from "./dto/update-tender-bond.dto";
 import { CreateTenderPricingItemDto } from "./dto/create-tender-pricing-item.dto";
@@ -22,7 +20,7 @@ import { SaveAsTemplateDto } from "./dto/save-as-template.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
-import { PaginationQueryDto } from "../../common/pagination";
+import { parsePaginationQuery } from "../../common/pagination";
 
 const WRITE_ROLES = ["finance", "hr", "it", "marketing", "tender"] as const;
 
@@ -42,7 +40,10 @@ export class TendersController {
     @Query("q") q?: string,
     @Query("deadlineFrom") deadlineFrom?: string,
     @Query("deadlineTo") deadlineTo?: string,
-    @Query() pagination?: PaginationQueryDto,
+    @Query("dateFrom") dateFrom?: string,
+    @Query("dateTo") dateTo?: string,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
     @CurrentUser() user?: AuthenticatedUser,
   ) {
     return this.tendersService.findAll(
@@ -54,9 +55,11 @@ export class TendersController {
         q,
         deadlineFrom,
         deadlineTo,
+        dateFrom,
+        dateTo,
       },
       user!,
-      pagination,
+      parsePaginationQuery(page, pageSize),
     );
   }
 
@@ -68,9 +71,11 @@ export class TendersController {
     @Query("serviceLineId") serviceLineId?: string,
     @Query("deadlineFrom") deadlineFrom?: string,
     @Query("deadlineTo") deadlineTo?: string,
+    @Query("dateFrom") dateFrom?: string,
+    @Query("dateTo") dateTo?: string,
   ) {
     return this.tendersService.pipelineSummary(
-      { departmentId, serviceLineId, deadlineFrom, deadlineTo },
+      { departmentId, serviceLineId, deadlineFrom, deadlineTo, dateFrom, dateTo },
       user,
     );
   }
@@ -83,9 +88,11 @@ export class TendersController {
     @Query("serviceLineId") serviceLineId?: string,
     @Query("deadlineFrom") deadlineFrom?: string,
     @Query("deadlineTo") deadlineTo?: string,
+    @Query("dateFrom") dateFrom?: string,
+    @Query("dateTo") dateTo?: string,
   ) {
     return this.tendersService.timeMetrics(
-      { departmentId, serviceLineId, deadlineFrom, deadlineTo },
+      { departmentId, serviceLineId, deadlineFrom, deadlineTo, dateFrom, dateTo },
       user,
     );
   }
@@ -208,40 +215,6 @@ export class TendersController {
     return this.tendersService.getCostSummary(id, user);
   }
 
-  /* ---------- Cost items ---------- */
-
-  @Get(":id/cost-items")
-  @Roles()
-  listCostItems(@Param("id") id: string) {
-    return this.tendersService.listCostItems(id);
-  }
-
-  @Post(":id/cost-items")
-  @Roles(...WRITE_ROLES)
-  createCostItem(
-    @Param("id") id: string,
-    @Body() dto: CreateTenderCostItemDto,
-    @CurrentUser() user: AuthenticatedUser,
-  ) {
-    return this.tendersService.createCostItem(id, dto, user);
-  }
-
-  @Patch("cost-items/:itemId")
-  @Roles(...WRITE_ROLES)
-  updateCostItem(
-    @Param("itemId") itemId: string,
-    @Body() dto: UpdateTenderCostItemDto,
-    @CurrentUser() user: AuthenticatedUser,
-  ) {
-    return this.tendersService.updateCostItem(itemId, dto, user);
-  }
-
-  @Delete("cost-items/:itemId")
-  @Roles(...WRITE_ROLES)
-  deleteCostItem(@Param("itemId") itemId: string, @CurrentUser() user: AuthenticatedUser) {
-    return this.tendersService.deleteCostItem(itemId, user);
-  }
-
   /* ---------- Bonds ---------- */
 
   @Get(":id/bonds")
@@ -358,6 +331,20 @@ export class TendersController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.tendersService.applyRequirementTemplate(id, templateId, user);
+  }
+
+  // Ticks a document from the shared mandatory-documents library (DocumentResourceType
+  // "tender_document_library") onto this tender: copies the library file into the tender's own
+  // document set and creates/updates a matching, already-"obtained" requirement — so the tender
+  // person never has to re-upload a document that's the same on every bid.
+  @Post(":id/requirements/apply-library-document/:libraryDocumentId")
+  @Roles(...WRITE_ROLES)
+  applyLibraryDocument(
+    @Param("id") id: string,
+    @Param("libraryDocumentId") libraryDocumentId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.tendersService.applyLibraryDocument(id, libraryDocumentId, user);
   }
 
   @Post(":id/requirements/save-as-template")

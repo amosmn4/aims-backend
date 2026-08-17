@@ -8,7 +8,7 @@ import { UpdateCommentDto } from "./dto/update-comment.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
-import { PaginationQueryDto } from "../../common/pagination";
+import { parsePaginationQuery } from "../../common/pagination";
 
 @Controller("tasks")
 export class TasksController {
@@ -22,11 +22,12 @@ export class TasksController {
     @Query("departmentId") departmentId?: string,
     @Query("assigneeId") assigneeId?: string,
     @Query("status") status?: TaskStatus,
-    @Query() pagination?: PaginationQueryDto,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
   ) {
     return this.tasksService.findAll(
       { projectId, departmentId, assigneeId, status },
-      pagination,
+      parsePaginationQuery(page, pageSize),
       user,
     );
   }

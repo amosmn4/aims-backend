@@ -16,6 +16,7 @@ enum AppRole {
   marketing
   tender
   operations
+  water
   department_head
   account_manager
   general_staff
@@ -92,6 +93,12 @@ enum DocumentResourceType {
   finance_report
   tender
   client_request
+  // A single, company-wide catalog of documents that are the same across every tender (e.g.
+  // certificate of incorporation, tax compliance certificate) — uploaded once here, then
+  // "ticked" onto an individual tender's requirements checklist (see Tender.applyLibraryDocument)
+  // instead of being re-uploaded per tender. Not attached to any real resource, so every row
+  // of this type shares one fixed sentinel resourceId ("global") rather than pointing at one.
+  tender_document_library
 }
 
 // Matches the AMSOL Pipeline prototype's tender board exactly: identified -> applying
@@ -207,30 +214,39 @@ enum InventoryCategory {
   other
 }
 
+// Deployment state — is it actively deployed to someone, or sitting idle (in storage, awaiting
+// reassignment)? Kept deliberately small; physical/functional state lives on `condition` instead
+// so the two questions ("is it in use" vs "is it in good shape") don't get conflated.
 enum InventoryStatus {
   in_use
-  in_storage
-  under_repair
-  retired
+  idle
+}
+
+enum InventoryCondition {
+  good
+  working
+  needs_attention
+  faulty
 }
 
 model InventoryItem {
-  id             String            @id @default(uuid()) @db.Char(36)
-  assetTag       String            @unique @map("asset_tag")
-  deviceName     String            @map("device_name")
-  description    String?           @db.Text
+  id             String              @id @default(uuid()) @db.Char(36)
+  assetTag       String              @unique @map("asset_tag")
+  deviceName     String              @map("device_name")
+  description    String?             @db.Text
   category       InventoryCategory
-  status         InventoryStatus   @default(in_use)
+  status         InventoryStatus     @default(in_use)
+  condition      InventoryCondition  @default(good)
   brand          String?
   model          String?
-  serialNumber   String?           @map("serial_number")
-  assignedTo     String?           @map("assigned_to")
-  officeId       String?           @map("office_id") @db.Char(36)
-  purchaseDate   DateTime?         @map("purchase_date")
-  warrantyExpiry DateTime?         @map("warranty_expiry")
-  notes          String?           @db.Text
-  createdAt      DateTime          @default(now()) @map("created_at")
-  updatedAt      DateTime          @updatedAt @map("updated_at")
+  serialNumber   String?             @map("serial_number")
+  assignedTo     String?             @map("assigned_to")
+  officeId       String?             @map("office_id") @db.Char(36)
+  purchaseDate   DateTime?           @map("purchase_date")
+  warrantyExpiry DateTime?           @map("warranty_expiry")
+  notes          String?             @db.Text
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @updatedAt @map("updated_at")
 
   office Office? @relation(fields: [officeId], references: [id], onDelete: SetNull)
 
@@ -311,6 +327,8 @@ model User {
   ticketsCreated            Ticket[]                @relation("TicketCreatedBy")
   campaignsCreated          Campaign[]              @relation("CampaignCreatedBy")
   passwordSetupTokens       PasswordSetupToken[]
+  waterUsageUploads         WaterUsageUpload[]      @relation("WaterUsageUploadCreatedBy")
+  waterMeterReadings        WaterMeterReading[]     @relation("WaterMeterReadingCreatedBy")
 
   @@map("users")
 }
@@ -1618,4 +1636,144 @@ model Notification {
   @@unique([userId, dedupeKey])
   @@index([userId, isRead])
   @@map("notifications")
+}
+
+/* ================= Water Project ================= */
+// A self-contained module: borehole/main meter -> zone bulk meters -> household meters ->
+// customers, with dated usage/payment records (seeded from a CSV export, or uploaded later) and
+// separate dial readings for main/bulk meters used to compute distribution loss (NRW).
+
+enum WaterMeterType {
+  main
+  bulk
+  household
+}
+
+enum WaterUsageSource {
+  seed
+  upload
+  manual
+}
+
+// Zones nest arbitrarily deep (a zone can sit inside another zone) rather than a fixed two-tier
+// zone/sub-zone split — Meters and Customers forms still present it as "Zone" then "Sub-zone"
+// (top-level pick, then one of its children), but that's just two levels of the same tree walked
+// from the frontend; the data model itself doesn't cap the depth.
+model WaterZone {
+  id           String   @id @default(uuid()) @db.Char(36)
+  name         String
+  parentZoneId String?  @map("parent_zone_id") @db.Char(36)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  parent    WaterZone?      @relation("ZoneHierarchy", fields: [parentZoneId], references: [id], onDelete: Restrict)
+  children  WaterZone[]     @relation("ZoneHierarchy")
+  meters    WaterMeter[]
+  customers WaterCustomer[]
+
+  @@unique([parentZoneId, name])
+  @@index([parentZoneId])
+  @@map("water_zones")
+}
+
+model WaterCustomer {
+  id        String   @id @default(uuid()) @db.Char(36)
+  name      String
+  zoneId    String?  @map("zone_id") @db.Char(36)
+  phone     String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  zone         WaterZone?         @relation(fields: [zoneId], references: [id], onDelete: SetNull)
+  meters       WaterMeter[]
+  usageRecords WaterUsageRecord[]
+
+  @@index([zoneId])
+  @@map("water_customers")
+}
+
+// Meters are the module's primary entry point — registering one captures who it's assigned to,
+// where (plot number, zone) and when it was installed, rather than requiring a customer to be
+// created as a separate step first (see WaterService.createMeter's find-or-create-by-name).
+model WaterMeter {
+  id          String         @id @default(uuid()) @db.Char(36)
+  meterNumber String         @unique @map("meter_number")
+  meterType   WaterMeterType @default(household) @map("meter_type")
+  customerId  String?        @map("customer_id") @db.Char(36)
+  plotNo      String?        @map("plot_no")
+  installedAt DateTime?      @map("installed_at")
+  zoneId      String?        @map("zone_id") @db.Char(36)
+  isActive    Boolean        @default(true) @map("is_active")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  customer WaterCustomer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  zone     WaterZone?     @relation(fields: [zoneId], references: [id], onDelete: SetNull)
+
+  usageRecords WaterUsageRecord[]
+  readings     WaterMeterReading[]
+
+  @@index([customerId])
+  @@index([zoneId])
+  @@map("water_meters")
+}
+
+// One row per confirmed CSV/Excel upload — dated snapshots, so usage records stay traceable to
+// the batch (and file) they arrived in, matching maybePaginate's "opt-in envelope" pattern used
+// everywhere else: a plain list of uploads, each with a rollup of its own records.
+model WaterUsageUpload {
+  id          String   @id @default(uuid()) @db.Char(36)
+  fileName    String   @map("file_name")
+  recordCount Int      @default(0) @map("record_count")
+  uploadedBy  String?  @map("uploaded_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  uploader User?              @relation("WaterUsageUploadCreatedBy", fields: [uploadedBy], references: [id], onDelete: SetNull)
+  records  WaterUsageRecord[]
+
+  @@map("water_usage_uploads")
+}
+
+// A single purchase/consumption transaction against a household meter — units sold + amount
+// paid, dated by `recordedAt` (the actual purchase date, not when it was entered into AIMS).
+// `customerName` is kept verbatim from the source row even when `customerId` resolves, since a
+// meter can change hands and the historical record should still say who actually paid.
+model WaterUsageRecord {
+  id           String           @id @default(uuid()) @db.Char(36)
+  meterId      String           @map("meter_id") @db.Char(36)
+  customerId   String?          @map("customer_id") @db.Char(36)
+  customerName String           @map("customer_name")
+  unitsSold    Decimal          @db.Decimal(12, 2) @map("units_sold")
+  amountPaid   Decimal          @db.Decimal(14, 2) @map("amount_paid")
+  recordedAt   DateTime         @map("recorded_at")
+  source       WaterUsageSource @default(manual)
+  uploadId     String?          @map("upload_id") @db.Char(36)
+  createdAt    DateTime         @default(now()) @map("created_at")
+
+  meter    WaterMeter        @relation(fields: [meterId], references: [id], onDelete: Cascade)
+  customer WaterCustomer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  upload   WaterUsageUpload? @relation(fields: [uploadId], references: [id], onDelete: SetNull)
+
+  @@index([meterId, recordedAt])
+  @@index([recordedAt])
+  @@map("water_usage_records")
+}
+
+// A dial reading for a main or bulk meter — distinct from WaterUsageRecord (no customer/payment
+// involved). Consecutive readings for the same meter are compared to derive period consumption
+// for the loss ladder / NRW calculations, same semantics as the reference dashboard.
+model WaterMeterReading {
+  id          String   @id @default(uuid()) @db.Char(36)
+  meterId     String   @map("meter_id") @db.Char(36)
+  readingDate DateTime @map("reading_date")
+  value       Decimal  @db.Decimal(14, 2)
+  notes       String?
+  createdBy   String?  @map("created_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  meter   WaterMeter @relation(fields: [meterId], references: [id], onDelete: Cascade)
+  creator User?      @relation("WaterMeterReadingCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([meterId, readingDate])
+  @@map("water_meter_readings")
 }

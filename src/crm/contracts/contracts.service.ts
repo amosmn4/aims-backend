@@ -1,4 +1,5 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import type { ContractStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { StorageService } from "../../storage/storage.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
@@ -29,7 +30,7 @@ export class ContractsService {
   // see assertContractDeptAccess below) is admin/CEO-only for the same reason it's admin/CEO-only
   // to manage: nobody's department claims it.
   findAll(
-    filters: { departmentId?: string; clientId?: string },
+    filters: { departmentId?: string; clientId?: string; status?: ContractStatus; q?: string },
     pagination: PaginationQueryDto = {},
     viewer: AuthenticatedUser,
   ) {
@@ -40,12 +41,57 @@ export class ContractsService {
         where: {
           ...(filters.departmentId && { departmentId: filters.departmentId }),
           ...(filters.clientId && { clientId: filters.clientId }),
+          ...(filters.status && { status: filters.status }),
+          ...(filters.q && {
+            OR: [
+              { title: { contains: filters.q } },
+              { contractNumber: { contains: filters.q } },
+              { client: { name: { contains: filters.q } } },
+            ],
+          }),
           ...(deptCodes && { department: { code: { in: deptCodes } } }),
         },
         orderBy: { createdAt: "desc" },
       },
       pagination,
     );
+  }
+
+  // Aggregate totals across every contract matching the filters — independent of pagination —
+  // so the list page's summary cards (count/active/value) stay accurate for the full filtered
+  // set rather than just whatever page is currently on screen.
+  async summary(
+    filters: { departmentId?: string; clientId?: string; status?: ContractStatus; q?: string },
+    viewer: AuthenticatedUser,
+  ) {
+    const deptCodes = viewerDepartmentCodes(viewer);
+    const where = {
+      ...(filters.departmentId && { departmentId: filters.departmentId }),
+      ...(filters.clientId && { clientId: filters.clientId }),
+      ...(filters.status && { status: filters.status }),
+      ...(filters.q && {
+        OR: [
+          { title: { contains: filters.q } },
+          { contractNumber: { contains: filters.q } },
+          { client: { name: { contains: filters.q } } },
+        ],
+      }),
+      ...(deptCodes && { department: { code: { in: deptCodes } } }),
+    };
+    const [totals, activeTotals] = await Promise.all([
+      this.prisma.contract.aggregate({ where, _count: true, _sum: { value: true } }),
+      this.prisma.contract.aggregate({
+        where: { ...where, status: "active" as ContractStatus },
+        _count: true,
+        _sum: { value: true },
+      }),
+    ]);
+    return {
+      count: totals._count,
+      value: totals._sum.value ?? 0,
+      activeCount: activeTotals._count,
+      activeValue: activeTotals._sum.value ?? 0,
+    };
   }
 
   // 404 (not 403) for an out-of-scope contract, same convention as Projects.findOne.

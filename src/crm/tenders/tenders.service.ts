@@ -21,8 +21,6 @@ import type { UpdateTenderResourceDto } from "./dto/update-tender-resource.dto";
 import type { CreateTimeEntryDto } from "./dto/create-time-entry.dto";
 import type { ConvertToContractDto } from "./dto/convert-to-contract.dto";
 import type { ConvertTenderToProjectDto } from "./dto/convert-to-project.dto";
-import type { CreateTenderCostItemDto } from "./dto/create-tender-cost-item.dto";
-import type { UpdateTenderCostItemDto } from "./dto/update-tender-cost-item.dto";
 import type { CreateTenderBondDto } from "./dto/create-tender-bond.dto";
 import type { UpdateTenderBondDto } from "./dto/update-tender-bond.dto";
 import type { CreateTenderPricingItemDto } from "./dto/create-tender-pricing-item.dto";
@@ -53,6 +51,10 @@ export interface TenderFilters {
   q?: string;
   deadlineFrom?: string;
   deadlineTo?: string;
+  /** Period filter on `createdAt` — when the tender entered the pipeline, as distinct from
+   * `deadlineFrom`/`deadlineTo` which filter on `submissionDeadline`. */
+  dateFrom?: string;
+  dateTo?: string;
 }
 
 function isAdminOrCeo(user: AuthenticatedUser) {
@@ -79,6 +81,12 @@ function buildWhere(filters: TenderFilters): Prisma.TenderWhereInput {
       submissionDeadline: {
         ...(filters.deadlineFrom && { gte: new Date(filters.deadlineFrom) }),
         ...(filters.deadlineTo && { lte: new Date(filters.deadlineTo) }),
+      },
+    }),
+    ...((filters.dateFrom || filters.dateTo) && {
+      createdAt: {
+        ...(filters.dateFrom && { gte: new Date(filters.dateFrom) }),
+        ...(filters.dateTo && { lte: new Date(filters.dateTo) }),
       },
     }),
   };
@@ -634,39 +642,6 @@ export class TendersService {
     };
   }
 
-  /* ---------- Cost items (non-staff pursuit cost) ---------- */
-
-  listCostItems(tenderId: string) {
-    return this.prisma.tenderCostItem.findMany({
-      where: { tenderId },
-      orderBy: { createdAt: "asc" },
-    });
-  }
-
-  async createCostItem(tenderId: string, dto: CreateTenderCostItemDto, user: AuthenticatedUser) {
-    const tender = await this.prisma.tender.findUniqueOrThrow({ where: { id: tenderId } });
-    await this.assertTenderDeptAccess(tender.departmentId, user);
-    return this.prisma.tenderCostItem.create({ data: { tenderId, ...dto, createdBy: user.id } });
-  }
-
-  async updateCostItem(itemId: string, dto: UpdateTenderCostItemDto, user: AuthenticatedUser) {
-    const item = await this.prisma.tenderCostItem.findUniqueOrThrow({
-      where: { id: itemId },
-      include: { tender: true },
-    });
-    await this.assertTenderDeptAccess(item.tender.departmentId, user);
-    return this.prisma.tenderCostItem.update({ where: { id: itemId }, data: dto });
-  }
-
-  async deleteCostItem(itemId: string, user: AuthenticatedUser) {
-    const item = await this.prisma.tenderCostItem.findUniqueOrThrow({
-      where: { id: itemId },
-      include: { tender: true },
-    });
-    await this.assertTenderDeptAccess(item.tender.departmentId, user);
-    return this.prisma.tenderCostItem.delete({ where: { id: itemId } });
-  }
-
   /* ---------- Bonds ---------- */
 
   listBonds(tenderId: string) {
@@ -757,14 +732,12 @@ export class TendersService {
   // cost) is kept entirely separate from "bid price" (the pricing breakdown); nothing here
   // touches Tender.estimatedValue, which stays the quick manual figure used by the funnel.
   async getFinancialsSummary(tenderId: string) {
-    const [humanCost, costItems, pricingItems, bonds] = await Promise.all([
+    const [humanCost, pricingItems, bonds] = await Promise.all([
       this.getCostSummaryTotalsOnly(tenderId),
-      this.prisma.tenderCostItem.findMany({ where: { tenderId } }),
       this.prisma.tenderPricingItem.findMany({ where: { tenderId } }),
       this.prisma.tenderBond.findMany({ where: { tenderId } }),
     ]);
 
-    const otherCostTotal = costItems.reduce((sum, c) => sum + Number(c.amount), 0);
     const bidPrice = pricingItems.reduce(
       (sum, p) => sum + Number(p.quantity) * Number(p.unitPrice),
       0,
@@ -772,8 +745,7 @@ export class TendersService {
 
     return {
       humanCost: humanCost.budgetedCost,
-      otherCostTotal,
-      totalCostToPursue: humanCost.budgetedCost + otherCostTotal,
+      totalCostToPursue: humanCost.budgetedCost,
       bidPrice,
       bondsTotal: bonds.reduce((sum, b) => sum + Number(b.amount), 0),
       bondCount: bonds.length,
@@ -847,6 +819,73 @@ export class TendersService {
         sortOrder: existingCount + i,
       })),
     });
+    return this.listRequirements(tenderId);
+  }
+
+  // Copies a document from the shared mandatory-documents library onto this tender: a new
+  // Document/DocumentVersion scoped to the tender, pointing at the SAME storage key as the
+  // library master (no file I/O — versions are immutable once written, so sharing a path across
+  // many tenders' copies is safe), plus a matching requirement marked already "obtained". Ticking
+  // the same library document again updates that requirement in place instead of duplicating it.
+  async applyLibraryDocument(tenderId: string, libraryDocumentId: string, user: AuthenticatedUser) {
+    const tender = await this.prisma.tender.findUniqueOrThrow({ where: { id: tenderId } });
+    await this.assertTenderDeptAccess(tender.departmentId, user);
+
+    const libraryDoc = await this.prisma.document.findUniqueOrThrow({
+      where: { id: libraryDocumentId },
+      include: { latestVersion: true },
+    });
+    if (libraryDoc.resourceType !== "tender_document_library" || !libraryDoc.latestVersion) {
+      throw new BadRequestException("Not a valid mandatory-documents-library entry");
+    }
+
+    const doc = await this.prisma.document.create({
+      data: {
+        resourceType: "tender",
+        resourceId: tenderId,
+        title: libraryDoc.title,
+        description: libraryDoc.description,
+        category: libraryDoc.category,
+        createdBy: user.id,
+      },
+    });
+    const version = await this.prisma.documentVersion.create({
+      data: {
+        documentId: doc.id,
+        versionNo: 1,
+        fileName: libraryDoc.latestVersion.fileName,
+        storagePath: libraryDoc.latestVersion.storagePath,
+        mimeType: libraryDoc.latestVersion.mimeType,
+        sizeBytes: libraryDoc.latestVersion.sizeBytes,
+        uploadedBy: user.id,
+      },
+    });
+    await this.prisma.document.update({
+      where: { id: doc.id },
+      data: { latestVersionId: version.id },
+    });
+
+    const existingRequirement = await this.prisma.tenderRequirement.findFirst({
+      where: { tenderId, title: libraryDoc.title },
+    });
+    if (existingRequirement) {
+      await this.prisma.tenderRequirement.update({
+        where: { id: existingRequirement.id },
+        data: { status: "obtained", documentId: doc.id },
+      });
+    } else {
+      const count = await this.prisma.tenderRequirement.count({ where: { tenderId } });
+      await this.prisma.tenderRequirement.create({
+        data: {
+          tenderId,
+          title: libraryDoc.title,
+          category: libraryDoc.category,
+          status: "obtained",
+          documentId: doc.id,
+          sortOrder: count,
+        },
+      });
+    }
     return this.listRequirements(tenderId);
   }
 

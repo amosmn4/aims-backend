@@ -1,4 +1,9 @@
-import { ForbiddenException, Injectable, NotFoundException, BadRequestException } from "@nestjs/common";
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from "@nestjs/common";
 import * as crypto from "crypto";
 import type { User } from "@prisma/client";
 import { ConfigService } from "@nestjs/config";
@@ -21,14 +26,17 @@ export class UsersService {
     private readonly config: ConfigService,
   ) {}
 
-  // System admins are invisible to everyone except another system admin — including the CEO
-  // — everywhere in the app. This is the one place that rule is enforced for the full listing;
-  // findAllLite() below enforces the same rule for the lightweight picker endpoint.
+  // System admin accounts are invisible in the Users & Roles admin UI, full stop — never shown
+  // in the list, never offered as a "grant role" option, not even to another system admin. The
+  // role is seeded/self-managed outside this screen; keeping it off the list entirely (rather
+  // than just hidden from non-admins) keeps the day-to-day admin UI free of the one account with
+  // unrestricted access. findAllLite() below enforces the same rule for the lightweight picker
+  // endpoint.
   async findAll(viewer: AuthenticatedUser, pagination: PaginationQueryDto = {}) {
     const result = await maybePaginate(
       this.prisma.user,
       {
-        where: isSystemAdmin(viewer) ? undefined : { roles: { none: { role: "system_admin" } } },
+        where: { roles: { none: { role: "system_admin" } } },
         include: { roles: true, department: true, office: true },
         orderBy: { createdAt: "desc" },
       },
@@ -41,12 +49,9 @@ export class UsersService {
     return Array.isArray(result) ? result.map(strip) : { ...result, data: result.data.map(strip) };
   }
 
-  findAllLite(viewer: AuthenticatedUser) {
+  findAllLite(_viewer: AuthenticatedUser) {
     return this.prisma.user.findMany({
-      where: {
-        isActive: true,
-        ...(isSystemAdmin(viewer) ? {} : { roles: { none: { role: "system_admin" } } }),
-      },
+      where: { isActive: true, roles: { none: { role: "system_admin" } } },
       select: { id: true, email: true, fullName: true },
       orderBy: { fullName: "asc" },
     });
@@ -178,5 +183,4 @@ export class UsersService {
       throw new NotFoundException("User not found");
     }
   }
-
 }

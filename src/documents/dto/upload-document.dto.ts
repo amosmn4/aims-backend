@@ -1,6 +1,13 @@
 import { IsIn, IsOptional, IsString } from "class-validator";
 
-const RESOURCE_TYPES = ["project", "task", "finance_report", "tender", "client_request"] as const;
+const RESOURCE_TYPES = [
+  "project",
+  "task",
+  "finance_report",
+  "tender",
+  "client_request",
+  "tender_document_library",
+] as const;
 
 export class UploadDocumentDto {
   @IsIn(RESOURCE_TYPES)

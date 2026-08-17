@@ -36,6 +36,7 @@ import { HrmsLicensesModule } from "./it/hrms-licenses/hrms-licenses.module";
 import { InventoryModule } from "./it/inventory/inventory.module";
 import { CampaignsModule } from "./marketing/campaigns/campaigns.module";
 import { CalendarModule } from "./calendar/calendar.module";
+import { WaterModule } from "./water/water.module";
 
 @Module({
   imports: [
@@ -75,6 +76,7 @@ import { CalendarModule } from "./calendar/calendar.module";
     InventoryModule,
     CampaignsModule,
     CalendarModule,
+    WaterModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

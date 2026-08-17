@@ -12,6 +12,7 @@ import {
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import type { ContractStatus } from "@prisma/client";
 import type { Response } from "express";
 import { ContractsService } from "./contracts.service";
 import { StorageService } from "../../storage/storage.service";
@@ -19,7 +20,7 @@ import { CreateContractDto } from "./dto/create-contract.dto";
 import { UpdateContractDto } from "./dto/update-contract.dto";
 import { UploadDocumentDto } from "./dto/upload-document.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
-import { PaginationQueryDto } from "../../common/pagination";
+import { parsePaginationQuery } from "../../common/pagination";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 
@@ -36,9 +37,28 @@ export class ContractsController {
     @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("clientId") clientId?: string,
-    @Query() pagination?: PaginationQueryDto,
+    @Query("status") status?: ContractStatus,
+    @Query("q") q?: string,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
   ) {
-    return this.contractsService.findAll({ departmentId, clientId }, pagination, user);
+    return this.contractsService.findAll(
+      { departmentId, clientId, status, q },
+      parsePaginationQuery(page, pageSize),
+      user,
+    );
+  }
+
+  @Get("summary")
+  @Roles()
+  summary(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("departmentId") departmentId?: string,
+    @Query("clientId") clientId?: string,
+    @Query("status") status?: ContractStatus,
+    @Query("q") q?: string,
+  ) {
+    return this.contractsService.summary({ departmentId, clientId, status, q }, user);
   }
 
   @Get(":id")

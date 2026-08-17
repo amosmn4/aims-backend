@@ -7,7 +7,7 @@ import { UpdateContactDto } from "./dto/update-contact.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
-import { PaginationQueryDto } from "../../common/pagination";
+import { parsePaginationQuery } from "../../common/pagination";
 
 @Controller("clients")
 export class ClientsController {
@@ -15,8 +15,25 @@ export class ClientsController {
 
   @Get()
   @Roles()
-  findAll(@CurrentUser() user: AuthenticatedUser, @Query() pagination: PaginationQueryDto) {
-    return this.clientsService.findAll(pagination, user);
+  findAll(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("industry") industry?: string,
+    @Query("segment") segment?: string,
+    @Query("q") q?: string,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
+  ) {
+    return this.clientsService.findAll(
+      { industry, segment, q },
+      parsePaginationQuery(page, pageSize),
+      user,
+    );
+  }
+
+  @Get("facets")
+  @Roles()
+  facets(@CurrentUser() user: AuthenticatedUser) {
+    return this.clientsService.facets(user);
   }
 
   // Any department that onboards a won request/tender needs to be able to create the client

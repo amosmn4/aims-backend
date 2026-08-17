@@ -13,6 +13,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "ts-node prisma/seed.ts",
     "reset:demo-data": "ts-node prisma/reset-demo-data.ts",
+    "seed:water": "ts-node prisma/seed-water.ts",
     "test": "jest"
   },
   "dependencies": {

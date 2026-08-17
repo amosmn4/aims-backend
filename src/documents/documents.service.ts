@@ -121,6 +121,13 @@ export class DocumentsService {
       return;
     }
 
+    // A shared, unattached catalog (see the schema's DocumentResourceType comment) — managing
+    // it is Tender's call, since it exists to serve the bidding process, plus admin/CEO.
+    if (resourceType === "tender_document_library") {
+      if (isAdminOrCeo(user) || user.roles.includes("tender")) return;
+      throw new ForbiddenException("Only Tender can manage the mandatory documents library");
+    }
+
     if (resourceType === "client_request") {
       const request = await this.prisma.clientRequest.findUniqueOrThrow({
         where: { id: resourceId },

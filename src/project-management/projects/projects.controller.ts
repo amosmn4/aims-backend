@@ -17,7 +17,7 @@ import { UpdateRaidEntryDto } from "./dto/update-raid-entry.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
-import { PaginationQueryDto } from "../../common/pagination";
+import { parsePaginationQuery } from "../../common/pagination";
 
 @Controller("projects")
 export class ProjectsController {
@@ -33,11 +33,12 @@ export class ProjectsController {
     @Query("status") status?: ProjectStatus,
     @Query("clientId") clientId?: string,
     @Query("sharedWithMe") sharedWithMe?: string,
-    @Query() pagination?: PaginationQueryDto,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
   ) {
     return this.projectsService.findAll(
       { departmentId, status, clientId, sharedWithMe: sharedWithMe === "true" },
-      pagination,
+      parsePaginationQuery(page, pageSize),
       user,
     );
   }

@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import type { InventoryCategory, InventoryStatus } from "@prisma/client";
+import type { InventoryCategory, InventoryCondition, InventoryStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import type { CreateInventoryItemDto } from "./dto/create-inventory-item.dto";
@@ -8,6 +8,7 @@ import type { UpdateInventoryItemDto } from "./dto/update-inventory-item.dto";
 export interface InventoryFilters {
   category?: InventoryCategory;
   status?: InventoryStatus;
+  condition?: InventoryCondition;
   officeId?: string;
   q?: string;
 }
@@ -23,6 +24,7 @@ export class InventoryService {
         where: {
           ...(filters.category && { category: filters.category }),
           ...(filters.status && { status: filters.status }),
+          ...(filters.condition && { condition: filters.condition }),
           ...(filters.officeId && { officeId: filters.officeId }),
           ...(filters.q && {
             OR: [
@@ -55,6 +57,7 @@ export class InventoryService {
         description: dto.description,
         category: dto.category,
         status: dto.status,
+        condition: dto.condition,
         brand: dto.brand,
         model: dto.model,
         serialNumber: dto.serialNumber,
@@ -77,6 +80,7 @@ export class InventoryService {
         description: dto.description,
         category: dto.category,
         status: dto.status,
+        condition: dto.condition,
         brand: dto.brand,
         model: dto.model,
         serialNumber: dto.serialNumber,

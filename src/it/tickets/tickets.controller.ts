@@ -6,7 +6,7 @@ import { UpdateTicketStatusDto } from "./dto/update-ticket-status.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
-import { PaginationQueryDto } from "../../common/pagination";
+import { parsePaginationQuery } from "../../common/pagination";
 
 @Controller("tickets")
 export class TicketsController {
@@ -14,8 +14,12 @@ export class TicketsController {
 
   @Get()
   @Roles()
-  findAll(@CurrentUser() user: AuthenticatedUser, @Query() pagination?: PaginationQueryDto) {
-    return this.ticketsService.findAll(user, pagination);
+  findAll(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
+  ) {
+    return this.ticketsService.findAll(user, parsePaginationQuery(page, pageSize));
   }
 
   @Get(":id")

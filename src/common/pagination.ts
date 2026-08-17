@@ -16,6 +16,27 @@ export class PaginationQueryDto {
   pageSize?: number;
 }
 
+/**
+ * Extracts page/pageSize from two individually-decorated string query params instead of a bare
+ * `@Query() pagination: PaginationQueryDto`. That bare form binds the ENTIRE query object (every
+ * other filter on the same endpoint, not just page/pageSize), and with this app's global
+ * ValidationPipe (`forbidNonWhitelisted: true`), any of those other keys — `q`, `stage`,
+ * `departmentId`, anything — makes the whole request 400 with "property X should not exist".
+ * Controllers must extract page/pageSize individually
+ * (`@Query("page") page?: string, @Query("pageSize") pageSize?: string`) and pass them here.
+ */
+export function parsePaginationQuery(page?: string, pageSize?: string): PaginationQueryDto {
+  const parsedPage = page ? Number(page) : undefined;
+  const parsedPageSize = pageSize ? Number(pageSize) : undefined;
+  return {
+    page: parsedPage && Number.isInteger(parsedPage) && parsedPage > 0 ? parsedPage : undefined,
+    pageSize:
+      parsedPageSize && Number.isInteger(parsedPageSize) && parsedPageSize > 0
+        ? parsedPageSize
+        : undefined,
+  };
+}
+
 export interface Paginated<T> {
   data: T[];
   total: number;

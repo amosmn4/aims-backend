@@ -11,7 +11,7 @@ import { CreateActivityDto } from "./dto/create-activity.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
-import { PaginationQueryDto } from "../../common/pagination";
+import { parsePaginationQuery } from "../../common/pagination";
 
 // Any of the 5 delivery departments can be *routed* a request and then manage it from there.
 // Operations owns intake — creating and routing a request is restricted to operations — but
@@ -34,12 +34,13 @@ export class ClientRequestsController {
     @Query("q") q?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
-    @Query() pagination?: PaginationQueryDto,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
   ) {
     return this.requestsService.findAll(
       { departmentId, serviceLineId, stage, source, clientId, q, dateFrom, dateTo },
       user,
-      pagination,
+      parsePaginationQuery(page, pageSize),
     );
   }
 

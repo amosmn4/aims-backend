@@ -17,27 +17,68 @@ export class ClientsService {
   // their departments. Operations/Tender additionally see every client tied only to an unrouted
   // (department-less) client request, matching the same intake-ownership exception used for
   // Client Requests themselves.
-  findAll(pagination: PaginationQueryDto = {}, viewer: AuthenticatedUser) {
+  private scopeWhere(viewer: AuthenticatedUser) {
     const deptCodes = viewerDepartmentCodes(viewer);
     const unrestricted =
       deptCodes === null || deptCodes.includes("operations") || deptCodes.includes("tender");
+    return unrestricted
+      ? undefined
+      : {
+          OR: [
+            { contracts: { some: { department: { code: { in: deptCodes! } } } } },
+            { tenders: { some: { department: { code: { in: deptCodes! } } } } },
+            { clientRequests: { some: { department: { code: { in: deptCodes! } } } } },
+            { projects: { some: { department: { code: { in: deptCodes! } } } } },
+          ],
+        };
+  }
+
+  findAll(
+    filters: { industry?: string; segment?: string; q?: string } = {},
+    pagination: PaginationQueryDto = {},
+    viewer: AuthenticatedUser,
+  ) {
+    const scope = this.scopeWhere(viewer);
     return maybePaginate(
       this.prisma.client,
       {
-        where: unrestricted
-          ? undefined
-          : {
-              OR: [
-                { contracts: { some: { department: { code: { in: deptCodes } } } } },
-                { tenders: { some: { department: { code: { in: deptCodes } } } } },
-                { clientRequests: { some: { department: { code: { in: deptCodes } } } } },
-                { projects: { some: { department: { code: { in: deptCodes } } } } },
-              ],
-            },
+        where: {
+          ...(filters.industry && { industry: filters.industry }),
+          ...(filters.segment && { segment: filters.segment }),
+          ...(filters.q && {
+            OR: [{ name: { contains: filters.q } }, { code: { contains: filters.q } }],
+          }),
+          ...(scope && scope),
+        },
         orderBy: { name: "asc" },
       },
       pagination,
     );
+  }
+
+  // Distinct industry/segment values across every client in the viewer's scope — independent of
+  // the industry/segment/q filters on findAll, so the filter dropdowns always list every option
+  // rather than shrinking to whatever the current filter selection already narrowed to.
+  async facets(viewer: AuthenticatedUser) {
+    const where = this.scopeWhere(viewer);
+    const [industries, segments] = await Promise.all([
+      this.prisma.client.findMany({
+        where: { ...where, industry: { not: null } },
+        distinct: ["industry"],
+        select: { industry: true },
+        orderBy: { industry: "asc" },
+      }),
+      this.prisma.client.findMany({
+        where: { ...where, segment: { not: null } },
+        distinct: ["segment"],
+        select: { segment: true },
+        orderBy: { segment: "asc" },
+      }),
+    ]);
+    return {
+      industries: industries.map((i) => i.industry).filter((v): v is string => !!v),
+      segments: segments.map((s) => s.segment).filter((v): v is string => !!v),
+    };
   }
 
   create(dto: CreateClientDto) {
