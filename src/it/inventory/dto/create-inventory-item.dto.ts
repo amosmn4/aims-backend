@@ -9,7 +9,13 @@ export const INVENTORY_CATEGORIES = [
   "other",
 ] as const;
 
-export const INVENTORY_STATUSES = ["in_use", "idle"] as const;
+export const INVENTORY_STATUSES = [
+  "in_use",
+  "idle",
+  "in_storage",
+  "under_repair",
+  "retired",
+] as const;
 
 export const INVENTORY_CONDITIONS = ["good", "working", "needs_attention", "faulty"] as const;
 

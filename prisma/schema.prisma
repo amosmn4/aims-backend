@@ -214,12 +214,17 @@ enum InventoryCategory {
   other
 }
 
-// Deployment state — is it actively deployed to someone, or sitting idle (in storage, awaiting
-// reassignment)? Kept deliberately small; physical/functional state lives on `condition` instead
-// so the two questions ("is it in use" vs "is it in good shape") don't get conflated.
+// Deployment state. `idle` is the newer, general "not currently assigned to anyone" bucket;
+// `in_storage` / `under_repair` / `retired` are the older, more specific states and are kept
+// alongside it rather than collapsed into it — a retired or under-repair asset carries real
+// operational meaning that a flat "idle" would lose. Functional/physical state lives on
+// `condition` instead, so "is it in use" and "is it in good shape" don't get conflated.
 enum InventoryStatus {
   in_use
   idle
+  in_storage
+  under_repair
+  retired
 }
 
 enum InventoryCondition {
