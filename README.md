@@ -37,3 +37,14 @@ pm2 restart aims-backend   # restart after a deploy
 ```
 
 Make sure `backend/.env` is present and populated on the server before starting the app — it is not committed to git.
+
+## Seeding (manual — never runs automatically)
+
+`prisma migrate deploy` never seeds data. Seeding is a separate, one-off step you run yourself:
+
+```bash
+npm run seed          # departments, service lines, office, bootstrap System Admin
+npm run seed:water    # Water Project meters/customers import from meters csv.csv
+```
+
+Both are safe to re-run — everything is upserted or deduped, so running them again (e.g. after `meters csv.csv` gets new rows appended) only creates what's actually new.

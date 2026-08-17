@@ -34,7 +34,9 @@ export class AuthController {
       sameSite: "lax",
       secure: this.config.get("NODE_ENV") === "production",
       path: "/api/v1/auth",
-      maxAge: parseTtlToMs(this.config.get<string>("JWT_REFRESH_TTL", "24h")),
+      // Matches the refresh JWT's own expiresIn (JWT_IDLE_TTL) — this is the sliding session
+      // timeout, not the absolute ceiling. See AuthService.refreshAccessToken.
+      maxAge: parseTtlToMs(this.config.get<string>("JWT_IDLE_TTL", "2h")),
     };
   }
 
@@ -56,17 +58,19 @@ export class AuthController {
     return { accessToken, user: authUser };
   }
 
-  // No `res.cookie(...)` here on purpose — see AuthService.refreshAccessToken's own comment.
-  // The refresh cookie set at login is left exactly as it was; this only ever hands back a new
-  // access token, so the session's real ceiling is JWT_REFRESH_TTL from the original login.
+  // Re-sets the refresh cookie on every call — this is what makes the session's idle timeout
+  // actually slide. See AuthService.refreshAccessToken for the sliding-window + absolute-ceiling
+  // logic this relies on.
   @Public()
   @Post("refresh")
   @HttpCode(200)
-  async refresh(@Req() req: Request) {
+  async refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const refreshToken = req.cookies?.[REFRESH_COOKIE];
     if (!refreshToken) throw new UnauthorizedException("No refresh token provided");
 
-    const { accessToken } = await this.authService.refreshAccessToken(refreshToken);
+    const { accessToken, refreshToken: rolledRefreshToken } =
+      await this.authService.refreshAccessToken(refreshToken);
+    res.cookie(REFRESH_COOKIE, rolledRefreshToken, this.refreshCookieOptions());
     return { accessToken };
   }
 

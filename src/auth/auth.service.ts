@@ -5,7 +5,7 @@ import * as bcrypt from "bcrypt";
 import * as crypto from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import type { AuthenticatedUser } from "./types/authenticated-user";
-import type { TtlString } from "./ttl.util";
+import { parseTtlToMs, type TtlString } from "./ttl.util";
 
 const SALT_ROUNDS = 10;
 
@@ -87,31 +87,50 @@ export class AuthService {
     return { authUser, ...this.issueTokens(authUser) };
   }
 
-  issueTokens(user: AuthenticatedUser) {
-    const payload = { sub: user.id };
-    const accessToken = this.jwt.sign(payload, {
-      secret: this.config.getOrThrow<string>("JWT_ACCESS_SECRET"),
-      expiresIn: this.config.get<string>("JWT_ACCESS_TTL", "15m") as TtlString,
-    });
-    const refreshToken = this.jwt.sign(payload, {
-      secret: this.config.getOrThrow<string>("JWT_REFRESH_SECRET"),
-      expiresIn: this.config.get<string>("JWT_REFRESH_TTL", "7d") as TtlString,
-    });
+  // `sessionStart` is carried unchanged through every sliding renewal (see refreshAccessToken)
+  // so the absolute JWT_REFRESH_TTL ceiling can still be enforced no matter how many times the
+  // idle window below has been rolled forward. Defaults to "now" — i.e. a fresh login.
+  issueTokens(user: AuthenticatedUser, sessionStart: number = Date.now()) {
+    const accessToken = this.jwt.sign(
+      { sub: user.id },
+      {
+        secret: this.config.getOrThrow<string>("JWT_ACCESS_SECRET"),
+        expiresIn: this.config.get<string>("JWT_ACCESS_TTL", "15m") as TtlString,
+      },
+    );
+    // The refresh JWT's own expiry is the sliding idle window, not the absolute ceiling — a
+    // stolen/replayed refresh token this old is worthless even before the cookie is checked.
+    const refreshToken = this.jwt.sign(
+      { sub: user.id, sessionStart },
+      {
+        secret: this.config.getOrThrow<string>("JWT_REFRESH_SECRET"),
+        expiresIn: this.config.get<string>("JWT_IDLE_TTL", "2h") as TtlString,
+      },
+    );
     return { accessToken, refreshToken };
   }
 
-  // Deliberately does NOT issue a new refresh token — only a new access token. The refresh
-  // token (and its cookie) set at login is left untouched here, so JWT_REFRESH_TTL is a real
-  // absolute ceiling on how long a session can last without a fresh login: "reload the tab every
-  // few minutes forever" no longer resets the clock to another full week every time it does.
+  // Sliding inactivity timeout + absolute ceiling. Every successful call here means the session
+  // was actually used (the frontend only calls /auth/refresh on page load and when an access
+  // token has expired mid-use), so it's a real activity signal: a new refresh token is issued
+  // with the idle window (JWT_IDLE_TTL) rolled fully forward again, and the controller re-sets
+  // the cookie to match. Go quiet for longer than JWT_IDLE_TTL — tab closed, laptop asleep, no
+  // API calls — and the refresh JWT itself has already expired by the time anything asks for a
+  // new one. `sessionStart` is never touched by the rolling renewal, so JWT_REFRESH_TTL still
+  // forces a real login after that long even if the session never once sat idle.
   async refreshAccessToken(refreshToken: string) {
-    let payload: { sub: string };
+    let payload: { sub: string; sessionStart: number };
     try {
       payload = this.jwt.verify(refreshToken, {
         secret: this.config.getOrThrow<string>("JWT_REFRESH_SECRET"),
       });
     } catch {
       throw new UnauthorizedException("Invalid or expired refresh token");
+    }
+
+    const absoluteTtlMs = parseTtlToMs(this.config.get<string>("JWT_REFRESH_TTL", "7d"));
+    if (Date.now() - payload.sessionStart > absoluteTtlMs) {
+      throw new UnauthorizedException("Your session has expired — please log in again");
     }
 
     const user = await this.prisma.user.findUnique({
@@ -122,14 +141,13 @@ export class AuthService {
       throw new UnauthorizedException("Invalid or expired refresh token");
     }
 
-    const accessToken = this.jwt.sign(
-      { sub: user.id },
-      {
-        secret: this.config.getOrThrow<string>("JWT_ACCESS_SECRET"),
-        expiresIn: this.config.get<string>("JWT_ACCESS_TTL", "15m") as TtlString,
-      },
-    );
-    return { accessToken };
+    const authUser: AuthenticatedUser = {
+      id: user.id,
+      email: user.email,
+      roles: user.roles.map((r) => r.role),
+      departmentId: user.departmentId,
+    };
+    return this.issueTokens(authUser, payload.sessionStart);
   }
 
   async getProfile(userId: string) {

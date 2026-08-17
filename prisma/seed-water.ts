@@ -2,12 +2,15 @@ import { PrismaClient } from "@prisma/client";
 import * as fs from "fs";
 import * as path from "path";
 
-// One-off import of the real "meters csv.csv" export (Meter, Customer, Amount, Units, Created
-// At) sitting at the AIMS project root, into the Water Project module's own tables. Rows with a
+// Import of the real "meters csv.csv" export (Meter, Customer, Amount, Units, Created At)
+// sitting at the AIMS project root, into the Water Project module's own tables. Rows with a
 // blank Amount or Units are skipped — they're incomplete entries, not real transactions. Run via
-// `npm run seed:water` from backend/. Safe to re-run: existing meters/customers are reused by
-// exact match (meter number / customer name) and usage records are only ever inserted once per
-// run, so re-running duplicates records — this is a one-shot import, not a sync job.
+// `npm run seed:water` from backend/. Safe to re-run: meters/customers are reused by exact match
+// (meter number / customer name), and each usage record is deduped on
+// (meterId, recordedAt, unitsSold, amountPaid) before insert — the CSV's "Created At" carries
+// sub-millisecond precision, so this combination is effectively a natural transaction key. A
+// re-run over the same CSV imports 0 new records; a CSV with only new rows appended imports just
+// those.
 const prisma = new PrismaClient();
 
 const CSV_PATH = path.resolve(__dirname, "../../meters csv.csv");
@@ -61,6 +64,7 @@ async function main() {
 
   let skipped = 0;
   let imported = 0;
+  let duplicates = 0;
   const meterCache = new Map<string, string>(); // meterNumber -> WaterMeter.id
   const customerCache = new Map<string, string>(); // customer name -> WaterCustomer.id
 
@@ -105,6 +109,15 @@ async function main() {
       meterCache.set(meterNumber, meterId);
     }
 
+    const duplicate = await prisma.waterUsageRecord.findFirst({
+      where: { meterId, recordedAt, unitsSold: units, amountPaid: amount },
+      select: { id: true },
+    });
+    if (duplicate) {
+      duplicates++;
+      continue;
+    }
+
     await prisma.waterUsageRecord.create({
       data: {
         meterId,
@@ -120,7 +133,7 @@ async function main() {
   }
 
   console.log(
-    `Water seed complete: ${imported} usage records imported, ${skipped} rows skipped (missing meter/customer/amount/units/date), ${meterCache.size} distinct meters, ${customerCache.size} distinct customers.`,
+    `Water seed complete: ${imported} usage records imported, ${duplicates} already existed (skipped), ${skipped} rows skipped (missing meter/customer/amount/units/date), ${meterCache.size} distinct meters, ${customerCache.size} distinct customers.`,
   );
 }
 

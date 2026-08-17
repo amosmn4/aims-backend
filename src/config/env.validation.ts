@@ -8,6 +8,11 @@ const envSchema = z.object({
   JWT_ACCESS_SECRET: z.string().min(1, "JWT_ACCESS_SECRET is required"),
   JWT_REFRESH_SECRET: z.string().min(1, "JWT_REFRESH_SECRET is required"),
   JWT_ACCESS_TTL: z.string().default("15m"),
+  // Sliding inactivity timeout — every successful /auth/refresh rolls this forward. No API
+  // activity for this long (tab idle/closed/asleep) and the session is gone.
+  JWT_IDLE_TTL: z.string().default("2h"),
+  // Absolute ceiling from the moment of login, independent of activity — even a continuously
+  // active session must fully re-login after this long.
   JWT_REFRESH_TTL: z.string().default("7d"),
 
   PORT: z.coerce.number().int().positive().default(4000),
