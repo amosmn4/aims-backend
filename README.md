@@ -47,16 +47,5 @@ npm run prisma:seed   # departments, service lines, office, bootstrap System Adm
 npm run seed:water    # Water Project meters/customers import from meters csv.csv
 ```
 
-Both are safe to re-run — everything is upserted or deduped, so running them again (e.g. after `meters csv.csv` gets new rows appended) only creates what's actually new.
-
-`seed:water` reads `backend/meters csv.csv`, which is gitignored (real customer data — never committed). `git pull` will never bring it in, so copy it to the server yourself before running the seed, e.g. from your machine:
-
-```bash
-scp "meters csv.csv" bitnami@<server>:/opt/bitnami/projects/aims-backend/
-```
-
-To use a different location/filename instead, set `WATER_CSV_PATH`:
-
-```bash
-WATER_CSV_PATH=/path/to/meters.csv npm run seed:water
+`seed:water` reads `backend/meters csv.csv`
 ```

@@ -62,6 +62,11 @@ export class WaterController {
     return this.waterService.findAllCustomers({ zoneId, q }, parsePaginationQuery(page, pageSize));
   }
 
+  @Get("customers/:id")
+  getCustomerDetail(@Param("id") id: string) {
+    return this.waterService.getCustomerDetail(id);
+  }
+
   @Post("customers")
   createCustomer(@Body() dto: CreateCustomerDto) {
     return this.waterService.createCustomer(dto);
@@ -91,6 +96,11 @@ export class WaterController {
       { meterType, zoneId, q },
       parsePaginationQuery(page, pageSize),
     );
+  }
+
+  @Get("meters/:id")
+  getMeterDetail(@Param("id") id: string) {
+    return this.waterService.getMeterDetail(id);
   }
 
   @Post("meters")

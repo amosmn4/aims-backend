@@ -152,6 +152,59 @@ export class WaterService {
     return this.prisma.waterCustomer.delete({ where: { id } });
   }
 
+  // Everything one customer's detail page needs in one call: profile, all their meters, lifetime
+  // totals across every meter, a 6-month trend, and the most recent transactions.
+  async getCustomerDetail(id: string) {
+    const customer = await this.prisma.waterCustomer.findUniqueOrThrow({
+      where: { id },
+      include: { zone: true, meters: { include: { zone: true } } },
+    });
+
+    const [totals, recentUsage] = await Promise.all([
+      this.prisma.waterUsageRecord.aggregate({
+        where: { customerId: id },
+        _sum: { unitsSold: true, amountPaid: true },
+        _count: true,
+        _max: { recordedAt: true },
+      }),
+      this.prisma.waterUsageRecord.findMany({
+        where: { customerId: id },
+        orderBy: { recordedAt: "desc" },
+        take: 20,
+        include: { meter: { select: { id: true, meterNumber: true } } },
+      }),
+    ]);
+
+    const months: string[] = [];
+    for (let i = 5; i >= 0; i--) months.push(shiftMonth(undefined, -i));
+    const monthly = await Promise.all(
+      months.map(async (month) => {
+        const { start, end } = monthRange(month);
+        const agg = await this.prisma.waterUsageRecord.aggregate({
+          where: { customerId: id, recordedAt: { gte: start, lt: end } },
+          _sum: { unitsSold: true, amountPaid: true },
+        });
+        return {
+          month,
+          unitsSold: Number(agg._sum.unitsSold ?? 0),
+          revenue: Number(agg._sum.amountPaid ?? 0),
+        };
+      }),
+    );
+
+    return {
+      customer,
+      totals: {
+        unitsSold: Number(totals._sum.unitsSold ?? 0),
+        revenue: Number(totals._sum.amountPaid ?? 0),
+        transactionCount: totals._count,
+        lastVendAt: totals._max.recordedAt,
+      },
+      monthly,
+      recentUsage,
+    };
+  }
+
   private async findOrCreateCustomerByName(name: string, zoneId?: string) {
     const existing = await this.prisma.waterCustomer.findFirst({ where: { name } });
     if (existing) return existing;
@@ -172,7 +225,19 @@ export class WaterService {
           ...(filters.zoneId && { zoneId: filters.zoneId }),
           ...(filters.q && { meterNumber: { contains: filters.q } }),
         },
-        include: { customer: { select: { id: true, name: true } }, zone: true },
+        include: {
+          customer: { select: { id: true, name: true } },
+          zone: true,
+          // Last vend date + lifetime count — lets the frontend flag meters that have gone
+          // quiet (a strong signal of a broken meter, an inactive customer, or a data gap) at
+          // a glance, without a separate round trip per meter.
+          usageRecords: {
+            orderBy: { recordedAt: "desc" },
+            take: 1,
+            select: { recordedAt: true },
+          },
+          _count: { select: { usageRecords: true } },
+        },
         orderBy: { meterNumber: "asc" },
       },
       pagination,
@@ -231,6 +296,64 @@ export class WaterService {
   async deleteMeter(id: string) {
     await this.prisma.waterMeter.findUniqueOrThrow({ where: { id } });
     return this.prisma.waterMeter.delete({ where: { id } });
+  }
+
+  // Everything one meter's detail page needs in one call: profile, lifetime totals, a 6-month
+  // trend, recent transactions, and (for main/bulk meters) recent dial readings.
+  async getMeterDetail(id: string) {
+    const meter = await this.prisma.waterMeter.findUniqueOrThrow({
+      where: { id },
+      include: { customer: true, zone: true },
+    });
+
+    const [totals, recentUsage, recentReadings] = await Promise.all([
+      this.prisma.waterUsageRecord.aggregate({
+        where: { meterId: id },
+        _sum: { unitsSold: true, amountPaid: true },
+        _count: true,
+        _max: { recordedAt: true },
+      }),
+      this.prisma.waterUsageRecord.findMany({
+        where: { meterId: id },
+        orderBy: { recordedAt: "desc" },
+        take: 20,
+      }),
+      this.prisma.waterMeterReading.findMany({
+        where: { meterId: id },
+        orderBy: { readingDate: "desc" },
+        take: 12,
+      }),
+    ]);
+
+    const months: string[] = [];
+    for (let i = 5; i >= 0; i--) months.push(shiftMonth(undefined, -i));
+    const monthly = await Promise.all(
+      months.map(async (month) => {
+        const { start, end } = monthRange(month);
+        const agg = await this.prisma.waterUsageRecord.aggregate({
+          where: { meterId: id, recordedAt: { gte: start, lt: end } },
+          _sum: { unitsSold: true, amountPaid: true },
+        });
+        return {
+          month,
+          unitsSold: Number(agg._sum.unitsSold ?? 0),
+          revenue: Number(agg._sum.amountPaid ?? 0),
+        };
+      }),
+    );
+
+    return {
+      meter,
+      totals: {
+        unitsSold: Number(totals._sum.unitsSold ?? 0),
+        revenue: Number(totals._sum.amountPaid ?? 0),
+        transactionCount: totals._count,
+        lastVendAt: totals._max.recordedAt,
+      },
+      monthly,
+      recentUsage,
+      recentReadings,
+    };
   }
 
   /* ---------- Meter readings (main / bulk) ---------- */
@@ -309,13 +432,34 @@ export class WaterService {
   // Rows arrive already parsed (client-side, from CSV/Excel) — each is matched to a registered
   // meter by number, auto-provisioning the meter (and its customer) the first time a meter number
   // is seen so an upload never silently drops a row just because the register hasn't caught up.
+  // Deduped on (meterId, recordedAt, unitsSold, amountPaid) before insert — the same natural key
+  // used by the one-off CSV import (prisma/seed-water.ts) — so re-uploading the same file, or a
+  // file with overlapping rows from a previous upload, never double-counts a transaction.
   async createUpload(dto: CreateUsageUploadDto, user: AuthenticatedUser) {
     const upload = await this.prisma.waterUsageUpload.create({
-      data: { fileName: dto.fileName, uploadedBy: user.id, recordCount: dto.rows.length },
+      data: { fileName: dto.fileName, uploadedBy: user.id, recordCount: 0 },
     });
 
+    let imported = 0;
+    let duplicates = 0;
     for (const row of dto.rows) {
       const meter = await this.findOrCreateMeterWithCustomer(row.meterNumber, row.customerName);
+      const recordedAt = new Date(row.recordedAt);
+
+      const duplicate = await this.prisma.waterUsageRecord.findFirst({
+        where: {
+          meterId: meter.id,
+          recordedAt,
+          unitsSold: row.unitsSold,
+          amountPaid: row.amountPaid,
+        },
+        select: { id: true },
+      });
+      if (duplicate) {
+        duplicates++;
+        continue;
+      }
+
       await this.prisma.waterUsageRecord.create({
         data: {
           meterId: meter.id,
@@ -323,16 +467,25 @@ export class WaterService {
           customerName: row.customerName,
           unitsSold: row.unitsSold,
           amountPaid: row.amountPaid,
-          recordedAt: new Date(row.recordedAt),
+          recordedAt,
           source: "upload",
           uploadId: upload.id,
         },
       });
+      imported++;
     }
-    return this.prisma.waterUsageUpload.findUniqueOrThrow({
+
+    await this.prisma.waterUsageUpload.update({
       where: { id: upload.id },
-      include: { _count: { select: { records: true } } },
+      data: { recordCount: imported },
     });
+    return {
+      ...(await this.prisma.waterUsageUpload.findUniqueOrThrow({
+        where: { id: upload.id },
+        include: { _count: { select: { records: true } } },
+      })),
+      duplicatesSkipped: duplicates,
+    };
   }
 
   private async findOrCreateMeterWithCustomer(meterNumber: string, customerName: string) {
