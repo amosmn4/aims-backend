@@ -33,7 +33,6 @@ const ALL_STAGES: TenderStage[] = [
   "identified",
   "applying",
   "submitted",
-  "evaluation",
   "won",
   "lost",
   "withdrawn",
@@ -41,7 +40,7 @@ const ALL_STAGES: TenderStage[] = [
 
 // The funnel's actual progression, in order — lost/withdrawn are exits from this line, not
 // steps on it (see computePipelineSummary's cumulative-reach logic below).
-const PROGRESS_STAGES: TenderStage[] = ["identified", "applying", "submitted", "evaluation", "won"];
+const PROGRESS_STAGES: TenderStage[] = ["identified", "applying", "submitted", "won"];
 
 export interface TenderFilters {
   departmentId?: string;
@@ -130,6 +129,11 @@ export class TendersService {
           // request per card. Percent-complete is computed client-side from this, same as the
           // Project Workspace's EVM/Gantt stats.
           requirements: { select: { status: true } },
+          // Just the id — this is what the Kanban card uses to tell "won, not yet forwarded"
+          // (show the Forward button) apart from "won, already forwarded" (show the confirmation
+          // link instead of re-offering to forward it).
+          contract: { select: { id: true } },
+          project: { select: { id: true } },
         },
         orderBy: { createdAt: "desc" },
       },

@@ -13,7 +13,7 @@ export interface DeadlineItem {
   to: string;
 }
 
-const OPEN_TENDER_STAGES: TenderStage[] = ["identified", "applying", "submitted", "evaluation"];
+const OPEN_TENDER_STAGES: TenderStage[] = ["identified", "applying", "submitted"];
 
 // Purely a read lens over dates that already exist on Tender/TenderBond/Contract/Task — no new
 // data model, matches the original recommendation ("no schema change").
