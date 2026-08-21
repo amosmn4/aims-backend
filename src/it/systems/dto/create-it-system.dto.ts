@@ -1,6 +1,13 @@
 import { IsIn, IsOptional, IsString } from "class-validator";
 
-export const IT_SYSTEM_TYPES = ["website", "internal_system", "integration"] as const;
+export const IT_SYSTEM_TYPES = [
+  "website",
+  "internal_system",
+  "integration",
+  "client_system",
+  "infrastructure",
+  "mobile_app",
+] as const;
 export const IT_SYSTEM_STATUSES = ["active", "inactive", "deprecated"] as const;
 
 export class CreateItSystemDto {

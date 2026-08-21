@@ -18,7 +18,10 @@ interface DigestItem {
 
 function renderDigest(name: string, items: DigestItem[]): string {
   const rows = items
-    .map((i) => `<li><strong>${escapeHtml(i.title)}</strong>${i.body ? ` — ${escapeHtml(i.body)}` : ""}</li>`)
+    .map(
+      (i) =>
+        `<li><strong>${escapeHtml(i.title)}</strong>${i.body ? ` — ${escapeHtml(i.body)}` : ""}</li>`,
+    )
     .join("");
   return `<p>Hi ${escapeHtml(name)},</p><p>Here's what's waiting for you in AIMS:</p><ul>${rows}</ul>`;
 }
@@ -47,10 +50,22 @@ export class NotificationsDigestService {
       orderBy: { createdAt: "desc" },
     });
 
+    // Opted out of the digest specifically — they may still want in-app notifications, this
+    // only silences the daily email.
+    const optedOut = await this.prisma.notificationPreference.findMany({
+      where: { userId: { in: [...new Set(unread.map((n) => n.userId))] }, emailDigest: false },
+      select: { userId: true },
+    });
+    const optedOutIds = new Set(optedOut.map((p) => p.userId));
+
     const byUser = new Map<string, { email: string; name: string; items: DigestItem[] }>();
     for (const n of unread) {
-      if (!n.user?.email) continue;
-      const entry = byUser.get(n.userId) ?? { email: n.user.email, name: n.user.fullName ?? n.user.email, items: [] };
+      if (!n.user?.email || optedOutIds.has(n.userId)) continue;
+      const entry = byUser.get(n.userId) ?? {
+        email: n.user.email,
+        name: n.user.fullName ?? n.user.email,
+        items: [],
+      };
       entry.items.push({ title: n.title, body: n.body });
       byUser.set(n.userId, entry);
     }

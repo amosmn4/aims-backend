@@ -6,6 +6,8 @@ import { viewerDepartmentCodes } from "../../common/department-scope";
 import { maskUserRef } from "../../common/mask-user-ref";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import { DocumentsService } from "../../documents/documents.service";
+import { TimelineExtensionsService } from "../timeline-extensions/timeline-extensions.service";
+import { NotificationsService } from "../../notifications/notifications.service";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateProjectDto } from "./dto/create-project.dto";
 import type { UpdateProjectDto } from "./dto/update-project.dto";
@@ -27,13 +29,17 @@ export class ProjectsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly documentsService: DocumentsService,
+    private readonly timelineExtensionsService: TimelineExtensionsService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   // Visibility is scoped to the viewer's own department(s) — admin/CEO see everything, a
-  // department-scoped viewer sees only their own department's projects, full stop. The one
-  // deliberate exception is `sharedWithMe`: a project outside the viewer's department they've
-  // been explicitly added to as a team member — an opt-in grant, not a blanket leak, so it uses
-  // its own narrower authorization (team membership) instead of the department-code check.
+  // department-scoped viewer sees only their own department's projects, minus any `restricted`
+  // project they're not the creator or a team member of (see `Project.visibility`: work one
+  // person or a named few own, hidden from the rest of the department). The one deliberate
+  // exception is `sharedWithMe`: a project outside the viewer's department they've been
+  // explicitly added to as a team member — an opt-in grant, not a blanket leak, so it uses its
+  // own narrower authorization (team membership) instead of the department-code check.
   findAll(
     filters: {
       departmentId?: string;
@@ -57,7 +63,14 @@ export class ProjectsService {
                 departmentId: { not: viewer.departmentId ?? undefined },
                 team: { some: { userId: viewer.id } },
               }
-            : deptCodes && { department: { code: { in: deptCodes } } }),
+            : deptCodes && {
+                department: { code: { in: deptCodes } },
+                OR: [
+                  { visibility: "department" },
+                  { createdBy: viewer.id },
+                  { team: { some: { userId: viewer.id } } },
+                ],
+              }),
         },
         include: {
           department: true,
@@ -87,7 +100,11 @@ export class ProjectsService {
       },
     });
     const deptCodes = viewerDepartmentCodes(viewer);
-    if (deptCodes && !deptCodes.includes(project.department.code)) {
+    const needsMembershipCheck = deptCodes
+      ? !deptCodes.includes(project.department.code) ||
+        (project.visibility === "restricted" && project.createdBy !== viewer.id)
+      : false; // admin/CEO (deptCodes === null) always see everything
+    if (needsMembershipCheck) {
       const isTeamMember = await this.prisma.projectTeamMember.findFirst({
         where: { projectId: id, userId: viewer.id },
         select: { id: true },
@@ -103,7 +120,7 @@ export class ProjectsService {
     });
     assertDepartmentAccess(department, user);
 
-    return this.prisma.project.create({
+    const project = await this.prisma.project.create({
       data: {
         name: dto.name,
         description: dto.description,
@@ -111,11 +128,62 @@ export class ProjectsService {
         contractId: dto.contractId,
         departmentId: dto.departmentId,
         status: dto.status,
+        visibility: dto.visibility,
+        engagementType: dto.engagementType,
         startDate: dto.startDate ? new Date(dto.startDate) : undefined,
         endDate: dto.endDate ? new Date(dto.endDate) : undefined,
         createdBy: user.id,
       },
     });
+    if (dto.memberIds?.length) {
+      await this.grantTeamAccess(project.id, project.name, dto.memberIds, user);
+    }
+    return project;
+  }
+
+  // Additive-only: creates a ProjectTeamMember row (userId set) for anyone in `userIds` not
+  // already on the team. Used by the visibility picker on create/edit — removing someone's
+  // access is a separate, explicit action on the Team tab, not something this silently does.
+  private async grantTeamAccess(
+    projectId: string,
+    projectName: string,
+    userIds: string[],
+    actor: AuthenticatedUser,
+  ) {
+    const existing = await this.prisma.projectTeamMember.findMany({
+      where: { projectId, userId: { in: userIds } },
+      select: { userId: true },
+    });
+    const already = new Set(existing.map((m) => m.userId));
+    const toAdd = userIds.filter((id) => !already.has(id));
+    if (toAdd.length === 0) return;
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: toAdd } },
+      select: { id: true, fullName: true, email: true },
+    });
+    await this.prisma.projectTeamMember.createMany({
+      data: users.map((u) => ({
+        projectId,
+        userId: u.id,
+        name: u.fullName ?? u.email,
+        role: "Member",
+        type: "internal" as const,
+      })),
+    });
+    await Promise.all(
+      users
+        .filter((u) => u.id !== actor.id)
+        .map((u) =>
+          this.notificationsService.notify({
+            userId: u.id,
+            type: "project_shared",
+            title: `You were added to: ${projectName}`,
+            resourceType: "project",
+            resourceId: projectId,
+            createdBy: actor.id,
+          }),
+        ),
+    );
   }
 
   async update(id: string, dto: UpdateProjectDto, user: AuthenticatedUser) {
@@ -132,14 +200,37 @@ export class ProjectsService {
       );
     }
 
-    return this.prisma.project.update({
+    const { memberIds, extensionReason, extensionAttribution, ...rest } = dto;
+    const updated = await this.prisma.project.update({
       where: { id },
       data: {
-        ...dto,
+        ...rest,
         startDate: dto.startDate ? new Date(dto.startDate) : undefined,
         endDate: dto.endDate ? new Date(dto.endDate) : undefined,
       },
     });
+    if (memberIds?.length) await this.grantTeamAccess(id, updated.name, memberIds, user);
+
+    // A timeline extension is only meaningful when a real previous end date got pushed later —
+    // first-time-set isn't an extension, and a date moving earlier isn't either.
+    if (
+      dto.endDate &&
+      project.endDate &&
+      new Date(dto.endDate).getTime() > project.endDate.getTime() &&
+      extensionReason &&
+      extensionAttribution
+    ) {
+      await this.timelineExtensionsService.create({
+        entityType: "project",
+        entityId: id,
+        previousDate: project.endDate,
+        newDate: new Date(dto.endDate),
+        reason: extensionReason,
+        attributedTo: extensionAttribution,
+        createdBy: user.id,
+      });
+    }
+    return updated;
   }
 
   // Department-scoped like every other mutation on this model — a department's own staff can
@@ -377,11 +468,21 @@ export class ProjectsService {
   }
 
   async createTeamMember(projectId: string, dto: CreateTeamMemberDto, user: AuthenticatedUser) {
-    await this.assertProjectAccess(projectId, user);
+    const project = await this.assertProjectAccess(projectId, user);
     const member = await this.prisma.projectTeamMember.create({
       data: { projectId, ...dto },
       include: { user: { select: userSelect } },
     });
+    if (dto.userId && dto.userId !== user.id) {
+      await this.notificationsService.notify({
+        userId: dto.userId,
+        type: "project_shared",
+        title: `You were added to: ${project.name}`,
+        resourceType: "project",
+        resourceId: projectId,
+        createdBy: user.id,
+      });
+    }
     return { ...member, user: member.user ? maskUserRef(member.user, user) : null };
   }
 

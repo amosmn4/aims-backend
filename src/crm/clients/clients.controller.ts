@@ -38,8 +38,8 @@ export class ClientsController {
 
   // Any department that onboards a won request/tender needs to be able to create the client
   // record inline during conversion, not just Finance — mirrors DEPT_WRITE_ROLES in
-  // client-requests.controller.ts / tenders.controller.ts. Editing/removing the master record
-  // stays Finance-only below.
+  // client-requests.controller.ts / tenders.controller.ts. Editing/removing the master record is
+  // narrower (finance + hr, who own client/contract lifecycle) below.
   @Post()
   @Roles("finance", "hr", "it", "marketing", "tender", "operations")
   create(@Body() dto: CreateClientDto) {
@@ -47,13 +47,13 @@ export class ClientsController {
   }
 
   @Patch(":id")
-  @Roles("finance")
+  @Roles("finance", "hr")
   update(@Param("id") id: string, @Body() dto: UpdateClientDto) {
     return this.clientsService.update(id, dto);
   }
 
   @Delete(":id")
-  @Roles("finance")
+  @Roles("finance", "hr")
   remove(@Param("id") id: string) {
     return this.clientsService.remove(id);
   }

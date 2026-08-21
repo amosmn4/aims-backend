@@ -18,6 +18,7 @@ import { FinanceUploadsModule } from "./finance/finance-uploads/finance-uploads.
 import { FinanceReportsModule } from "./finance/finance-reports/finance-reports.module";
 import { ProjectsModule } from "./project-management/projects/projects.module";
 import { TasksModule } from "./project-management/tasks/tasks.module";
+import { TimelineExtensionsModule } from "./project-management/timeline-extensions/timeline-extensions.module";
 import { ContractsModule } from "./crm/contracts/contracts.module";
 import { TendersModule } from "./crm/tenders/tenders.module";
 import { ClientRequestsModule } from "./crm/client-requests/client-requests.module";
@@ -58,6 +59,7 @@ import { WaterModule } from "./water/water.module";
     FinanceReportsModule,
     ProjectsModule,
     TasksModule,
+    TimelineExtensionsModule,
     ContractsModule,
     TendersModule,
     ClientRequestsModule,

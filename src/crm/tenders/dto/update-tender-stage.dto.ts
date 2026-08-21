@@ -1,6 +1,14 @@
 import { IsIn, IsOptional, IsString } from "class-validator";
 
-const TENDER_STAGES = ["identified", "applying", "submitted", "won", "lost", "withdrawn"] as const;
+const TENDER_STAGES = [
+  "identified",
+  "applying",
+  "submitted",
+  "won",
+  "lost",
+  "withdrawn",
+  "cancelled",
+] as const;
 
 export class UpdateTenderStageDto {
   @IsIn(TENDER_STAGES)

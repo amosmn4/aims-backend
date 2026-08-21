@@ -12,6 +12,7 @@ import type {
 } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { StorageService } from "../storage/storage.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import { assertDepartmentAccess } from "../common/assert-department-access";
 import { viewerDepartmentCodes } from "../common/department-scope";
 import type { Paginated } from "../common/pagination";
@@ -82,6 +83,7 @@ export class DocumentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   /**
@@ -589,6 +591,17 @@ export class DocumentsService {
       return true;
     });
 
+    // Notify only newly-granted individuals — every save replaces the whole grant list, so
+    // diffing against what was there before avoids re-notifying someone on every unrelated edit.
+    const previousUserGrants = await this.prisma.documentAccessGrant.findMany({
+      where: { documentId, accessType: "user" },
+      select: { userId: true },
+    });
+    const previouslyGranted = new Set(previousUserGrants.map((g) => g.userId));
+    const newlyGrantedUserIds = grants
+      .filter((g) => g.accessType === "user" && g.userId && !previouslyGranted.has(g.userId))
+      .map((g) => g.userId!);
+
     await this.prisma.$transaction([
       this.prisma.documentAccessGrant.deleteMany({ where: { documentId } }),
       ...(grants.length > 0
@@ -604,6 +617,21 @@ export class DocumentsService {
           ]
         : []),
     ]);
+
+    await Promise.all(
+      newlyGrantedUserIds
+        .filter((userId) => userId !== user.id)
+        .map((userId) =>
+          this.notificationsService.notify({
+            userId,
+            type: "document_shared",
+            title: `A document was shared with you: ${doc.title}`,
+            resourceType: "document",
+            resourceId: documentId,
+            createdBy: user.id,
+          }),
+        ),
+    );
 
     return this.prisma.documentAccessGrant.findMany({ where: { documentId } });
   }

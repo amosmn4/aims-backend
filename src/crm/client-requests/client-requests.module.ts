@@ -2,9 +2,10 @@ import { Module } from "@nestjs/common";
 import { ClientRequestsController } from "./client-requests.controller";
 import { ClientRequestsService } from "./client-requests.service";
 import { DocumentsModule } from "../../documents/documents.module";
+import { NotificationsModule } from "../../notifications/notifications.module";
 
 @Module({
-  imports: [DocumentsModule],
+  imports: [DocumentsModule, NotificationsModule],
   controllers: [ClientRequestsController],
   providers: [ClientRequestsService],
   exports: [ClientRequestsService],

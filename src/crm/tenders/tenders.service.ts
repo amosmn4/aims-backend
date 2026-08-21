@@ -36,6 +36,7 @@ const ALL_STAGES: TenderStage[] = [
   "won",
   "lost",
   "withdrawn",
+  "cancelled",
 ];
 
 // The funnel's actual progression, in order — lost/withdrawn are exits from this line, not
@@ -75,7 +76,13 @@ function buildWhere(filters: TenderFilters): Prisma.TenderWhereInput {
     ...(filters.serviceLineId && { serviceLineId: filters.serviceLineId }),
     ...(filters.stage && { stage: filters.stage }),
     ...(filters.clientId && { clientId: filters.clientId }),
-    ...(filters.q && { title: { contains: filters.q } }),
+    ...(filters.q && {
+      OR: [
+        { title: { contains: filters.q } },
+        { prospectClientName: { contains: filters.q } },
+        { client: { name: { contains: filters.q } } },
+      ],
+    }),
     ...((filters.deadlineFrom || filters.deadlineTo) && {
       submissionDeadline: {
         ...(filters.deadlineFrom && { gte: new Date(filters.deadlineFrom) }),
@@ -173,8 +180,8 @@ export class TendersService {
   //
   // `count`/`totalValue` stay as the live "currently in this exact stage" figures (still useful
   // for "what needs attention right now" elsewhere) — `cumulativeCount`/`conversionPct` are the
-  // new funnel-specific fields. A tender lost/withdrawn from stage X reached X (and everything
-  // before it) even though its current `stage` is "lost", so it's attributed via
+  // new funnel-specific fields. A tender lost/withdrawn/cancelled from stage X reached X (and
+  // everything before it) even though its current `stage` is "lost", so it's attributed via
   // `lostFromStage`, not the live `stage` column.
   private async computePipelineSummary(filters: TenderFilters, viewer: AuthenticatedUser) {
     const where = { ...buildWhere(filters), ...tenderDeptFilter(viewer) };
@@ -187,7 +194,7 @@ export class TendersService {
       }),
       this.prisma.tender.groupBy({
         by: ["lostFromStage"],
-        where: { ...where, stage: { in: ["lost", "withdrawn"] } },
+        where: { ...where, stage: { in: ["lost", "withdrawn", "cancelled"] } },
         _count: { _all: true },
       }),
     ]);
@@ -199,8 +206,8 @@ export class TendersService {
         if (idx >= 0 && idx >= progressIndex) count += row._count._all;
       }
       for (const row of lostRows) {
-        // Every tender — won, lost, or withdrawn — passed through the first stage; beyond that,
-        // only `lostFromStage` says how much further a lost/withdrawn one actually got.
+        // Every tender — won, lost, withdrawn, or cancelled — passed through the first stage;
+        // beyond that, only `lostFromStage` says how much further it actually got.
         if (progressIndex === 0) {
           count += row._count._all;
           continue;
@@ -349,7 +356,8 @@ export class TendersService {
     await this.assertTenderDeptAccess(existing.departmentId, user);
 
     const now = new Date();
-    const movingToLost = dto.stage === "lost" || dto.stage === "withdrawn";
+    const movingToExit =
+      dto.stage === "lost" || dto.stage === "withdrawn" || dto.stage === "cancelled";
     return this.prisma.tender.update({
       where: { id },
       data: {
@@ -358,8 +366,9 @@ export class TendersService {
         wonAt: dto.stage === "won" ? (dto.wonAt ? new Date(dto.wonAt) : now) : existing.wonAt,
         lostAt: dto.stage === "lost" ? now : existing.lostAt,
         withdrawnAt: dto.stage === "withdrawn" ? now : existing.withdrawnAt,
-        lostFromStage: movingToLost ? existing.stage : existing.lostFromStage,
-        lostReason: movingToLost ? dto.lostReason : existing.lostReason,
+        cancelledAt: dto.stage === "cancelled" ? now : existing.cancelledAt,
+        lostFromStage: movingToExit ? existing.stage : existing.lostFromStage,
+        lostReason: movingToExit ? dto.lostReason : existing.lostReason,
       },
     });
   }

@@ -7,6 +7,7 @@ import {
 import type { ClientRequestSource, ClientRequestStage, Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { DocumentsService } from "../../documents/documents.service";
+import { NotificationsService } from "../../notifications/notifications.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
 import { viewerDepartmentCodes } from "../../common/department-scope";
 import { maskUserRef } from "../../common/mask-user-ref";
@@ -96,7 +97,30 @@ export class ClientRequestsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly documentsService: DocumentsService,
+    private readonly notificationsService: NotificationsService,
   ) {}
+
+  // Shared by create/update/route — notify only when assignedToId is actually changing to a
+  // new, different person (never on every unrelated field edit, never when unassigning).
+  private async notifyIfNewlyAssigned(
+    requestId: string,
+    title: string,
+    previousAssigneeId: string | null | undefined,
+    newAssigneeId: string | null | undefined,
+    actorId: string,
+  ) {
+    if (!newAssigneeId || newAssigneeId === previousAssigneeId || newAssigneeId === actorId) {
+      return;
+    }
+    await this.notificationsService.notify({
+      userId: newAssigneeId,
+      type: "client_request_assigned",
+      title: `A client request was assigned to you: ${title}`,
+      resourceType: "client_request",
+      resourceId: requestId,
+      createdBy: actorId,
+    });
+  }
 
   findAll(
     filters: ClientRequestFilters,
@@ -315,22 +339,32 @@ export class ClientRequestsService {
     // department's queue) has the same effect as the separate route() step below — stamp
     // stage/routedAt here too so it doesn't sit in "new"/unrouted needlessly.
     const routedNow = dto.departmentId ? { stage: "assigned" as const, routedAt: new Date() } : {};
-    return this.prisma.clientRequest.create({
+    const request = await this.prisma.clientRequest.create({
       data: { ...dto, ...routedNow, createdBy: user.id },
     });
+    await this.notifyIfNewlyAssigned(request.id, request.title, null, dto.assignedToId, user.id);
+    return request;
   }
 
   async update(id: string, dto: UpdateClientRequestDto, user: AuthenticatedUser) {
     const existing = await this.prisma.clientRequest.findUniqueOrThrow({ where: { id } });
     await this.assertAccess(existing, user);
-    return this.prisma.clientRequest.update({ where: { id }, data: dto });
+    const updated = await this.prisma.clientRequest.update({ where: { id }, data: dto });
+    await this.notifyIfNewlyAssigned(
+      id,
+      updated.title,
+      existing.assignedToId,
+      dto.assignedToId,
+      user.id,
+    );
+    return updated;
   }
 
   async route(id: string, dto: RouteClientRequestDto, user: AuthenticatedUser) {
     const existing = await this.prisma.clientRequest.findUniqueOrThrow({ where: { id } });
     await this.assertAccess(existing, user);
 
-    return this.prisma.clientRequest.update({
+    const updated = await this.prisma.clientRequest.update({
       where: { id },
       data: {
         departmentId: dto.departmentId,
@@ -339,6 +373,14 @@ export class ClientRequestsService {
         routedAt: new Date(),
       },
     });
+    await this.notifyIfNewlyAssigned(
+      id,
+      updated.title,
+      existing.assignedToId,
+      dto.assignedToId,
+      user.id,
+    );
+    return updated;
   }
 
   async updateStage(id: string, dto: UpdateClientRequestStageDto, user: AuthenticatedUser) {

@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from "@nestjs/common";
-import type { WaterMeterType } from "@prisma/client";
+import type { WaterMeterType, WaterVendingSystem } from "@prisma/client";
 import { WaterService } from "./water.service";
 import { CreateZoneDto } from "./dto/create-zone.dto";
 import { UpdateZoneDto } from "./dto/update-zone.dto";
@@ -63,8 +63,8 @@ export class WaterController {
   }
 
   @Get("customers/:id")
-  getCustomerDetail(@Param("id") id: string) {
-    return this.waterService.getCustomerDetail(id);
+  getCustomerDetail(@Param("id") id: string, @Query("months") months?: string) {
+    return this.waterService.getCustomerDetail(id, months ? Number(months) : undefined);
   }
 
   @Post("customers")
@@ -89,18 +89,19 @@ export class WaterController {
     @Query("meterType") meterType?: WaterMeterType,
     @Query("zoneId") zoneId?: string,
     @Query("q") q?: string,
+    @Query("vendingSystem") vendingSystem?: WaterVendingSystem,
     @Query("page") page?: string,
     @Query("pageSize") pageSize?: string,
   ) {
     return this.waterService.findAllMeters(
-      { meterType, zoneId, q },
+      { meterType, zoneId, q, vendingSystem },
       parsePaginationQuery(page, pageSize),
     );
   }
 
   @Get("meters/:id")
-  getMeterDetail(@Param("id") id: string) {
-    return this.waterService.getMeterDetail(id);
+  getMeterDetail(@Param("id") id: string, @Query("months") months?: string) {
+    return this.waterService.getMeterDetail(id, months ? Number(months) : undefined);
   }
 
   @Post("meters")
@@ -200,5 +201,43 @@ export class WaterController {
   @Get("reports/summary")
   reportSummary(@Query("month") month?: string) {
     return this.waterService.reportSummary({ month });
+  }
+
+  // Daily/weekly/monthly comparison series for main/bulk meter readings, over an explicit date
+  // range — the period-filterable chart data behind the Reports page's comparison views.
+  @Get("readings/series")
+  readingSeries(
+    @Query("meterType") meterType: WaterMeterType,
+    @Query("bucket") bucket: "day" | "week" | "month",
+    @Query("dateFrom") dateFrom: string,
+    @Query("dateTo") dateTo: string,
+    @Query("zoneId") zoneId?: string,
+  ) {
+    return this.waterService.readingSeries({
+      meterType,
+      bucket,
+      zoneId,
+      dateFrom: new Date(dateFrom),
+      dateTo: new Date(dateTo),
+    });
+  }
+
+  // The literal reading log with each row's own computed delta — the "daily main meter readings"
+  // table.
+  @Get("readings/with-delta")
+  readingsWithDelta(
+    @Query("meterId") meterId?: string,
+    @Query("meterType") meterType?: WaterMeterType,
+    @Query("zoneId") zoneId?: string,
+    @Query("dateFrom") dateFrom?: string,
+    @Query("dateTo") dateTo?: string,
+  ) {
+    return this.waterService.readingsWithDelta({
+      meterId,
+      meterType,
+      zoneId,
+      dateFrom: dateFrom ? new Date(dateFrom) : undefined,
+      dateTo: dateTo ? new Date(dateTo) : undefined,
+    });
   }
 }

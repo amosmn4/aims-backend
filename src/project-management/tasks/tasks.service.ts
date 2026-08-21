@@ -6,6 +6,8 @@ import { viewerDepartmentCodes } from "../../common/department-scope";
 import { maskUserRef } from "../../common/mask-user-ref";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import { DocumentsService } from "../../documents/documents.service";
+import { TimelineExtensionsService } from "../timeline-extensions/timeline-extensions.service";
+import { NotificationsService } from "../../notifications/notifications.service";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateTaskDto } from "./dto/create-task.dto";
 import type { UpdateTaskDto } from "./dto/update-task.dto";
@@ -17,12 +19,17 @@ export class TasksService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly documentsService: DocumentsService,
+    private readonly timelineExtensionsService: TimelineExtensionsService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
-  // Visibility is scoped to the viewer's own department(s) — same as Projects. One exception:
-  // filtering for your own assigned tasks ("My Tasks") is itself a safe, self-limiting signal,
-  // so it's allowed to surface tasks outside your department the same way Project's
-  // `sharedWithMe` does for project-level access.
+  // Visibility is scoped to the viewer's own department(s) — same as Projects, including the
+  // `restricted` narrowing (a task's visibility follows its parent project's — see
+  // Project.visibility): excluded unless the viewer created the project, is a team member, or is
+  // the task's own assignee (mirrors `assertTaskAccess`'s write-side rule). One exception:
+  // filtering for your own assigned tasks ("My Tasks") is itself a safe, self-limiting signal, so
+  // it's allowed to surface tasks outside your department the same way Project's `sharedWithMe`
+  // does for project-level access.
   findAll(
     filters: {
       projectId?: string;
@@ -47,6 +54,15 @@ export class TasksService {
           ...(filters.assigneeId && { assigneeId: filters.assigneeId }),
           ...(filters.status && { status: filters.status }),
           ...(Object.keys(projectWhere).length > 0 && { project: projectWhere }),
+          ...(!isOwnAssigneeFilter &&
+            deptCodes && {
+              OR: [
+                { project: { visibility: "department" } },
+                { project: { createdBy: viewer.id } },
+                { project: { team: { some: { userId: viewer.id } } } },
+                { assigneeId: viewer.id },
+              ],
+            }),
         },
         include: {
           project: { select: { id: true, name: true, departmentId: true } },
@@ -70,11 +86,12 @@ export class TasksService {
       },
     });
     const deptCodes = viewerDepartmentCodes(viewer);
-    if (
-      deptCodes &&
-      !deptCodes.includes(task.project.department.code) &&
-      task.assigneeId !== viewer.id
-    ) {
+    const needsMembershipCheck =
+      !!deptCodes &&
+      (!deptCodes.includes(task.project.department.code) ||
+        (task.project.visibility === "restricted" && task.project.createdBy !== viewer.id)) &&
+      task.assigneeId !== viewer.id;
+    if (needsMembershipCheck) {
       const isTeamMember = await this.prisma.projectTeamMember.findFirst({
         where: { projectId: task.projectId, userId: viewer.id },
         select: { id: true },
@@ -126,7 +143,7 @@ export class TasksService {
     });
     assertDepartmentAccess(project.department, user);
 
-    return this.prisma.task.create({
+    const task = await this.prisma.task.create({
       data: {
         projectId: dto.projectId,
         title: dto.title,
@@ -140,18 +157,60 @@ export class TasksService {
         createdBy: user.id,
       },
     });
+    if (task.assigneeId && task.assigneeId !== user.id) {
+      await this.notificationsService.notify({
+        userId: task.assigneeId,
+        type: "task_assigned",
+        title: `You were assigned to: ${task.title}`,
+        resourceType: "task",
+        resourceId: task.id,
+        createdBy: user.id,
+      });
+    }
+    return task;
   }
 
   async update(id: string, dto: UpdateTaskDto, user: AuthenticatedUser) {
-    await this.assertTaskAccess(id, user);
-    return this.prisma.task.update({
+    const existing = await this.assertTaskAccess(id, user);
+    const { extensionReason, extensionAttribution, ...rest } = dto;
+    const updated = await this.prisma.task.update({
       where: { id },
       data: {
-        ...dto,
+        ...rest,
         startDate: dto.startDate ? new Date(dto.startDate) : undefined,
         dueDate: dto.dueDate ? new Date(dto.dueDate) : undefined,
       },
     });
+
+    if (
+      dto.dueDate &&
+      existing.dueDate &&
+      new Date(dto.dueDate).getTime() > existing.dueDate.getTime() &&
+      extensionReason &&
+      extensionAttribution
+    ) {
+      await this.timelineExtensionsService.create({
+        entityType: "task",
+        entityId: id,
+        previousDate: existing.dueDate,
+        newDate: new Date(dto.dueDate),
+        reason: extensionReason,
+        attributedTo: extensionAttribution,
+        createdBy: user.id,
+      });
+    }
+
+    if (dto.assigneeId && dto.assigneeId !== existing.assigneeId && dto.assigneeId !== user.id) {
+      await this.notificationsService.notify({
+        userId: dto.assigneeId,
+        type: "task_assigned",
+        title: `You were assigned to: ${updated.title}`,
+        resourceType: "task",
+        resourceId: id,
+        createdBy: user.id,
+      });
+    }
+    return updated;
   }
 
   async remove(id: string, user: AuthenticatedUser) {
@@ -175,7 +234,7 @@ export class TasksService {
   }
 
   async createComment(taskId: string, dto: CreateCommentDto, user: AuthenticatedUser) {
-    await this.assertTaskAccess(taskId, user);
+    const task = await this.assertTaskAccess(taskId, user);
     const comment = await this.prisma.taskComment.create({
       data: { taskId, authorId: user.id, body: dto.body },
       include: {
@@ -184,6 +243,17 @@ export class TasksService {
         },
       },
     });
+    if (task.assigneeId && task.assigneeId !== user.id) {
+      await this.notificationsService.notify({
+        userId: task.assigneeId,
+        type: "task_comment",
+        title: `New comment on: ${task.title}`,
+        body: dto.body,
+        resourceType: "task",
+        resourceId: taskId,
+        createdBy: user.id,
+      });
+    }
     return { ...comment, author: maskUserRef(comment.author, user) };
   }
 
