@@ -52,12 +52,12 @@ function isAdminOrCeo(user: AuthenticatedUser) {
   return user.roles.includes("system_admin") || user.roles.includes("ceo");
 }
 
-// Operations owns intake (creates/routes every request) and Tender also acts on unrouted ones
-// (see assertAccess below) — both need to see the whole intake queue, not just their own
-// department's slice. Every other department only sees requests actually routed to it.
+// Operations owns intake (creates/routes every request) — it alone needs the whole queue,
+// including everything still unrouted. Every other department (Tender included) only ever sees
+// requests actually routed to it; their view starts at "assigned," never "new."
 function requestDeptFilter(viewer: AuthenticatedUser): Prisma.ClientRequestWhereInput {
   const deptCodes = viewerDepartmentCodes(viewer);
-  if (deptCodes === null || deptCodes.includes("operations") || deptCodes.includes("tender")) {
+  if (deptCodes === null || deptCodes.includes("operations")) {
     return {};
   }
   return { department: { code: { in: deptCodes } } };
@@ -320,13 +320,13 @@ export class ClientRequestsService {
     };
   }
 
-  /** Before routing (no department yet) only tender/admin/ceo can act on a request — Tender
-   * owns intake (same team as the pre-project Tender pipeline). Once routed, ownership follows
-   * the assigned department, same as every other module's assertDepartmentAccess usage. */
+  /** Before routing (no department yet) only operations/admin/ceo can act on a request —
+   * Operations owns intake. Once routed, ownership follows the assigned department, same as
+   * every other module's assertDepartmentAccess usage. */
   private async assertAccess(request: { departmentId: string | null }, user: AuthenticatedUser) {
     if (!request.departmentId) {
-      if (isAdminOrCeo(user) || user.roles.includes("tender")) return;
-      throw new ForbiddenException("Only Tender can manage an unrouted request");
+      if (isAdminOrCeo(user) || user.roles.includes("operations")) return;
+      throw new ForbiddenException("Only Operations can manage an unrouted request");
     }
     const department = await this.prisma.department.findUniqueOrThrow({
       where: { id: request.departmentId },
