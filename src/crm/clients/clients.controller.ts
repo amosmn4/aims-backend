@@ -1,10 +1,13 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import { ClientsService } from "./clients.service";
 import { CreateClientDto } from "./dto/create-client.dto";
 import { UpdateClientDto } from "./dto/update-client.dto";
 import { CreateContactDto } from "./dto/create-contact.dto";
 import { UpdateContactDto } from "./dto/update-contact.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
+import { CurrentUser } from "../../auth/decorators/current-user.decorator";
+import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
+import { parsePaginationQuery } from "../../common/pagination";
 
 @Controller("clients")
 export class ClientsController {
@@ -12,24 +15,45 @@ export class ClientsController {
 
   @Get()
   @Roles()
-  findAll() {
-    return this.clientsService.findAll();
+  findAll(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("industry") industry?: string,
+    @Query("segment") segment?: string,
+    @Query("q") q?: string,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
+  ) {
+    return this.clientsService.findAll(
+      { industry, segment, q },
+      parsePaginationQuery(page, pageSize),
+      user,
+    );
   }
 
+  @Get("facets")
+  @Roles()
+  facets(@CurrentUser() user: AuthenticatedUser) {
+    return this.clientsService.facets(user);
+  }
+
+  // Any department that onboards a won request/tender needs to be able to create the client
+  // record inline during conversion, not just Finance — mirrors DEPT_WRITE_ROLES in
+  // client-requests.controller.ts / tenders.controller.ts. Editing/removing the master record is
+  // narrower (finance + hr, who own client/contract lifecycle) below.
   @Post()
-  @Roles("finance")
+  @Roles("finance", "hr", "it", "marketing", "tender", "operations")
   create(@Body() dto: CreateClientDto) {
     return this.clientsService.create(dto);
   }
 
   @Patch(":id")
-  @Roles("finance")
+  @Roles("finance", "hr")
   update(@Param("id") id: string, @Body() dto: UpdateClientDto) {
     return this.clientsService.update(id, dto);
   }
 
   @Delete(":id")
-  @Roles("finance")
+  @Roles("finance", "hr")
   remove(@Param("id") id: string) {
     return this.clientsService.remove(id);
   }

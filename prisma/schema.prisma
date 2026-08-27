@@ -13,8 +13,10 @@ enum AppRole {
   finance
   hr
   it
-  marketing_ops
+  marketing
   tender
+  operations
+  water
   department_head
   account_manager
   general_staff
@@ -91,19 +93,28 @@ enum DocumentResourceType {
   finance_report
   tender
   client_request
+  // A single, company-wide catalog of documents that are the same across every tender (e.g.
+  // certificate of incorporation, tax compliance certificate) — uploaded once here, then
+  // "ticked" onto an individual tender's requirements checklist (see Tender.applyLibraryDocument)
+  // instead of being re-uploaded per tender. Not attached to any real resource, so every row
+  // of this type shares one fixed sentinel resourceId ("global") rather than pointing at one.
+  tender_document_library
 }
 
 // Matches the AMSOL Pipeline prototype's tender board exactly: identified -> applying
 // (prototype: "Preparing Application") -> submitted -> evaluation ("Under Evaluation") ->
 // won/lost. withdrawn isn't in the prototype but existed in this system already, so it stays.
+// cancelled is a third exit added for a distinct real-world case: a tender AMSOL already
+// submitted, where the procuring client voids/cancels the tender process itself — not a loss
+// (nobody was awarded it) and not a withdrawal (AMSOL didn't choose to drop out).
 enum TenderStage {
   identified
   applying
   submitted
-  evaluation
   won
   lost
   withdrawn
+  cancelled
 }
 
 // Where a project's delivery actually stands once a tender is forwarded to a department or a
@@ -191,9 +202,64 @@ model Office {
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
-  users User[]
+  users          User[]
+  inventoryItems InventoryItem[]
 
   @@map("offices")
+}
+
+enum InventoryCategory {
+  laptop
+  desktop
+  monitor
+  printer
+  peripheral
+  other
+}
+
+// Deployment state. `idle` is the newer, general "not currently assigned to anyone" bucket;
+// `in_storage` / `under_repair` / `retired` are the older, more specific states and are kept
+// alongside it rather than collapsed into it — a retired or under-repair asset carries real
+// operational meaning that a flat "idle" would lose. Functional/physical state lives on
+// `condition` instead, so "is it in use" and "is it in good shape" don't get conflated.
+enum InventoryStatus {
+  in_use
+  idle
+  in_storage
+  under_repair
+  retired
+}
+
+enum InventoryCondition {
+  good
+  working
+  needs_attention
+  faulty
+}
+
+model InventoryItem {
+  id             String             @id @default(uuid()) @db.Char(36)
+  assetTag       String             @unique @map("asset_tag")
+  deviceName     String             @map("device_name")
+  description    String?            @db.Text
+  category       InventoryCategory
+  status         InventoryStatus    @default(in_use)
+  condition      InventoryCondition @default(good)
+  brand          String?
+  model          String?
+  serialNumber   String?            @map("serial_number")
+  assignedTo     String?            @map("assigned_to")
+  officeId       String?            @map("office_id") @db.Char(36)
+  purchaseDate   DateTime?          @map("purchase_date")
+  warrantyExpiry DateTime?          @map("warranty_expiry")
+  notes          String?            @db.Text
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+
+  office Office? @relation(fields: [officeId], references: [id], onDelete: SetNull)
+
+  @@index([officeId])
+  @@map("inventory_items")
 }
 
 model Department {
@@ -215,6 +281,7 @@ model Department {
   documentAccessGrants DocumentAccessGrant[]
   tenders              Tender[]
   clientRequests       ClientRequest[]
+  serviceLines         ServiceLine[]
 
   @@map("departments")
 }
@@ -222,7 +289,7 @@ model Department {
 model User {
   id           String   @id @default(uuid()) @db.Char(36)
   email        String   @unique
-  passwordHash String   @map("password_hash")
+  passwordHash String?  @map("password_hash")
   fullName     String?  @map("full_name")
   phone        String?
   jobTitle     String?  @map("job_title")
@@ -237,30 +304,41 @@ model User {
   office     Office?     @relation(fields: [officeId], references: [id], onDelete: SetNull)
   roles      UserRole[]
 
-  accountManagedClients   Client[]               @relation("ClientAccountManager")
-  accountManagedContracts Contract[]             @relation("ContractAccountManager")
-  createdContracts        Contract[]             @relation("ContractCreatedBy")
-  createdFinanceReports   FinanceReport[]        @relation("FinanceReportCreatedBy")
-  reviewedFinanceReports  FinanceReport[]        @relation("FinanceReportReviewedBy")
-  financeReportComments   FinanceReportComment[]
-  uploadedContractDocs    ContractDocument[]
-  auditLogEntries         AuditLog[]
-  taskComments            TaskComment[]
-  documents                Document[]            @relation("DocumentCreatedBy")
-  uploadedDocumentVersions DocumentVersion[]      @relation("DocumentVersionUploadedBy")
-  documentAccessGrants     DocumentAccessGrant[]  @relation("DocumentAccessGrantUser")
-  accountManagedTenders    Tender[]              @relation("TenderAccountManager")
-  createdTenders           Tender[]              @relation("TenderCreatedBy")
-  tenderResourceAssignments TenderResource[]     @relation("TenderResourceUser")
-  tenderTimeEntries        TenderTimeEntry[]     @relation("TenderTimeEntryUser")
+  accountManagedClients     Client[]                @relation("ClientAccountManager")
+  accountManagedContracts   Contract[]              @relation("ContractAccountManager")
+  createdContracts          Contract[]              @relation("ContractCreatedBy")
+  createdFinanceReports     FinanceReport[]         @relation("FinanceReportCreatedBy")
+  reviewedFinanceReports    FinanceReport[]         @relation("FinanceReportReviewedBy")
+  financeReportComments     FinanceReportComment[]
+  uploadedContractDocs      ContractDocument[]
+  auditLogEntries           AuditLog[]
+  taskComments              TaskComment[]
+  documents                 Document[]              @relation("DocumentCreatedBy")
+  uploadedDocumentVersions  DocumentVersion[]       @relation("DocumentVersionUploadedBy")
+  documentAccessGrants      DocumentAccessGrant[]   @relation("DocumentAccessGrantUser")
+  accountManagedTenders     Tender[]                @relation("TenderAccountManager")
+  createdTenders            Tender[]                @relation("TenderCreatedBy")
+  tenderResourceAssignments TenderResource[]        @relation("TenderResourceUser")
+  tenderTimeEntries         TenderTimeEntry[]       @relation("TenderTimeEntryUser")
   assignedClientRequests    ClientRequest[]         @relation("ClientRequestAssignee")
   createdClientRequests     ClientRequest[]         @relation("ClientRequestCreatedBy")
   clientRequestActivities   ClientRequestActivity[] @relation("ClientRequestActivityCreatedBy")
   notifications             Notification[]          @relation("NotificationRecipient")
   createdNotifications      Notification[]          @relation("NotificationCreatedBy")
-  projectActivities         ProjectActivity[]        @relation("ProjectActivityCreatedBy")
-  tenderActivities          TenderActivity[]         @relation("TenderActivityCreatedBy")
+  projectActivities         ProjectActivity[]       @relation("ProjectActivityCreatedBy")
+  tenderActivities          TenderActivity[]        @relation("TenderActivityCreatedBy")
   projectTeamMemberships    ProjectTeamMember[]
+  leadActivities            LeadActivity[]          @relation("LeadActivityCreatedBy")
+  blogPosts                 BlogPost[]              @relation("BlogPostCreatedBy")
+  ticketsRequested          Ticket[]                @relation("TicketRequester")
+  ticketsAssigned           Ticket[]                @relation("TicketAssignee")
+  ticketsCreated            Ticket[]                @relation("TicketCreatedBy")
+  campaignsCreated          Campaign[]              @relation("CampaignCreatedBy")
+  passwordSetupTokens       PasswordSetupToken[]
+  waterUsageUploads         WaterUsageUpload[]      @relation("WaterUsageUploadCreatedBy")
+  waterMeterReadings        WaterMeterReading[]     @relation("WaterMeterReadingCreatedBy")
+  timelineExtensions        TimelineExtension[]     @relation("TimelineExtensionCreatedBy")
+  notificationPreference    NotificationPreference?
 
   @@map("users")
 }
@@ -276,6 +354,22 @@ model UserRole {
 
   @@unique([userId, role])
   @@map("user_roles")
+}
+
+// Single-use, expiring token emailed to a newly-created user so they can verify their
+// email and choose their own password. Also reused for admin-triggered "resend invite".
+model PasswordSetupToken {
+  id        String    @id @default(uuid()) @db.Char(36)
+  userId    String    @map("user_id") @db.Char(36)
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_setup_tokens")
 }
 
 model AuditLog {
@@ -318,6 +412,7 @@ model Client {
   projects                 Project[]
   tenders                  Tender[]
   clientRequests           ClientRequest[]
+  hrmsLicense              HrmsLicense?
 
   @@map("clients")
 }
@@ -340,20 +435,23 @@ model ClientContact {
 }
 
 model ServiceLine {
-  id          String   @id @default(uuid()) @db.Char(36)
-  code        String   @unique
-  name        String
-  isRecurring Boolean  @default(false) @map("is_recurring")
-  isActive    Boolean  @default(true) @map("is_active")
-  sortOrder   Int      @default(0) @map("sort_order")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id           String   @id @default(uuid()) @db.Char(36)
+  code         String   @unique
+  name         String
+  departmentId String   @map("department_id") @db.Char(36)
+  isRecurring  Boolean  @default(false) @map("is_recurring")
+  isActive     Boolean  @default(true) @map("is_active")
+  sortOrder    Int      @default(0) @map("sort_order")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
+  department     Department      @relation(fields: [departmentId], references: [id])
   invoices       Invoice[]
   contracts      Contract[]
   tenders        Tender[]
   clientRequests ClientRequest[]
 
+  @@index([departmentId])
   @@map("service_lines")
 }
 
@@ -387,6 +485,8 @@ model Invoice {
   @@index([serviceLineId])
   @@index([contractId])
   @@index([issueDate])
+  // Backs the Debtors screen's overdue/outstanding filter (status + dueDate together).
+  @@index([status, dueDate])
   @@map("invoices")
 }
 
@@ -495,6 +595,10 @@ model Contract {
   invoices       Invoice[]
   projects       Project[]
 
+  // Unlike most FK columns here, status/end_date aren't foreign keys — MySQL doesn't index them
+  // for free, and both are hot: the Calendar's renewal-deadline query filters exactly this pair
+  // (status = active AND end_date BETWEEN …), and status alone backs every contracts-list filter.
+  @@index([status, endDate])
   @@map("contracts")
 }
 
@@ -583,40 +687,53 @@ model DebtorFollowUp {
 // an internal project may have neither). Financials aren't duplicated here: a project's
 // budget/actual/margin are read live from Budget/Invoice via contractId.
 model Project {
-  id              String               @id @default(uuid()) @db.Char(36)
+  id              String                @id @default(uuid()) @db.Char(36)
   name            String
-  description     String?              @db.Text
-  clientId        String?              @map("client_id") @db.Char(36)
-  contractId      String?              @map("contract_id") @db.Char(36)
-  clientRequestId String?              @unique @map("client_request_id") @db.Char(36)
-  tenderId        String?              @unique @map("tender_id") @db.Char(36)
-  departmentId    String               @map("department_id") @db.Char(36)
-  status          ProjectStatus        @default(planning)
-  deliveryStage   ProjectDeliveryStage @default(onboarding) @map("delivery_stage")
+  description     String?               @db.Text
+  clientId        String?               @map("client_id") @db.Char(36)
+  contractId      String?               @map("contract_id") @db.Char(36)
+  clientRequestId String?               @unique @map("client_request_id") @db.Char(36)
+  tenderId        String?               @unique @map("tender_id") @db.Char(36)
+  departmentId    String                @map("department_id") @db.Char(36)
+  status          ProjectStatus         @default(planning)
+  deliveryStage   ProjectDeliveryStage  @default(onboarding) @map("delivery_stage")
+  // "department" (default): everyone in the owning department sees this project, today's
+  // behavior. "restricted": only the creator and explicit ProjectTeamMember rows (userId set)
+  // see it, regardless of department — for work one person or a named few own, not the whole
+  // team (e.g. one water-system owner, an HR project shared with only two colleagues).
+  visibility      ProjectVisibility     @default(department)
+  // "one_off" (default): a bounded delivery with a natural end. "ongoing": retainer/maintenance
+  // work with no natural end (e.g. HR running a client's HR function day to day, IT maintaining a
+  // system) — excluded from the "project overdue" notification sweep, since it has no deadline to
+  // be overdue against.
+  engagementType  ProjectEngagementType @default(one_off) @map("engagement_type")
   // Project Workspace fields (Overview/EVM) — methodology and health are free-form/manager-set;
   // budget is the execution budget (cost side) used for Planned/Earned Value, distinct from the
   // Invoice/InvoicePayment totals already tracked (that's revenue, this is cost).
   methodology     String?
-  health          ProjectHealth        @default(green)
-  budget          Decimal?             @db.Decimal(14, 2)
-  startDate       DateTime?            @map("start_date") @db.Date
-  endDate         DateTime?            @map("end_date") @db.Date
-  createdBy       String?              @map("created_by") @db.Char(36)
-  createdAt       DateTime             @default(now()) @map("created_at")
-  updatedAt       DateTime             @updatedAt @map("updated_at")
+  // Only set/shown when methodology === "system_development" — see enum SdlcStage.
+  sdlcStage       SdlcStage?            @map("sdlc_stage")
+  health          ProjectHealth         @default(green)
+  budget          Decimal?              @db.Decimal(14, 2)
+  startDate       DateTime?             @map("start_date") @db.Date
+  endDate         DateTime?             @map("end_date") @db.Date
+  createdBy       String?               @map("created_by") @db.Char(36)
+  createdAt       DateTime              @default(now()) @map("created_at")
+  updatedAt       DateTime              @updatedAt @map("updated_at")
 
-  client        Client?        @relation(fields: [clientId], references: [id], onDelete: SetNull)
-  contract      Contract?      @relation(fields: [contractId], references: [id], onDelete: SetNull)
-  clientRequest ClientRequest? @relation(fields: [clientRequestId], references: [id], onDelete: SetNull)
-  tender        Tender?        @relation(fields: [tenderId], references: [id], onDelete: SetNull)
-  department    Department     @relation(fields: [departmentId], references: [id], onDelete: Restrict)
-  tasks       Task[]
-  milestones  Milestone[]
-  activities  ProjectActivity[]
-  costItems   ProjectCostItem[]
-  team        ProjectTeamMember[]
-  raci        ProjectRaciEntry[]
-  raidEntries ProjectRaidEntry[]
+  client            Client?             @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  contract          Contract?           @relation(fields: [contractId], references: [id], onDelete: SetNull)
+  clientRequest     ClientRequest?      @relation(fields: [clientRequestId], references: [id], onDelete: SetNull)
+  tender            Tender?             @relation(fields: [tenderId], references: [id], onDelete: SetNull)
+  department        Department          @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  tasks             Task[]
+  milestones        Milestone[]
+  activities        ProjectActivity[]
+  costItems         ProjectCostItem[]
+  team              ProjectTeamMember[]
+  raci              ProjectRaciEntry[]
+  raidEntries       ProjectRaidEntry[]
+  recruitmentFunnel RecruitmentFunnel?
 
   @@index([departmentId])
   @@index([clientId])
@@ -631,28 +748,88 @@ enum ProjectHealth {
   red
 }
 
+enum ProjectVisibility {
+  department
+  restricted
+}
+
+enum ProjectEngagementType {
+  one_off
+  ongoing
+}
+
+// Polymorphic — same unenforced-FK pattern already used by Document.resourceId/Notification.resourceId.
+// Scoped for now to project|task; milestone|contract included for forward-compatibility only.
+enum TimelineEntityType {
+  project
+  task
+  milestone
+  contract
+}
+
+// Who the schedule slip is attributed to — the point of recording an extension at all: distinguish
+// "the client caused this" from "we're behind."
+enum ExtensionAttribution {
+  client
+  internal
+  third_party
+  other
+}
+
+// A record of a deadline moving, why, and whose fault it wasn't (or was) — created alongside a
+// Project.endDate/Task.dueDate update when the new date is later than the previous one. Not an
+// approval workflow: the same department-write-role check that already gates the underlying
+// update gates this too, so recording one is just "encouraged rigor," not a separate permission.
+model TimelineExtension {
+  id           String               @id @default(uuid()) @db.Char(36)
+  entityType   TimelineEntityType   @map("entity_type")
+  entityId     String               @map("entity_id") @db.Char(36)
+  previousDate DateTime             @map("previous_date") @db.Date
+  newDate      DateTime             @map("new_date") @db.Date
+  reason       String               @db.Text
+  attributedTo ExtensionAttribution @map("attributed_to")
+  createdBy    String?              @map("created_by") @db.Char(36)
+  createdAt    DateTime             @default(now()) @map("created_at")
+
+  creator User? @relation("TimelineExtensionCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@map("timeline_extensions")
+}
+
+// Only meaningful when Project.methodology === "system_development" — a standard SDLC stepper
+// layered on top of the generic task board, not a replacement for it.
+enum SdlcStage {
+  requirements
+  design
+  development
+  testing
+  deployment
+  maintenance
+}
+
 // Status values are fixed to the four the spec calls for (task boards per department) —
 // not a generic arbitrary-column kanban.
 model Task {
-  id          String       @id @default(uuid()) @db.Char(36)
-  projectId   String       @map("project_id") @db.Char(36)
-  title       String
-  description String?      @db.Text
+  id             String       @id @default(uuid()) @db.Char(36)
+  projectId      String       @map("project_id") @db.Char(36)
+  title          String
+  description    String?      @db.Text
   // Free-text phase grouping for the WBS/Gantt view (e.g. "Mobilization & Planning") — not a
   // separate model since phases are just a label a project manager types, not an entity with
   // its own lifecycle or relations of its own.
-  phase           String?
-  status          TaskStatus   @default(not_started)
-  priority        TaskPriority @default(medium)
-  assigneeId      String?      @map("assignee_id") @db.Char(36)
-  startDate       DateTime?    @map("start_date") @db.Date
-  dueDate         DateTime?    @map("due_date") @db.Date
-  estimatedHours  Decimal?     @map("estimated_hours") @db.Decimal(6, 2)
-  actualHours     Decimal      @default(0) @map("actual_hours") @db.Decimal(6, 2)
-  position        Int          @default(0)
-  createdBy       String?      @map("created_by") @db.Char(36)
-  createdAt       DateTime     @default(now()) @map("created_at")
-  updatedAt       DateTime     @updatedAt @map("updated_at")
+  phase          String?
+  status         TaskStatus   @default(not_started)
+  priority       TaskPriority @default(medium)
+  assigneeId     String?      @map("assignee_id") @db.Char(36)
+  startDate      DateTime?    @map("start_date") @db.Date
+  dueDate        DateTime?    @map("due_date") @db.Date
+  estimatedHours Decimal?     @map("estimated_hours") @db.Decimal(6, 2)
+  actualHours    Decimal      @default(0) @map("actual_hours") @db.Decimal(6, 2)
+  position       Int          @default(0)
+  createdBy      String?      @map("created_by") @db.Char(36)
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
 
   project      Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
   comments     TaskComment[]
@@ -707,13 +884,13 @@ model Milestone {
 // rather than reusing ClientRequestActivity so a project's log isn't artificially tied to
 // having originated from a client request (most won't have one).
 model ProjectActivity {
-  id         String                     @id @default(uuid()) @db.Char(36)
-  projectId  String                     @map("project_id") @db.Char(36)
-  type       ClientRequestActivityType  @default(note)
-  summary    String                     @db.Text
-  occurredAt DateTime                   @default(now()) @map("occurred_at")
-  createdBy  String?                    @map("created_by") @db.Char(36)
-  createdAt  DateTime                   @default(now()) @map("created_at")
+  id         String                    @id @default(uuid()) @db.Char(36)
+  projectId  String                    @map("project_id") @db.Char(36)
+  type       ClientRequestActivityType @default(note)
+  summary    String                    @db.Text
+  occurredAt DateTime                  @default(now()) @map("occurred_at")
+  createdBy  String?                   @map("created_by") @db.Char(36)
+  createdAt  DateTime                  @default(now()) @map("created_at")
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   creator User?   @relation("ProjectActivityCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
@@ -828,6 +1005,28 @@ model ProjectRaidEntry {
   @@map("project_raid_entries")
 }
 
+// AMSOL running recruitment AS A SERVICE for a client — HR reports this as an aggregate funnel
+// (how many applications came in, how many were screened, etc.), not individual candidate
+// records. One running funnel per engagement (Project), edited in place as the drive progresses
+// — not a per-candidate CRUD, and not dated snapshots.
+model RecruitmentFunnel {
+  id                   String   @id @default(uuid()) @db.Char(36)
+  projectId            String   @unique @map("project_id") @db.Char(36)
+  applicationsReceived Int      @default(0) @map("applications_received")
+  screened             Int      @default(0)
+  interviewed          Int      @default(0)
+  offered              Int      @default(0)
+  placed               Int      @default(0)
+  notes                String?  @db.Text
+  updatedBy            String?  @map("updated_by") @db.Char(36)
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("recruitment_funnels")
+}
+
 model TaskComment {
   id        String   @id @default(uuid()) @db.Char(36)
   taskId    String   @map("task_id") @db.Char(36)
@@ -862,10 +1061,10 @@ model Document {
   createdAt       DateTime             @default(now()) @map("created_at")
   updatedAt       DateTime             @updatedAt @map("updated_at")
 
-  creator       User?                 @relation("DocumentCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
-  versions      DocumentVersion[]     @relation("DocumentVersions")
-  latestVersion DocumentVersion?      @relation("DocumentLatestVersion", fields: [latestVersionId], references: [id], onDelete: SetNull)
-  accessGrants  DocumentAccessGrant[]
+  creator            User?                 @relation("DocumentCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  versions           DocumentVersion[]     @relation("DocumentVersions")
+  latestVersion      DocumentVersion?      @relation("DocumentLatestVersion", fields: [latestVersionId], references: [id], onDelete: SetNull)
+  accessGrants       DocumentAccessGrant[]
   tenderRequirements TenderRequirement[]
 
   @@index([resourceType, resourceId])
@@ -915,37 +1114,45 @@ model DocumentAccessGrant {
 }
 
 // Pre-contract CRM pipeline: identified -> in_progress (preparing the bid) -> submitted ->
-// won / lost / withdrawn. A won tender is converted to a Contract via an explicit action
-// (ContractsService/TendersService), never automatically — see Contract.tenderId.
+// won / lost / withdrawn / cancelled. A won tender is converted to a Contract via an explicit
+// action (ContractsService/TendersService), never automatically — see Contract.tenderId.
 model Tender {
-  id                 String      @id @default(uuid()) @db.Char(36)
-  referenceNumber    String?     @unique @map("reference_number")
+  id                 String       @id @default(uuid()) @db.Char(36)
+  referenceNumber    String?      @unique @map("reference_number")
   title              String
-  description        String?     @db.Text
-  clientId           String?     @map("client_id") @db.Char(36)
-  prospectClientName String?     @map("prospect_client_name")
-  departmentId       String      @map("department_id") @db.Char(36)
-  serviceLineId      String?     @map("service_line_id") @db.Char(36)
-  accountManagerId   String?     @map("account_manager_id") @db.Char(36)
-  stage              TenderStage @default(identified)
-  estimatedValue     Decimal?    @map("estimated_value") @db.Decimal(14, 2)
-  currency           String      @default("KES")
-  submissionDeadline DateTime?   @map("submission_deadline") @db.Date
-  submittedAt        DateTime?   @map("submitted_at")
-  wonAt              DateTime?   @map("won_at")
-  lostAt             DateTime?   @map("lost_at")
-  withdrawnAt        DateTime?   @map("withdrawn_at")
-  lostReason         String?     @map("lost_reason") @db.Text
-  notes              String?     @db.Text
-  createdBy          String?     @map("created_by") @db.Char(36)
-  createdAt          DateTime    @default(now()) @map("created_at")
-  updatedAt          DateTime    @updatedAt @map("updated_at")
+  description        String?      @db.Text
+  clientId           String?      @map("client_id") @db.Char(36)
+  prospectClientName String?      @map("prospect_client_name")
+  departmentId       String       @map("department_id") @db.Char(36)
+  serviceLineId      String?      @map("service_line_id") @db.Char(36)
+  accountManagerId   String?      @map("account_manager_id") @db.Char(36)
+  stage              TenderStage  @default(identified)
+  estimatedValue     Decimal?     @map("estimated_value") @db.Decimal(14, 2)
+  currency           String       @default("KES")
+  submissionDeadline DateTime?    @map("submission_deadline") @db.Date
+  submittedAt        DateTime?    @map("submitted_at")
+  wonAt              DateTime?    @map("won_at")
+  lostAt             DateTime?    @map("lost_at")
+  withdrawnAt        DateTime?    @map("withdrawn_at")
+  cancelledAt        DateTime?    @map("cancelled_at")
+  // Snapshot of the stage right before the tender was marked lost/withdrawn/cancelled — same
+  // purpose as ClientRequest.lostFromStage: a tender lost from "evaluation" reached further
+  // than one lost from "identified", and the funnel needs that to count it toward every stage
+  // it actually passed through, not just bucket it under a flat "lost" total. lostReason is
+  // reused for all three exits (not just literal losses) rather than adding a separate
+  // cancellation-reason column.
+  lostFromStage      TenderStage? @map("lost_from_stage")
+  lostReason         String?      @map("lost_reason") @db.Text
+  notes              String?      @db.Text
+  createdBy          String?      @map("created_by") @db.Char(36)
+  createdAt          DateTime     @default(now()) @map("created_at")
+  updatedAt          DateTime     @updatedAt @map("updated_at")
 
-  client         Client?           @relation(fields: [clientId], references: [id], onDelete: SetNull)
-  department     Department        @relation(fields: [departmentId], references: [id], onDelete: Restrict)
-  serviceLine    ServiceLine?      @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
-  accountManager User?             @relation("TenderAccountManager", fields: [accountManagerId], references: [id], onDelete: SetNull)
-  creator        User?             @relation("TenderCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  client         Client?             @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  department     Department          @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  serviceLine    ServiceLine?        @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
+  accountManager User?               @relation("TenderAccountManager", fields: [accountManagerId], references: [id], onDelete: SetNull)
+  creator        User?               @relation("TenderCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
   resources      TenderResource[]
   timeEntries    TenderTimeEntry[]
   costItems      TenderCostItem[]
@@ -1021,17 +1228,17 @@ model TenderCostItem {
 }
 
 model TenderBond {
-  id         String            @id @default(uuid()) @db.Char(36)
-  tenderId   String            @map("tender_id") @db.Char(36)
-  bondType   TenderBondType    @map("bond_type")
-  amount     Decimal           @db.Decimal(14, 2)
+  id         String           @id @default(uuid()) @db.Char(36)
+  tenderId   String           @map("tender_id") @db.Char(36)
+  bondType   TenderBondType   @map("bond_type")
+  amount     Decimal          @db.Decimal(14, 2)
   provider   String?
-  status     TenderBondStatus  @default(pending)
-  issuedDate DateTime?         @map("issued_date") @db.Date
-  expiryDate DateTime?         @map("expiry_date") @db.Date
-  notes      String?           @db.Text
-  createdAt  DateTime          @default(now()) @map("created_at")
-  updatedAt  DateTime          @updatedAt @map("updated_at")
+  status     TenderBondStatus @default(pending)
+  issuedDate DateTime?        @map("issued_date") @db.Date
+  expiryDate DateTime?        @map("expiry_date") @db.Date
+  notes      String?          @db.Text
+  createdAt  DateTime         @default(now()) @map("created_at")
+  updatedAt  DateTime         @updatedAt @map("updated_at")
 
   tender Tender @relation(fields: [tenderId], references: [id], onDelete: Cascade)
 
@@ -1113,13 +1320,13 @@ model TenderRequirement {
 // Same shape as ClientRequestActivity/ProjectActivity — the "Activity & Communication" log on
 // a tender's pipeline card (clarification calls/emails with the issuer, internal notes).
 model TenderActivity {
-  id         String                     @id @default(uuid()) @db.Char(36)
-  tenderId   String                     @map("tender_id") @db.Char(36)
-  type       ClientRequestActivityType  @default(note)
-  summary    String                     @db.Text
-  occurredAt DateTime                   @default(now()) @map("occurred_at")
-  createdBy  String?                    @map("created_by") @db.Char(36)
-  createdAt  DateTime                   @default(now()) @map("created_at")
+  id         String                    @id @default(uuid()) @db.Char(36)
+  tenderId   String                    @map("tender_id") @db.Char(36)
+  type       ClientRequestActivityType @default(note)
+  summary    String                    @db.Text
+  occurredAt DateTime                  @default(now()) @map("occurred_at")
+  createdBy  String?                   @map("created_by") @db.Char(36)
+  createdAt  DateTime                  @default(now()) @map("created_at")
 
   tender  Tender @relation(fields: [tenderId], references: [id], onDelete: Cascade)
   creator User?  @relation("TenderActivityCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
@@ -1128,10 +1335,10 @@ model TenderActivity {
   @@map("tender_activities")
 }
 
-// Inbound client requests: Operations/Marketing intake -> routed to the owning department ->
+// Inbound client requests: Tender intake -> routed to the owning department ->
 // engaged (calls/meetings, see ClientRequestActivity) -> converted into a Project and/or a
 // recurring Contract, or lost/withdrawn. departmentId is null until routed — before that, only
-// marketing_ops (the intake department) can act on it; see TendersService-style
+// tender (the intake department) can act on it; see TendersService-style
 // assertDepartmentAccess usage in ClientRequestsService for the mutation rule once routed.
 model ClientRequest {
   id                 String                       @id @default(uuid()) @db.Char(36)
@@ -1173,6 +1380,7 @@ model ClientRequest {
   activities        ClientRequestActivity[]
   convertedProject  Project?
   convertedContract Contract?
+  convertedFromLead Lead?
 
   @@index([departmentId])
   @@index([stage])
@@ -1183,19 +1391,283 @@ model ClientRequest {
 // Engagement timeline — the calls/emails/meetings/notes a department logs while working a
 // request. This is the concrete record of "engaging the client".
 model ClientRequestActivity {
-  id         String                     @id @default(uuid()) @db.Char(36)
-  requestId  String                     @map("request_id") @db.Char(36)
-  type       ClientRequestActivityType  @default(note)
-  summary    String                     @db.Text
-  occurredAt DateTime                   @default(now()) @map("occurred_at")
-  createdBy  String?                    @map("created_by") @db.Char(36)
-  createdAt  DateTime                   @default(now()) @map("created_at")
+  id         String                    @id @default(uuid()) @db.Char(36)
+  requestId  String                    @map("request_id") @db.Char(36)
+  type       ClientRequestActivityType @default(note)
+  summary    String                    @db.Text
+  occurredAt DateTime                  @default(now()) @map("occurred_at")
+  createdBy  String?                   @map("created_by") @db.Char(36)
+  createdAt  DateTime                  @default(now()) @map("created_at")
 
   request ClientRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
   creator User?         @relation("ClientRequestActivityCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
 
   @@index([requestId])
   @@map("client_request_activities")
+}
+
+enum LeadStage {
+  new
+  contacted
+  qualified
+  nurturing
+  converted
+  lost
+}
+
+enum LeadSource {
+  website
+  referral
+  campaign
+  event
+  social
+  cold_outreach
+  other
+}
+
+enum LeadActivityType {
+  call
+  email
+  meeting
+  note
+}
+
+// Marketing's own pre-intake pipeline — a Lead is not yet a formal client request; once it's
+// sales-ready, Marketing converts it into a real ClientRequest, which then enters Tender's
+// intake/routing flow like any other request.
+model Lead {
+  id                 String     @id @default(uuid()) @db.Char(36)
+  name               String
+  company            String?
+  contactEmail       String?    @map("contact_email")
+  contactPhone       String?    @map("contact_phone")
+  source             LeadSource @default(other)
+  stage              LeadStage  @default(new)
+  notes              String?    @db.Text
+  convertedRequestId String?    @unique @map("converted_request_id") @db.Char(36)
+  campaignId         String?    @map("campaign_id") @db.Char(36)
+  createdBy          String?    @map("created_by") @db.Char(36)
+  createdAt          DateTime   @default(now()) @map("created_at")
+  updatedAt          DateTime   @updatedAt @map("updated_at")
+
+  convertedRequest ClientRequest? @relation(fields: [convertedRequestId], references: [id], onDelete: SetNull)
+  campaign         Campaign?      @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  activities       LeadActivity[]
+
+  @@index([stage])
+  @@map("leads")
+}
+
+enum CampaignStatus {
+  planned
+  active
+  paused
+  completed
+}
+
+// Marketing campaigns — a Lead optionally attributes to one, letting ROI be computed by
+// walking each converted lead's existing convertedRequest -> convertedContract chain (the same
+// relation path EngagementsService already resolves) rather than duplicating revenue tracking.
+model Campaign {
+  id        String         @id @default(uuid()) @db.Char(36)
+  name      String
+  channel   String?
+  status    CampaignStatus @default(planned)
+  budget    Decimal?       @db.Decimal(14, 2)
+  startDate DateTime?      @map("start_date") @db.Date
+  endDate   DateTime?      @map("end_date") @db.Date
+  notes     String?        @db.Text
+  createdBy String?        @map("created_by") @db.Char(36)
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  creator User?  @relation("CampaignCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  leads   Lead[]
+
+  @@map("campaigns")
+}
+
+// Follow-up log — the calls/emails/meetings/notes Marketing logs while nurturing a lead.
+model LeadActivity {
+  id         String           @id @default(uuid()) @db.Char(36)
+  leadId     String           @map("lead_id") @db.Char(36)
+  type       LeadActivityType @default(note)
+  summary    String           @db.Text
+  occurredAt DateTime         @default(now()) @map("occurred_at")
+  createdBy  String?          @map("created_by") @db.Char(36)
+  createdAt  DateTime         @default(now()) @map("created_at")
+
+  lead    Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  creator User? @relation("LeadActivityCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([leadId])
+  @@map("lead_activities")
+}
+
+enum BlogPostStatus {
+  draft
+  published
+}
+
+// Marketing's blog CMS. AIMS manages content and exposes a public read + engagement-tracking
+// API (see marketing/blog's public controller) — the actual public page rendering happens on
+// whatever site consumes that API, not inside AIMS itself.
+model BlogPost {
+  id                    String         @id @default(uuid()) @db.Char(36)
+  slug                  String         @unique
+  title                 String
+  excerpt               String?        @db.Text
+  content               String?        @db.Text
+  imagePath             String?        @map("image_path")
+  imageMimeType         String?        @map("image_mime_type")
+  videoPath             String?        @map("video_path")
+  videoMimeType         String?        @map("video_mime_type")
+  tags                  Json?
+  authorName            String?        @map("author_name")
+  status                BlogPostStatus @default(draft)
+  publishedAt           DateTime?      @map("published_at")
+  views                 Int            @default(0)
+  likes                 Int            @default(0)
+  shares                Int            @default(0)
+  totalTimeSpentSeconds Int            @default(0) @map("total_time_spent_seconds")
+  timeSpentSamples      Int            @default(0) @map("time_spent_samples")
+  createdBy             String?        @map("created_by") @db.Char(36)
+  createdAt             DateTime       @default(now()) @map("created_at")
+  updatedAt             DateTime       @updatedAt @map("updated_at")
+
+  creator User? @relation("BlogPostCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@map("blog_posts")
+}
+
+enum ItSystemType {
+  website
+  internal_system
+  integration
+  client_system
+  infrastructure
+  mobile_app
+}
+
+enum ItSystemStatus {
+  active
+  inactive
+  deprecated
+}
+
+// IT's own lightweight registry of the websites/systems/integrations it maintains — deliberately
+// not a full asset-management or incident-tracking tool. IT's project work uses the existing
+// Projects/Tasks module like every other department; this just tracks what exists.
+model ItSystem {
+  id        String         @id @default(uuid()) @db.Char(36)
+  name      String
+  type      ItSystemType
+  status    ItSystemStatus @default(active)
+  owner     String?
+  notes     String?        @db.Text
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  tickets Ticket[]
+
+  @@map("it_systems")
+}
+
+enum TicketStatus {
+  open
+  in_progress
+  resolved
+  closed
+}
+
+enum TicketPriority {
+  low
+  medium
+  high
+  urgent
+}
+
+enum TicketSource {
+  internal
+  hrms_client
+}
+
+// IT support tickets — both internal ("my laptop won't boot") and HRMS-client-facing
+// ("client X can't run payroll"), distinguished by `source`. Optionally linked to an ItSystem
+// (what's affected) and, for hrms_client tickets, indirectly to an HrmsLicense via the
+// requester's organization (not a direct FK — requester is an internal User, the client-side
+// contact is free text in the description, matching how support tickets are actually raised).
+model Ticket {
+  id          String         @id @default(uuid()) @db.Char(36)
+  title       String
+  description String?        @db.Text
+  status      TicketStatus   @default(open)
+  priority    TicketPriority @default(medium)
+  source      TicketSource   @default(internal)
+  systemId    String?        @map("system_id") @db.Char(36)
+  requesterId String?        @map("requester_id") @db.Char(36)
+  assigneeId  String?        @map("assignee_id") @db.Char(36)
+  resolvedAt  DateTime?      @map("resolved_at")
+  createdBy   String?        @map("created_by") @db.Char(36)
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  system    ItSystem? @relation(fields: [systemId], references: [id], onDelete: SetNull)
+  requester User?     @relation("TicketRequester", fields: [requesterId], references: [id], onDelete: SetNull)
+  assignee  User?     @relation("TicketAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  creator   User?     @relation("TicketCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@map("tickets")
+}
+
+enum HrmsLicenseTier {
+  starter
+  growth
+  enterprise
+}
+
+enum HrmsLicenseStatus {
+  active
+  trial
+  suspended
+  cancelled
+}
+
+// The external companies AMSOL licenses its HRMS product to — distinct from Ticket/ItSystem,
+// and distinct from the generic Client record (a client can exist without an HRMS license).
+model HrmsLicense {
+  id          String            @id @default(uuid()) @db.Char(36)
+  clientId    String            @unique @map("client_id") @db.Char(36)
+  tier        HrmsLicenseTier   @default(starter)
+  status      HrmsLicenseStatus @default(trial)
+  activeUsers Int               @default(0) @map("active_users")
+  renewalDate DateTime?         @map("renewal_date") @db.Date
+  notes       String?           @db.Text
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@map("hrms_licenses")
+}
+
+// A daily cache of GA4 metrics, not a live call per page load — populated by the nightly
+// GoogleAnalyticsService sync (or the manual sync-now trigger). Absent entirely until GA4
+// credentials are configured, which the frontend reflects as an honest "Not connected" state.
+model WebsiteAnalyticsSnapshot {
+  id            String   @id @default(uuid()) @db.Char(36)
+  periodStart   DateTime @map("period_start") @db.Date
+  periodEnd     DateTime @map("period_end") @db.Date
+  visitors      Int
+  pageViews     Int      @map("page_views")
+  topPages      Json     @map("top_pages")
+  topSources    Json     @map("top_sources")
+  blogPageViews Int?     @map("blog_page_views")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("website_analytics_snapshots")
 }
 
 enum NotificationType {
@@ -1206,6 +1678,11 @@ enum NotificationType {
   tender_deadline
   meeting
   reminder
+  task_assigned
+  project_shared
+  document_shared
+  task_comment
+  client_request_assigned
 }
 
 enum NotificationSeverity {
@@ -1219,19 +1696,19 @@ enum NotificationSeverity {
 // hourly sweep can safely re-run without spamming; manual reminders (createdBy set, dedupeKey
 // null) skip dedup entirely since each one is a distinct human action.
 model Notification {
-  id           String                @id @default(uuid()) @db.Char(36)
-  userId       String                @map("user_id") @db.Char(36)
+  id           String               @id @default(uuid()) @db.Char(36)
+  userId       String               @map("user_id") @db.Char(36)
   type         NotificationType
-  severity     NotificationSeverity  @default(info)
+  severity     NotificationSeverity @default(info)
   title        String
-  body         String?               @db.Text
-  resourceType String?               @map("resource_type")
-  resourceId   String?               @map("resource_id")
-  dedupeKey    String?               @map("dedupe_key")
-  isRead       Boolean               @default(false) @map("is_read")
-  readAt       DateTime?             @map("read_at")
-  createdBy    String?               @map("created_by") @db.Char(36)
-  createdAt    DateTime              @default(now()) @map("created_at")
+  body         String?              @db.Text
+  resourceType String?              @map("resource_type")
+  resourceId   String?              @map("resource_id")
+  dedupeKey    String?              @map("dedupe_key")
+  isRead       Boolean              @default(false) @map("is_read")
+  readAt       DateTime?            @map("read_at")
+  createdBy    String?              @map("created_by") @db.Char(36)
+  createdAt    DateTime             @default(now()) @map("created_at")
 
   user    User  @relation("NotificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
   creator User? @relation("NotificationCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
@@ -1239,4 +1716,192 @@ model Notification {
   @@unique([userId, dedupeKey])
   @@index([userId, isRead])
   @@map("notifications")
+}
+
+// One row per user, created lazily (defaults apply until a row exists) — six broad categories
+// rather than one per NotificationType, so the settings page stays a short, scannable list.
+// taskUpdates covers task_assigned/task_due/task_comment; projectUpdates covers
+// project_alert/project_shared; financeAlerts covers contract_expiry/invoice_overdue;
+// tenderAlerts covers tender_deadline; remindersMeetings covers reminder/meeting. emailDigest
+// gates the separate daily digest email, independent of in-app delivery.
+model NotificationPreference {
+  userId            String   @id @map("user_id") @db.Char(36)
+  taskUpdates       Boolean  @default(true) @map("task_updates")
+  projectUpdates    Boolean  @default(true) @map("project_updates")
+  financeAlerts     Boolean  @default(true) @map("finance_alerts")
+  tenderAlerts      Boolean  @default(true) @map("tender_alerts")
+  remindersMeetings Boolean  @default(true) @map("reminders_meetings")
+  emailDigest       Boolean  @default(true) @map("email_digest")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preferences")
+}
+
+/**
+ * ================= Water Project =================
+ */
+// A self-contained module: borehole/main meter -> zone bulk meters -> household meters ->
+// customers, with dated usage/payment records (seeded from a CSV export, or uploaded later) and
+// separate dial readings for main/bulk meters used to compute distribution loss (NRW).
+
+enum WaterMeterType {
+  main
+  bulk
+  household
+}
+
+enum WaterVendingSystem {
+  amsol
+  mpaya
+}
+
+enum WaterUsageSource {
+  seed
+  upload
+  manual
+}
+
+// Zones nest arbitrarily deep (a zone can sit inside another zone) rather than a fixed two-tier
+// zone/sub-zone split — Meters and Customers forms still present it as "Zone" then "Sub-zone"
+// (top-level pick, then one of its children), but that's just two levels of the same tree walked
+// from the frontend; the data model itself doesn't cap the depth.
+model WaterZone {
+  id           String   @id @default(uuid()) @db.Char(36)
+  name         String
+  parentZoneId String?  @map("parent_zone_id") @db.Char(36)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  parent    WaterZone?      @relation("ZoneHierarchy", fields: [parentZoneId], references: [id], onDelete: Restrict)
+  children  WaterZone[]     @relation("ZoneHierarchy")
+  meters    WaterMeter[]
+  customers WaterCustomer[]
+
+  @@unique([parentZoneId, name])
+  @@index([parentZoneId])
+  @@map("water_zones")
+}
+
+model WaterCustomer {
+  id        String   @id @default(uuid()) @db.Char(36)
+  name      String
+  zoneId    String?  @map("zone_id") @db.Char(36)
+  phone     String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  zone         WaterZone?         @relation(fields: [zoneId], references: [id], onDelete: SetNull)
+  meters       WaterMeter[]
+  usageRecords WaterUsageRecord[]
+
+  @@index([zoneId])
+  @@map("water_customers")
+}
+
+// Meters are the module's primary entry point — registering one captures who it's assigned to,
+// where (plot number, zone) and when it was installed, rather than requiring a customer to be
+// created as a separate step first (see WaterService.createMeter's find-or-create-by-name).
+model WaterMeter {
+  id              String             @id @default(uuid()) @db.Char(36)
+  meterNumber     String             @unique @map("meter_number")
+  meterType       WaterMeterType     @default(household) @map("meter_type")
+  // Household meters are identified by their customer; main/bulk meters have no customer and are
+  // identified by a friendly name + physical location instead (e.g. "Borehole Main Meter" /
+  // "Borehole pump house"). A bulk meter's `zoneId` is the zone it reconciles — since zones nest
+  // arbitrarily, that single assignment already covers every sub-zone beneath it (a bulk meter
+  // "having multiple sub-zones" falls straight out of the existing zone tree, no separate
+  // many-to-many needed — see WaterService's zoneAndDescendantIds).
+  name            String?
+  location        String?
+  customerId      String?            @map("customer_id") @db.Char(36)
+  plotNo          String?            @map("plot_no")
+  installedAt     DateTime?          @map("installed_at")
+  zoneId          String?            @map("zone_id") @db.Char(36)
+  isActive        Boolean            @default(true) @map("is_active")
+  // Which vending platform this meter is read/topped-up through — distinct customer bases and
+  // account-number formats per system, not a billing/technical detail. Defaults to `amsol` so
+  // every meter already in AIMS is correctly tagged with no code changes.
+  vendingSystem   WaterVendingSystem @default(amsol) @map("vending_system")
+  // Set when this meter physically replaced another (e.g. a faulty unit swapped out) — an audit
+  // trail only. The actual vending-history continuity comes from both meters sharing the same
+  // `customerId`, not from this field; see WaterMeter model comment in the plan for the full
+  // reasoning. Self-relation, so both directions are queryable from either meter.
+  replacesMeterId String?            @unique @map("replaces_meter_id") @db.Char(36)
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+
+  customer        WaterCustomer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  zone            WaterZone?     @relation(fields: [zoneId], references: [id], onDelete: SetNull)
+  replacesMeter   WaterMeter?    @relation("MeterReplacement", fields: [replacesMeterId], references: [id], onDelete: SetNull)
+  replacedByMeter WaterMeter?    @relation("MeterReplacement")
+
+  usageRecords WaterUsageRecord[]
+  readings     WaterMeterReading[]
+
+  @@index([customerId])
+  @@index([zoneId])
+  @@index([replacesMeterId])
+  @@map("water_meters")
+}
+
+// One row per confirmed CSV/Excel upload — dated snapshots, so usage records stay traceable to
+// the batch (and file) they arrived in, matching maybePaginate's "opt-in envelope" pattern used
+// everywhere else: a plain list of uploads, each with a rollup of its own records.
+model WaterUsageUpload {
+  id          String   @id @default(uuid()) @db.Char(36)
+  fileName    String   @map("file_name")
+  recordCount Int      @default(0) @map("record_count")
+  uploadedBy  String?  @map("uploaded_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  uploader User?              @relation("WaterUsageUploadCreatedBy", fields: [uploadedBy], references: [id], onDelete: SetNull)
+  records  WaterUsageRecord[]
+
+  @@map("water_usage_uploads")
+}
+
+// A single purchase/consumption transaction against a household meter — units sold + amount
+// paid, dated by `recordedAt` (the actual purchase date, not when it was entered into AIMS).
+// `customerName` is kept verbatim from the source row even when `customerId` resolves, since a
+// meter can change hands and the historical record should still say who actually paid.
+model WaterUsageRecord {
+  id           String           @id @default(uuid()) @db.Char(36)
+  meterId      String           @map("meter_id") @db.Char(36)
+  customerId   String?          @map("customer_id") @db.Char(36)
+  customerName String           @map("customer_name")
+  unitsSold    Decimal          @map("units_sold") @db.Decimal(12, 2)
+  amountPaid   Decimal          @map("amount_paid") @db.Decimal(14, 2)
+  recordedAt   DateTime         @map("recorded_at")
+  source       WaterUsageSource @default(manual)
+  uploadId     String?          @map("upload_id") @db.Char(36)
+  createdAt    DateTime         @default(now()) @map("created_at")
+
+  meter    WaterMeter        @relation(fields: [meterId], references: [id], onDelete: Cascade)
+  customer WaterCustomer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  upload   WaterUsageUpload? @relation(fields: [uploadId], references: [id], onDelete: SetNull)
+
+  @@index([meterId, recordedAt])
+  @@index([recordedAt])
+  @@map("water_usage_records")
+}
+
+// A dial reading for a main or bulk meter — distinct from WaterUsageRecord (no customer/payment
+// involved). Consecutive readings for the same meter are compared to derive period consumption
+// for the loss ladder / NRW calculations, same semantics as the reference dashboard.
+model WaterMeterReading {
+  id          String   @id @default(uuid()) @db.Char(36)
+  meterId     String   @map("meter_id") @db.Char(36)
+  readingDate DateTime @map("reading_date")
+  value       Decimal  @db.Decimal(14, 2)
+  notes       String?
+  createdBy   String?  @map("created_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  meter   WaterMeter @relation(fields: [meterId], references: [id], onDelete: Cascade)
+  creator User?      @relation("WaterMeterReadingCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([meterId, readingDate])
+  @@map("water_meter_readings")
 }

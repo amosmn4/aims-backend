@@ -2,6 +2,7 @@ import { IsDateString, IsIn, IsInt, IsNumber, IsOptional, IsString, Min } from "
 
 const TASK_STATUSES = ["not_started", "in_progress", "review", "blocked", "completed"] as const;
 const TASK_PRIORITIES = ["low", "medium", "high", "urgent"] as const;
+const EXTENSION_ATTRIBUTIONS = ["client", "internal", "third_party", "other"] as const;
 
 export class CreateTaskDto {
   @IsString()
@@ -51,4 +52,14 @@ export class CreateTaskDto {
   @IsOptional()
   @IsInt()
   position?: number;
+
+  // Only meaningful together with a later `dueDate` — see TasksService.update. Not a Task
+  // column; pulled out of the dto before writing, same pattern as Project's equivalent fields.
+  @IsOptional()
+  @IsString()
+  extensionReason?: string;
+
+  @IsOptional()
+  @IsIn(EXTENSION_ATTRIBUTIONS)
+  extensionAttribution?: (typeof EXTENSION_ATTRIBUTIONS)[number];
 }

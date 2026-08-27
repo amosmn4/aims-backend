@@ -15,6 +15,7 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 import { DocumentsService } from "./documents.service";
+import { StorageService } from "../storage/storage.service";
 import { UploadDocumentDto } from "./dto/upload-document.dto";
 import { UpdateDocumentDto } from "./dto/update-document.dto";
 import { SetAccessGrantsDto } from "./dto/set-access-grants.dto";
@@ -28,7 +29,10 @@ import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 // in sync.
 @Controller("documents")
 export class DocumentsController {
-  constructor(private readonly documentsService: DocumentsService) {}
+  constructor(
+    private readonly documentsService: DocumentsService,
+    private readonly storage: StorageService,
+  ) {}
 
   @Get()
   @Roles()
@@ -39,10 +43,23 @@ export class DocumentsController {
     @Query("tag") tag: string | undefined,
     @Query("q") q: string | undefined,
     @Query("mine") mine: string | undefined,
+    @Query("sharedWithMe") sharedWithMe: string | undefined,
+    @Query("page") page: string | undefined,
+    @Query("pageSize") pageSize: string | undefined,
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.documentsService.findAll(
-      { resourceType, resourceId, departmentId, tag, q, mine: mine === "true" },
+      {
+        resourceType,
+        resourceId,
+        departmentId,
+        tag,
+        q,
+        mine: mine === "true",
+        sharedWithMe: sharedWithMe === "true",
+        page: page ? Number(page) : undefined,
+        pageSize: pageSize ? Number(pageSize) : undefined,
+      },
       user,
     );
   }
@@ -72,8 +89,8 @@ export class DocumentsController {
     @CurrentUser() user: AuthenticatedUser,
     @Res() res: Response,
   ) {
-    const { fileName, fullPath } = await this.documentsService.getFileForDownload(id, versionId, user);
-    res.download(fullPath, fileName);
+    const { fileName, key } = await this.documentsService.getFileForDownload(id, versionId, user);
+    await this.storage.streamToResponse(key, res, { disposition: "attachment", fileName });
   }
 
   @Get(":id/versions")

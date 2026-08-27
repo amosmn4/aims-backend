@@ -13,12 +13,11 @@ import { Throttle } from "@nestjs/throttler";
 import type { CookieOptions, Request, Response } from "express";
 import { AuthService } from "./auth.service";
 import { LoginDto } from "./dto/login.dto";
-import { DemoLoginDto } from "./dto/demo-login.dto";
+import { SetPasswordDto } from "./dto/set-password.dto";
 import { Public } from "./decorators/public.decorator";
 import { CurrentUser } from "./decorators/current-user.decorator";
 import type { AuthenticatedUser } from "./types/authenticated-user";
-import { UsersService } from "../users/users.service";
-import { DEMO_USERS } from "./demo-users.const";
+import { parseTtlToMs } from "./ttl.util";
 
 const REFRESH_COOKIE = "aims_refresh_token";
 
@@ -26,7 +25,6 @@ const REFRESH_COOKIE = "aims_refresh_token";
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
-    private readonly usersService: UsersService,
     private readonly config: ConfigService,
   ) {}
 
@@ -36,7 +34,9 @@ export class AuthController {
       sameSite: "lax",
       secure: this.config.get("NODE_ENV") === "production",
       path: "/api/v1/auth",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      // Matches the refresh JWT's own expiresIn (JWT_IDLE_TTL) — this is the sliding session
+      // timeout, not the absolute ceiling. See AuthService.refreshAccessToken.
+      maxAge: parseTtlToMs(this.config.get<string>("JWT_IDLE_TTL", "2h")),
     };
   }
 
@@ -58,6 +58,9 @@ export class AuthController {
     return { accessToken, user: authUser };
   }
 
+  // Re-sets the refresh cookie on every call — this is what makes the session's idle timeout
+  // actually slide. See AuthService.refreshAccessToken for the sliding-window + absolute-ceiling
+  // logic this relies on.
   @Public()
   @Post("refresh")
   @HttpCode(200)
@@ -65,9 +68,9 @@ export class AuthController {
     const refreshToken = req.cookies?.[REFRESH_COOKIE];
     if (!refreshToken) throw new UnauthorizedException("No refresh token provided");
 
-    const { accessToken, refreshToken: newRefreshToken } =
+    const { accessToken, refreshToken: rolledRefreshToken } =
       await this.authService.refreshAccessToken(refreshToken);
-    res.cookie(REFRESH_COOKIE, newRefreshToken, this.refreshCookieOptions());
+    res.cookie(REFRESH_COOKIE, rolledRefreshToken, this.refreshCookieOptions());
     return { accessToken };
   }
 
@@ -84,31 +87,14 @@ export class AuthController {
   }
 
   @Public()
-  @Get("demo-credentials")
-  demoCredentials() {
-    return Object.entries(DEMO_USERS).map(([role, u]) => ({ role, ...u }));
-  }
-
-  @Public()
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
-  @Post("demo-login")
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("set-password")
   @HttpCode(200)
-  async demoLogin(@Body() dto: DemoLoginDto, @Res({ passthrough: true }) res: Response) {
-    const cfg = DEMO_USERS[dto.role];
-    const user = await this.usersService.ensureDemoUser(
-      dto.role,
-      cfg.email,
-      cfg.password,
-      cfg.fullName,
+  async setPassword(@Body() dto: SetPasswordDto, @Res({ passthrough: true }) res: Response) {
+    const { authUser, accessToken, refreshToken } = await this.authService.setPassword(
+      dto.token,
+      dto.password,
     );
-    const authUser: AuthenticatedUser = {
-      id: user.id,
-      email: user.email,
-      roles: user.roles.map((r) => r.role),
-      departmentId: user.departmentId,
-    };
-    const { accessToken, refreshToken } = this.authService.issueTokens(authUser);
-
     res.cookie(REFRESH_COOKIE, refreshToken, this.refreshCookieOptions());
     return { accessToken, user: authUser };
   }

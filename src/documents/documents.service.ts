@@ -1,18 +1,32 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import { promises as fs } from "node:fs";
-import * as path from "node:path";
-import type { Document, DocumentAccessGrant, DocumentResourceType, DocumentVersion } from "@prisma/client";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
+import type {
+  Document,
+  DocumentAccessGrant,
+  DocumentResourceType,
+  DocumentVersion,
+} from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { StorageService } from "../storage/storage.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import { assertDepartmentAccess } from "../common/assert-department-access";
+import { viewerDepartmentCodes } from "../common/department-scope";
+import type { Paginated } from "../common/pagination";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import type { UploadDocumentDto } from "./dto/upload-document.dto";
 import type { UpdateDocumentDto } from "./dto/update-document.dto";
-import type { SetAccessGrantsDto } from "./dto/set-access-grants.dto";
+import type { SetAccessGrantsDto, AccessGrantInput } from "./dto/set-access-grants.dto";
 
-// Documents live on local disk for now (uploads/documents/, gitignored), mirroring the
-// Contracts module's storage pattern — a later move to S3-compatible storage only changes
-// the read/write helpers below, nothing upstream of them.
-const UPLOADS_DIR = path.join(process.cwd(), "uploads", "documents");
+const ACCESS_TYPES = new Set(["everyone", "department", "user"]);
+
+// Documents live under the "documents/" key prefix in whatever StorageService resolves to
+// (S3 when configured, local disk uploads/documents/ otherwise) — storagePath is a plain key,
+// never a real filesystem path, so it works unchanged either way.
+const KEY_PREFIX = "documents";
 
 const ALLOWED_MIME_TYPES = new Set([
   "application/pdf",
@@ -68,7 +82,11 @@ type LibraryEntry = SerializedDocument;
 
 @Injectable()
 export class DocumentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
+    private readonly notificationsService: NotificationsService,
+  ) {}
 
   /**
    * Mirrors the access rule each resource's own controller/service already enforces —
@@ -107,15 +125,22 @@ export class DocumentsService {
       return;
     }
 
+    // A shared, unattached catalog (see the schema's DocumentResourceType comment) — managing
+    // it is Tender's call, since it exists to serve the bidding process, plus admin/CEO.
+    if (resourceType === "tender_document_library") {
+      if (isAdminOrCeo(user) || user.roles.includes("tender")) return;
+      throw new ForbiddenException("Only Tender can manage the mandatory documents library");
+    }
+
     if (resourceType === "client_request") {
       const request = await this.prisma.clientRequest.findUniqueOrThrow({
         where: { id: resourceId },
         include: { department: true },
       });
-      // Unrouted requests have no department yet — they belong to Operations/Marketing intake.
+      // Unrouted requests have no department yet — they belong to Tender's intake.
       if (!request.department) {
-        if (isAdminOrCeo(user) || user.roles.includes("marketing_ops")) return;
-        throw new ForbiddenException("Only Operations/Marketing can manage an unrouted request's documents");
+        if (isAdminOrCeo(user) || user.roles.includes("tender")) return;
+        throw new ForbiddenException("Only Tender can manage an unrouted request's documents");
       }
       assertDepartmentAccess(request.department, user);
       return;
@@ -129,13 +154,17 @@ export class DocumentsService {
   }
 
   /** Zero grants = visible to everyone; otherwise a match on the grant set is required. */
-  private canView(doc: { createdBy: string | null; accessGrants: DocumentAccessGrant[] }, user: AuthenticatedUser) {
+  private canView(
+    doc: { createdBy: string | null; accessGrants: DocumentAccessGrant[] },
+    user: AuthenticatedUser,
+  ) {
     if (isAdminOrCeo(user)) return true;
     if (doc.createdBy === user.id) return true;
     if (doc.accessGrants.length === 0) return true;
     return doc.accessGrants.some((g) => {
       if (g.accessType === "everyone") return true;
-      if (g.accessType === "department") return !!user.departmentId && g.departmentId === user.departmentId;
+      if (g.accessType === "department")
+        return !!user.departmentId && g.departmentId === user.departmentId;
       if (g.accessType === "user") return g.userId === user.id;
       return false;
     });
@@ -149,13 +178,22 @@ export class DocumentsService {
       tag?: string;
       q?: string;
       mine?: boolean;
+      // True when someone specifically shared this document with the viewer (a `user`-type
+      // access grant naming them) rather than it just being visible to them by default —
+      // the Google-Drive-style "Shared with me" view, distinct from "Mine" (uploaded by them)
+      // and from the department-scoped default list.
+      sharedWithMe?: boolean;
+      page?: number;
+      pageSize?: number;
     },
     user: AuthenticatedUser,
-  ): Promise<LibraryEntry[]> {
+  ): Promise<LibraryEntry[] | Paginated<LibraryEntry>> {
     const documents = await this.prisma.document.findMany({
       where: {
         ...(filters.resourceType &&
-          filters.resourceType !== "contract" && { resourceType: filters.resourceType as DocumentResourceType }),
+          filters.resourceType !== "contract" && {
+            resourceType: filters.resourceType as DocumentResourceType,
+          }),
         ...(filters.resourceId && { resourceId: filters.resourceId }),
         ...(filters.mine && { createdBy: user.id }),
         ...(filters.q && {
@@ -172,35 +210,104 @@ export class DocumentsService {
     let entries: LibraryEntry[] = documents
       .filter((doc) => this.canView(doc, user))
       .map((doc) => ({ ...serializeDocument(doc), resourceType: doc.resourceType }))
-      .filter((doc) => !filters.tag || (Array.isArray(doc.tags) && (doc.tags as string[]).includes(filters.tag!)));
+      .filter(
+        (doc) =>
+          !filters.tag ||
+          (Array.isArray(doc.tags) && (doc.tags as string[]).includes(filters.tag!)),
+      );
+
+    if (filters.sharedWithMe) {
+      entries = entries.filter(
+        (doc) =>
+          doc.createdBy !== user.id &&
+          doc.accessGrants.some((g) => g.accessType === "user" && g.userId === user.id),
+      );
+    }
 
     // Department filter only applies to resource types that actually carry a department;
     // project/task documents are filtered via their parent's department in application code
-    // since Document has no direct department column.
+    // since Document has no direct department column. Explicit opt-in, used by admin/CEO
+    // narrowing to one department on purpose — the *enforced* scope below is separate and
+    // always applies to a department-scoped viewer regardless of what filters were passed.
     if (filters.departmentId) {
       const [projectIds, taskProjectIds] = await Promise.all([
-        this.prisma.project.findMany({ where: { departmentId: filters.departmentId }, select: { id: true } }),
+        this.prisma.project.findMany({
+          where: { departmentId: filters.departmentId },
+          select: { id: true },
+        }),
         this.prisma.task.findMany({
           where: { project: { departmentId: filters.departmentId } },
           select: { id: true },
         }),
       ]);
-      const allowedIds = new Set([...projectIds.map((p) => p.id), ...taskProjectIds.map((t) => t.id)]);
-      entries = entries.filter(
-        (doc) => doc.resourceType !== "project" && doc.resourceType !== "task" ? true : allowedIds.has(doc.resourceId),
+      const allowedIds = new Set([
+        ...projectIds.map((p) => p.id),
+        ...taskProjectIds.map((t) => t.id),
+      ]);
+      entries = entries.filter((doc) =>
+        doc.resourceType !== "project" && doc.resourceType !== "task"
+          ? true
+          : allowedIds.has(doc.resourceId),
       );
+    }
+
+    // Backend-enforced default scope: "mine" and "sharedWithMe" are already narrow (own uploads,
+    // explicit per-user grants) and skip this entirely. Otherwise, a department-scoped viewer
+    // only ever sees documents attached to a resource in their own department(s) — covering
+    // every resource type this model can attach to, not just project/task like the opt-in
+    // filter above. Operations/Tender see every tender/client_request document regardless of
+    // destination department, same intake-ownership exception used for those resources
+    // themselves; finance_report documents are Finance-only, since that resource type carries
+    // no department at all.
+    if (!filters.mine && !filters.sharedWithMe) {
+      const deptCodes = viewerDepartmentCodes(user);
+      if (deptCodes !== null) {
+        const seesTenderPipeline = deptCodes.includes("tender");
+        const seesIntakeQueue = seesTenderPipeline || deptCodes.includes("operations");
+        const [projects, tasks, tenders, requests] = await Promise.all([
+          this.prisma.project.findMany({
+            where: { department: { code: { in: deptCodes } } },
+            select: { id: true },
+          }),
+          this.prisma.task.findMany({
+            where: { project: { department: { code: { in: deptCodes } } } },
+            select: { id: true },
+          }),
+          this.prisma.tender.findMany({
+            where: seesTenderPipeline ? {} : { department: { code: { in: deptCodes } } },
+            select: { id: true },
+          }),
+          this.prisma.clientRequest.findMany({
+            where: seesIntakeQueue ? {} : { department: { code: { in: deptCodes } } },
+            select: { id: true },
+          }),
+        ]);
+        const allowedByType: Record<string, Set<string>> = {
+          project: new Set(projects.map((p) => p.id)),
+          task: new Set(tasks.map((t) => t.id)),
+          tender: new Set(tenders.map((t) => t.id)),
+          client_request: new Set(requests.map((r) => r.id)),
+        };
+        entries = entries.filter((doc) => {
+          if (doc.resourceType === "finance_report") return deptCodes.includes("finance");
+          return allowedByType[doc.resourceType]?.has(doc.resourceId) ?? true;
+        });
+      }
     }
 
     // Contracts documents live in the legacy ContractDocument table — merge them in so the
     // central library shows everything, unless the caller explicitly scoped to a non-contract
     // resourceType or a specific resourceId (contracts have no resourceId query support here).
-    const includeContracts = !filters.resourceId && (!filters.resourceType || filters.resourceType === "contract");
+    const includeContracts =
+      !filters.resourceId && (!filters.resourceType || filters.resourceType === "contract");
     if (includeContracts && !filters.tag) {
+      const deptCodes = filters.mine ? null : viewerDepartmentCodes(user);
       const contractDocs = await this.prisma.contractDocument.findMany({
         where: {
           ...(filters.mine && { uploadedBy: user.id }),
           ...(filters.q && { fileName: { contains: filters.q } }),
           ...(filters.departmentId && { contract: { departmentId: filters.departmentId } }),
+          ...(deptCodes && { contract: { department: { code: { in: deptCodes } } } }),
         },
         orderBy: { createdAt: "desc" },
       });
@@ -229,10 +336,20 @@ export class DocumentsService {
           createdAt: cd.createdAt,
         },
       }));
-      entries = [...entries, ...mapped].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      entries = [...entries, ...mapped].sort(
+        (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+      );
     }
 
-    return entries;
+    // Filtering/merging above happens in application code (visibility check, tag filter, legacy
+    // ContractDocument merge), so — unlike the plain-Prisma-model list endpoints — pagination has
+    // to slice the final assembled array rather than push skip/take into the query itself.
+    if (!filters.page && !filters.pageSize) return entries;
+    const page = filters.page && filters.page > 0 ? filters.page : 1;
+    const pageSize =
+      filters.pageSize && filters.pageSize > 0 ? Math.min(filters.pageSize, 100) : 25;
+    const start = (page - 1) * pageSize;
+    return { data: entries.slice(start, start + pageSize), total: entries.length, page, pageSize };
   }
 
   async findOne(id: string, user: AuthenticatedUser) {
@@ -263,12 +380,11 @@ export class DocumentsService {
     versionNo: number,
     file: Express.Multer.File,
   ) {
-    const dir = path.join(UPLOADS_DIR, resourceType, resourceId, documentId);
-    await fs.mkdir(dir, { recursive: true });
     const safeName = file.originalname.replace(/[^a-z0-9.\-_]+/gi, "_");
     const storedName = `v${versionNo}-${Date.now()}-${safeName}`;
-    await fs.writeFile(path.join(dir, storedName), file.buffer);
-    return path.join(resourceType, resourceId, documentId, storedName);
+    const storagePath = `${resourceType}/${resourceId}/${documentId}/${storedName}`;
+    await this.storage.write(`${KEY_PREFIX}/${storagePath}`, file.buffer);
+    return storagePath;
   }
 
   async upload(file: Express.Multer.File, dto: UploadDocumentDto, user: AuthenticatedUser) {
@@ -282,12 +398,23 @@ export class DocumentsService {
         title: dto.title ?? file.originalname,
         description: dto.description,
         category: dto.category ?? "other",
-        tags: dto.tags ? dto.tags.split(",").map((t) => t.trim()).filter(Boolean) : undefined,
+        tags: dto.tags
+          ? dto.tags
+              .split(",")
+              .map((t) => t.trim())
+              .filter(Boolean)
+          : undefined,
         createdBy: user.id,
       },
     });
 
-    const storagePath = await this.writeVersionFile(dto.resourceType, dto.resourceId, doc.id, 1, file);
+    const storagePath = await this.writeVersionFile(
+      dto.resourceType,
+      dto.resourceId,
+      doc.id,
+      1,
+      file,
+    );
     const version = await this.prisma.documentVersion.create({
       data: {
         documentId: doc.id,
@@ -300,12 +427,110 @@ export class DocumentsService {
       },
     });
 
-    const updated = await this.prisma.document.update({
+    await this.prisma.document.update({
       where: { id: doc.id },
       data: { latestVersionId: version.id },
+    });
+
+    // Omitted/empty `dto.access` means no grants at all, which canView() already treats as
+    // "everyone" — the same default as before this field existed, so a caller that doesn't send
+    // it (or an older client) behaves exactly as it always has.
+    await this.applyAccessGrants(doc.id, this.parseAccessGrants(dto.access), user, doc.title);
+
+    const final = await this.prisma.document.findUniqueOrThrow({
+      where: { id: doc.id },
       include: { latestVersion: true, accessGrants: true },
     });
-    return serializeDocument(updated);
+    return serializeDocument(final);
+  }
+
+  // JSON-encoded on the wire (see UploadDocumentDto.access) since it's a small structured array
+  // riding along a multipart form, not a real request body — validated by hand here rather than
+  // through class-validator's nested-DTO pipeline, which only runs on the top-level body.
+  private parseAccessGrants(raw: string | undefined): AccessGrantInput[] {
+    if (!raw) return [];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new BadRequestException("Invalid access grants payload");
+    }
+    if (!Array.isArray(parsed)) throw new BadRequestException("Invalid access grants payload");
+    return parsed.map((g): AccessGrantInput => {
+      if (
+        !g ||
+        typeof g !== "object" ||
+        !ACCESS_TYPES.has((g as { accessType?: unknown }).accessType as string)
+      ) {
+        throw new BadRequestException("Invalid access grant");
+      }
+      const grant = g as { accessType: string; departmentId?: unknown; userId?: unknown };
+      return {
+        accessType: grant.accessType as AccessGrantInput["accessType"],
+        departmentId: typeof grant.departmentId === "string" ? grant.departmentId : undefined,
+        userId: typeof grant.userId === "string" ? grant.userId : undefined,
+      };
+    });
+  }
+
+  // Shared by upload() (initial access, no "previous grants" to diff against — every `user`
+  // grant is new) and setAccess() (a full replace, diffed against what was there before so only
+  // newly-granted people get notified, not everyone on every unrelated re-save).
+  private async applyAccessGrants(
+    documentId: string,
+    grants: AccessGrantInput[],
+    user: AuthenticatedUser,
+    docTitle: string,
+  ) {
+    // De-duplicate — MySQL unique indexes don't dedupe NULLs, so this has to happen here
+    // rather than at the DB level. "Everyone" collapses to a single grant.
+    const seen = new Set<string>();
+    const deduped = grants.filter((g) => {
+      const key = `${g.accessType}:${g.departmentId ?? ""}:${g.userId ?? ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    const previousUserGrants = await this.prisma.documentAccessGrant.findMany({
+      where: { documentId, accessType: "user" },
+      select: { userId: true },
+    });
+    const previouslyGranted = new Set(previousUserGrants.map((g) => g.userId));
+    const newlyGrantedUserIds = deduped
+      .filter((g) => g.accessType === "user" && g.userId && !previouslyGranted.has(g.userId))
+      .map((g) => g.userId!);
+
+    await this.prisma.$transaction([
+      this.prisma.documentAccessGrant.deleteMany({ where: { documentId } }),
+      ...(deduped.length > 0
+        ? [
+            this.prisma.documentAccessGrant.createMany({
+              data: deduped.map((g) => ({
+                documentId,
+                accessType: g.accessType,
+                departmentId: g.accessType === "department" ? g.departmentId : undefined,
+                userId: g.accessType === "user" ? g.userId : undefined,
+              })),
+            }),
+          ]
+        : []),
+    ]);
+
+    await Promise.all(
+      newlyGrantedUserIds
+        .filter((userId) => userId !== user.id)
+        .map((userId) =>
+          this.notificationsService.notify({
+            userId,
+            type: "document_shared",
+            title: `A document was shared with you: ${docTitle}`,
+            resourceType: "document",
+            resourceId: documentId,
+            createdBy: user.id,
+          }),
+        ),
+    );
   }
 
   async addVersion(documentId: string, file: Express.Multer.File, user: AuthenticatedUser) {
@@ -313,12 +538,21 @@ export class DocumentsService {
     const doc = await this.prisma.document.findUniqueOrThrow({ where: { id: documentId } });
     await this.assertCanAttach(doc.resourceType, doc.resourceId, user);
 
-    const versionNo = ((await this.prisma.documentVersion.aggregate({
-      where: { documentId },
-      _max: { versionNo: true },
-    }))._max.versionNo ?? 0) + 1;
+    const versionNo =
+      ((
+        await this.prisma.documentVersion.aggregate({
+          where: { documentId },
+          _max: { versionNo: true },
+        })
+      )._max.versionNo ?? 0) + 1;
 
-    const storagePath = await this.writeVersionFile(doc.resourceType, doc.resourceId, doc.id, versionNo, file);
+    const storagePath = await this.writeVersionFile(
+      doc.resourceType,
+      doc.resourceId,
+      doc.id,
+      versionNo,
+      file,
+    );
     const version = await this.prisma.documentVersion.create({
       data: {
         documentId: doc.id,
@@ -354,7 +588,11 @@ export class DocumentsService {
     return versions.map(serializeVersion);
   }
 
-  async getFileForDownload(documentId: string, versionId: string | undefined, user: AuthenticatedUser) {
+  async getFileForDownload(
+    documentId: string,
+    versionId: string | undefined,
+    user: AuthenticatedUser,
+  ) {
     const doc = await this.prisma.document.findUniqueOrThrow({
       where: { id: documentId },
       include: { accessGrants: true },
@@ -365,15 +603,11 @@ export class DocumentsService {
 
     const version = versionId
       ? await this.prisma.documentVersion.findUniqueOrThrow({ where: { id: versionId } })
-      : await this.prisma.documentVersion.findUniqueOrThrow({ where: { id: doc.latestVersionId! } });
+      : await this.prisma.documentVersion.findUniqueOrThrow({
+          where: { id: doc.latestVersionId! },
+        });
 
-    const fullPath = path.join(UPLOADS_DIR, version.storagePath);
-    try {
-      await fs.access(fullPath);
-    } catch {
-      throw new NotFoundException("Document file is missing from storage");
-    }
-    return { fileName: version.fileName, fullPath };
+    return { fileName: version.fileName, key: `${KEY_PREFIX}/${version.storagePath}` };
   }
 
   async update(documentId: string, dto: UpdateDocumentDto, user: AuthenticatedUser) {
@@ -398,25 +632,43 @@ export class DocumentsService {
     await this.assertCanAttach(doc.resourceType, doc.resourceId, user);
 
     const versions = await this.prisma.documentVersion.findMany({ where: { documentId } });
-    await Promise.all(
-      versions.map((v) => fs.rm(path.join(UPLOADS_DIR, v.storagePath), { force: true })),
-    );
+    await Promise.all(versions.map((v) => this.storage.delete(`${KEY_PREFIX}/${v.storagePath}`)));
     // latestVersionId points at a DocumentVersion row, so it must be cleared before the
     // version rows (and then the document itself) can be deleted.
-    await this.prisma.document.update({ where: { id: documentId }, data: { latestVersionId: null } });
+    await this.prisma.document.update({
+      where: { id: documentId },
+      data: { latestVersionId: null },
+    });
     return this.prisma.document.delete({ where: { id: documentId } });
   }
 
   /** Called by Projects/Tasks/FinanceReports services before deleting the parent resource,
    * since there is no DB-level FK from Document to those tables (resourceId is polymorphic). */
   async deleteAllForResource(resourceType: DocumentResourceType, resourceId: string) {
-    const docs = await this.prisma.document.findMany({ where: { resourceType, resourceId } });
-    for (const doc of docs) {
-      const versions = await this.prisma.documentVersion.findMany({ where: { documentId: doc.id } });
-      await Promise.all(versions.map((v) => fs.rm(path.join(UPLOADS_DIR, v.storagePath), { force: true })));
-      await this.prisma.document.update({ where: { id: doc.id }, data: { latestVersionId: null } });
-      await this.prisma.document.delete({ where: { id: doc.id } });
-    }
+    const docs = await this.prisma.document.findMany({
+      where: { resourceType, resourceId },
+      select: { id: true },
+    });
+    if (docs.length === 0) return;
+    const docIds = docs.map((d) => d.id);
+
+    // Batched instead of one findMany/update/delete per document — a project with dozens of
+    // attached documents used to mean dozens of sequential round trips here. DocumentVersion
+    // rows cascade-delete with their Document at the DB level (see the schema's onDelete:
+    // Cascade), so the only reason to fetch versions up front is to know their storage paths
+    // before the rows disappear.
+    const versions = await this.prisma.documentVersion.findMany({
+      where: { documentId: { in: docIds } },
+      select: { storagePath: true },
+    });
+    await Promise.all(versions.map((v) => this.storage.delete(`${KEY_PREFIX}/${v.storagePath}`)));
+    // latestVersionId points at a DocumentVersion row, so it must be cleared before the
+    // version rows (and then the documents themselves) can be deleted.
+    await this.prisma.document.updateMany({
+      where: { id: { in: docIds } },
+      data: { latestVersionId: null },
+    });
+    await this.prisma.document.deleteMany({ where: { id: { in: docIds } } });
   }
 
   async getAccess(documentId: string, user: AuthenticatedUser) {
@@ -429,31 +681,7 @@ export class DocumentsService {
     const doc = await this.prisma.document.findUniqueOrThrow({ where: { id: documentId } });
     await this.assertCanAttach(doc.resourceType, doc.resourceId, user);
 
-    // De-duplicate — MySQL unique indexes don't dedupe NULLs, so this has to happen here
-    // rather than at the DB level. "Everyone" collapses to a single grant.
-    const seen = new Set<string>();
-    const grants = dto.grants.filter((g) => {
-      const key = `${g.accessType}:${g.departmentId ?? ""}:${g.userId ?? ""}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-
-    await this.prisma.$transaction([
-      this.prisma.documentAccessGrant.deleteMany({ where: { documentId } }),
-      ...(grants.length > 0
-        ? [
-            this.prisma.documentAccessGrant.createMany({
-              data: grants.map((g) => ({
-                documentId,
-                accessType: g.accessType,
-                departmentId: g.accessType === "department" ? g.departmentId : undefined,
-                userId: g.accessType === "user" ? g.userId : undefined,
-              })),
-            }),
-          ]
-        : []),
-    ]);
+    await this.applyAccessGrants(documentId, dto.grants, user, doc.title);
 
     return this.prisma.documentAccessGrant.findMany({ where: { documentId } });
   }

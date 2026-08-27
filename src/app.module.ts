@@ -18,18 +18,32 @@ import { FinanceUploadsModule } from "./finance/finance-uploads/finance-uploads.
 import { FinanceReportsModule } from "./finance/finance-reports/finance-reports.module";
 import { ProjectsModule } from "./project-management/projects/projects.module";
 import { TasksModule } from "./project-management/tasks/tasks.module";
+import { TimelineExtensionsModule } from "./project-management/timeline-extensions/timeline-extensions.module";
 import { ContractsModule } from "./crm/contracts/contracts.module";
 import { TendersModule } from "./crm/tenders/tenders.module";
 import { ClientRequestsModule } from "./crm/client-requests/client-requests.module";
 import { AuditLogModule } from "./audit-log/audit-log.module";
 import { DocumentsModule } from "./documents/documents.module";
 import { NotificationsModule } from "./notifications/notifications.module";
+import { RecruitmentModule } from "./hr/recruitment/recruitment.module";
+import { LeadsModule } from "./marketing/leads/leads.module";
+import { WebsiteAnalyticsModule } from "./marketing/website-analytics/website-analytics.module";
+import { BlogModule } from "./marketing/blog/blog.module";
+import { ItSystemsModule } from "./it/systems/it-systems.module";
+import { SearchModule } from "./search/search.module";
+import { EngagementsModule } from "./engagements/engagements.module";
+import { TicketsModule } from "./it/tickets/tickets.module";
+import { HrmsLicensesModule } from "./it/hrms-licenses/hrms-licenses.module";
+import { InventoryModule } from "./it/inventory/inventory.module";
+import { CampaignsModule } from "./marketing/campaigns/campaigns.module";
+import { CalendarModule } from "./calendar/calendar.module";
+import { WaterModule } from "./water/water.module";
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
     ScheduleModule.forRoot(),
-    // General ceiling for every route; login/demo-login apply a stricter @Throttle() override.
+    // General ceiling for every route; login/set-password apply a stricter @Throttle() override.
     ThrottlerModule.forRoot([{ name: "default", ttl: 60_000, limit: 120 }]),
     PrismaModule,
     AuthModule,
@@ -45,12 +59,26 @@ import { NotificationsModule } from "./notifications/notifications.module";
     FinanceReportsModule,
     ProjectsModule,
     TasksModule,
+    TimelineExtensionsModule,
     ContractsModule,
     TendersModule,
     ClientRequestsModule,
     AuditLogModule,
     DocumentsModule,
     NotificationsModule,
+    RecruitmentModule,
+    LeadsModule,
+    WebsiteAnalyticsModule,
+    BlogModule,
+    ItSystemsModule,
+    SearchModule,
+    EngagementsModule,
+    TicketsModule,
+    HrmsLicensesModule,
+    InventoryModule,
+    CampaignsModule,
+    CalendarModule,
+    WaterModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

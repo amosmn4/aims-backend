@@ -11,10 +11,12 @@ import { CreateActivityDto } from "./dto/create-activity.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
+import { parsePaginationQuery } from "../../common/pagination";
 
-// Any of the 5 operating departments can be *routed* a request and then manage it from there —
-// only creation/routing itself is restricted to marketing_ops (Operations/Marketing intake).
-const DEPT_WRITE_ROLES = ["finance", "hr", "it", "marketing_ops", "tender"] as const;
+// Any of the 5 delivery departments can be *routed* a request and then manage it from there.
+// Operations owns intake — creating and routing a request is restricted to operations — but
+// keeps write access here too so it can still update/annotate/convert requests it originated.
+const DEPT_WRITE_ROLES = ["finance", "hr", "it", "marketing", "tender", "operations"] as const;
 
 @Controller("client-requests")
 export class ClientRequestsController {
@@ -23,6 +25,7 @@ export class ClientRequestsController {
   @Get()
   @Roles()
   findAll(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("serviceLineId") serviceLineId?: string,
     @Query("stage") stage?: ClientRequestStage,
@@ -31,41 +34,59 @@ export class ClientRequestsController {
     @Query("q") q?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
   ) {
-    return this.requestsService.findAll({ departmentId, serviceLineId, stage, source, clientId, q, dateFrom, dateTo });
+    return this.requestsService.findAll(
+      { departmentId, serviceLineId, stage, source, clientId, q, dateFrom, dateTo },
+      user,
+      parsePaginationQuery(page, pageSize),
+    );
   }
 
   @Get("pipeline-summary")
   @Roles()
   pipelineSummary(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("serviceLineId") serviceLineId?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
   ) {
-    return this.requestsService.pipelineSummary({ departmentId, serviceLineId, dateFrom, dateTo });
+    return this.requestsService.pipelineSummary(
+      { departmentId, serviceLineId, dateFrom, dateTo },
+      user,
+    );
   }
 
   @Get("lost-breakdown")
   @Roles()
   lostBreakdown(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("serviceLineId") serviceLineId?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
   ) {
-    return this.requestsService.lostBreakdown({ departmentId, serviceLineId, dateFrom, dateTo });
+    return this.requestsService.lostBreakdown(
+      { departmentId, serviceLineId, dateFrom, dateTo },
+      user,
+    );
   }
 
   @Get("time-in-stage")
   @Roles()
   timeInStage(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("serviceLineId") serviceLineId?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
   ) {
-    return this.requestsService.timeInStage({ departmentId, serviceLineId, dateFrom, dateTo });
+    return this.requestsService.timeInStage(
+      { departmentId, serviceLineId, dateFrom, dateTo },
+      user,
+    );
   }
 
   @Get(":id")
@@ -75,20 +96,28 @@ export class ClientRequestsController {
   }
 
   @Post()
-  @Roles("marketing_ops")
+  @Roles("operations")
   create(@Body() dto: CreateClientRequestDto, @CurrentUser() user: AuthenticatedUser) {
     return this.requestsService.create(dto, user);
   }
 
   @Patch(":id")
   @Roles(...DEPT_WRITE_ROLES)
-  update(@Param("id") id: string, @Body() dto: UpdateClientRequestDto, @CurrentUser() user: AuthenticatedUser) {
+  update(
+    @Param("id") id: string,
+    @Body() dto: UpdateClientRequestDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
     return this.requestsService.update(id, dto, user);
   }
 
   @Patch(":id/route")
-  @Roles("marketing_ops")
-  route(@Param("id") id: string, @Body() dto: RouteClientRequestDto, @CurrentUser() user: AuthenticatedUser) {
+  @Roles("operations")
+  route(
+    @Param("id") id: string,
+    @Body() dto: RouteClientRequestDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
     return this.requestsService.route(id, dto, user);
   }
 

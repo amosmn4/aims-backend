@@ -1,36 +1,58 @@
-import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import * as bcrypt from "bcrypt";
-import type { AppRole } from "@prisma/client";
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from "@nestjs/common";
+import * as crypto from "crypto";
+import type { User } from "@prisma/client";
+import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../prisma/prisma.service";
 import { isSystemAdmin } from "../common/is-system-admin";
+import { maybePaginate, type PaginationQueryDto } from "../common/pagination";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import type { CreateUserDto } from "./dto/create-user.dto";
 import type { UpdateUserDto } from "./dto/update-user.dto";
+import { EmailService } from "../notifications/email/email.service";
+import { renderInviteEmail, renderResetPasswordEmail } from "./user-invite-email.util";
+import { parseCorsOrigins } from "../config/env.validation";
 
-const SALT_ROUNDS = 10;
+const SETUP_TOKEN_TTL_MS = 72 * 60 * 60 * 1000; // 72 hours
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly email: EmailService,
+    private readonly config: ConfigService,
+  ) {}
 
-  // System admins are invisible to everyone except another system admin — including the CEO
-  // — everywhere in the app. This is the one place that rule is enforced for the full listing;
-  // findAllLite() below enforces the same rule for the lightweight picker endpoint.
-  async findAll(viewer: AuthenticatedUser) {
-    const users = await this.prisma.user.findMany({
-      where: isSystemAdmin(viewer) ? undefined : { roles: { none: { role: "system_admin" } } },
-      include: { roles: true, department: true, office: true },
-      orderBy: { createdAt: "desc" },
-    });
-    return users.map(({ passwordHash: _passwordHash, ...user }) => user);
+  // System admin accounts are invisible in the Users & Roles admin UI, full stop — never shown
+  // in the list, never offered as a "grant role" option, not even to another system admin. The
+  // role is seeded/self-managed outside this screen; keeping it off the list entirely (rather
+  // than just hidden from non-admins) keeps the day-to-day admin UI free of the one account with
+  // unrestricted access. findAllLite() below enforces the same rule for the lightweight picker
+  // endpoint.
+  async findAll(viewer: AuthenticatedUser, pagination: PaginationQueryDto = {}) {
+    const result = await maybePaginate(
+      this.prisma.user,
+      {
+        where: { roles: { none: { role: "system_admin" } } },
+        include: { roles: true, department: true, office: true },
+        orderBy: { createdAt: "desc" },
+      },
+      pagination,
+    );
+    const strip = (u: { passwordHash: string | null }) => {
+      const { passwordHash, ...rest } = u;
+      return { ...rest, hasPassword: passwordHash !== null };
+    };
+    return Array.isArray(result) ? result.map(strip) : { ...result, data: result.data.map(strip) };
   }
 
-  findAllLite(viewer: AuthenticatedUser) {
+  findAllLite(_viewer: AuthenticatedUser) {
     return this.prisma.user.findMany({
-      where: {
-        isActive: true,
-        ...(isSystemAdmin(viewer) ? {} : { roles: { none: { role: "system_admin" } } }),
-      },
+      where: { isActive: true, roles: { none: { role: "system_admin" } } },
       select: { id: true, email: true, fullName: true },
       orderBy: { fullName: "asc" },
     });
@@ -41,11 +63,10 @@ export class UsersService {
       throw new ForbiddenException("Only a system administrator can grant the system_admin role");
     }
 
-    const passwordHash = await bcrypt.hash(dto.password, SALT_ROUNDS);
     const user = await this.prisma.user.create({
       data: {
         email: dto.email.toLowerCase(),
-        passwordHash,
+        passwordHash: null,
         fullName: dto.fullName,
         departmentId: dto.departmentId,
         officeId: dto.officeId,
@@ -53,8 +74,85 @@ export class UsersService {
       },
       include: { roles: true, department: true, office: true },
     });
+    const { inviteSent, setupLink } = await this.issueSetupTokenAndEmail(user, "invite");
     const { passwordHash: _passwordHash, ...rest } = user;
-    return rest;
+    return { ...rest, inviteSent, setupLink };
+  }
+
+  async resendInvite(id: string, viewer: AuthenticatedUser) {
+    await this.assertTargetVisible(id, viewer);
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException("User not found");
+    if (user.passwordHash !== null) {
+      throw new BadRequestException("User has already set a password");
+    }
+    return this.issueSetupTokenAndEmail(user, "invite");
+  }
+
+  // Admin-triggered reset for a user who already has a password (resendInvite above refuses
+  // that case on purpose, since it's meant only for users who never finished onboarding) —
+  // same single-use token mechanism, just reachable regardless of current password state and
+  // sent with "reset" rather than "welcome" copy.
+  async resetPassword(id: string, viewer: AuthenticatedUser) {
+    await this.assertTargetVisible(id, viewer);
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException("User not found");
+    return this.issueSetupTokenAndEmail(user, "reset");
+  }
+
+  async remove(id: string, viewer: AuthenticatedUser) {
+    await this.assertTargetVisible(id, viewer);
+    if (id === viewer.id) {
+      throw new BadRequestException("You can't delete your own account");
+    }
+    const target = await this.prisma.user.findUnique({ where: { id }, include: { roles: true } });
+    if (!target) throw new NotFoundException("User not found");
+    if (target.roles.some((r) => r.role === "system_admin")) {
+      const otherAdmins = await this.prisma.userRole.count({
+        where: { role: "system_admin", userId: { not: id } },
+      });
+      if (otherAdmins === 0) {
+        throw new BadRequestException("Can't delete the last System Administrator account");
+      }
+    }
+    await this.prisma.user.delete({ where: { id } });
+    return { id };
+  }
+
+  // Issues a fresh single-use setup token and emails a "set your password" link — used by
+  // create() (initial invite), resendInvite() (admin-triggered resend for a not-yet-onboarded
+  // user), and resetPassword() (admin-triggered reset for an active user); they differ only in
+  // when they're called and which email copy goes out. Always returns the raw link too (not
+  // just whether the email sent) so the admin UI can offer "copy invite link" as a fallback —
+  // the raw token only ever exists here in memory; the DB stores just its hash.
+  private async issueSetupTokenAndEmail(
+    user: User,
+    kind: "invite" | "reset",
+  ): Promise<{ inviteSent: boolean; setupLink: string }> {
+    const rawToken = crypto.randomBytes(32).toString("hex");
+    const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+    await this.prisma.passwordSetupToken.create({
+      data: {
+        userId: user.id,
+        tokenHash,
+        expiresAt: new Date(Date.now() + SETUP_TOKEN_TTL_MS),
+      },
+    });
+
+    // CORS_ORIGIN may list multiple origins comma-separated (production + a local dev URL) —
+    // the first one is the real frontend to send users to, never the raw joined string.
+    const frontendUrl = parseCorsOrigins(this.config.get<string>("CORS_ORIGIN"))[0];
+    const setupLink = `${frontendUrl}/set-password?token=${rawToken}`;
+    const inviteSent = await this.email.send(
+      user.email,
+      kind === "invite"
+        ? "You've been added to AIMS — set your password"
+        : "Reset your AIMS password",
+      kind === "invite"
+        ? renderInviteEmail(user.fullName ?? user.email, setupLink)
+        : renderResetPasswordEmail(user.fullName ?? user.email, setupLink),
+    );
+    return { inviteSent, setupLink };
   }
 
   async update(id: string, dto: UpdateUserDto, viewer: AuthenticatedUser) {
@@ -87,27 +185,5 @@ export class UsersService {
     if (target && target.roles.some((r) => r.role === "system_admin")) {
       throw new NotFoundException("User not found");
     }
-  }
-
-  /**
-   * Finds-or-creates a demo account for the given role, resetting its password to a
-   * known demo value — mirrors the previous Supabase `ensureDemoUser` server function
-   * so the demo-login flow keeps working during the Supabase -> backend migration.
-   */
-  async ensureDemoUser(role: AppRole, email: string, password: string, fullName: string) {
-    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-
-    const user = await this.prisma.user.upsert({
-      where: { email },
-      create: { email, passwordHash, fullName, roles: { create: [{ role }] } },
-      update: { passwordHash },
-      include: { roles: true },
-    });
-
-    if (!user.roles.some((r) => r.role === role)) {
-      await this.prisma.userRole.create({ data: { userId: user.id, role } });
-    }
-
-    return user;
   }
 }

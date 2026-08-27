@@ -33,7 +33,13 @@ export class TenderRequirementTemplatesService {
         description: dto.description,
         createdBy: userId,
         items: dto.items
-          ? { create: dto.items.map((item, i) => ({ title: item.title, category: item.category, sortOrder: i })) }
+          ? {
+              create: dto.items.map((item, i) => ({
+                title: item.title,
+                category: item.category,
+                sortOrder: i,
+              })),
+            }
           : undefined,
       },
       include: { items: true },

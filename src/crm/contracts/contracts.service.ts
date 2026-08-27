@@ -1,16 +1,16 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import { promises as fs } from "node:fs";
-import * as path from "node:path";
+import type { ContractStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+import { StorageService } from "../../storage/storage.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
+import { viewerDepartmentCodes } from "../../common/department-scope";
+import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateContractDto } from "./dto/create-contract.dto";
 import type { UpdateContractDto } from "./dto/update-contract.dto";
 import type { UploadDocumentDto } from "./dto/upload-document.dto";
 
-// Documents live on local disk for now (uploads/contracts/, gitignored) — a later move to
-// S3-compatible storage only changes these three methods, nothing upstream of them.
-const UPLOADS_DIR = path.join(process.cwd(), "uploads", "contracts");
+const KEY_PREFIX = "contracts";
 
 // Prisma's BigInt (sizeBytes) can't be JSON-serialized by Express as-is — file sizes are
 // always well within Number.MAX_SAFE_INTEGER, so a plain Number is safe here.
@@ -20,23 +20,99 @@ function serializeDocument<T extends { sizeBytes: bigint }>(doc: T) {
 
 @Injectable()
 export class ContractsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
+  ) {}
 
-  findAll(filters: { departmentId?: string; clientId?: string }) {
-    return this.prisma.contract.findMany({
-      where: {
-        ...(filters.departmentId && { departmentId: filters.departmentId }),
-        ...(filters.clientId && { clientId: filters.clientId }),
+  // Visibility is scoped to the viewer's own department(s) — admin/CEO see every contract, a
+  // department-scoped viewer only their own department's. A department-less contract (rare —
+  // see assertContractDeptAccess below) is admin/CEO-only for the same reason it's admin/CEO-only
+  // to manage: nobody's department claims it.
+  findAll(
+    filters: { departmentId?: string; clientId?: string; status?: ContractStatus; q?: string },
+    pagination: PaginationQueryDto = {},
+    viewer: AuthenticatedUser,
+  ) {
+    const deptCodes = viewerDepartmentCodes(viewer);
+    return maybePaginate(
+      this.prisma.contract,
+      {
+        where: {
+          ...(filters.departmentId && { departmentId: filters.departmentId }),
+          ...(filters.clientId && { clientId: filters.clientId }),
+          ...(filters.status && { status: filters.status }),
+          ...(filters.q && {
+            OR: [
+              { title: { contains: filters.q } },
+              { contractNumber: { contains: filters.q } },
+              { client: { name: { contains: filters.q } } },
+            ],
+          }),
+          ...(deptCodes && { department: { code: { in: deptCodes } } }),
+        },
+        orderBy: { createdAt: "desc" },
       },
-      orderBy: { createdAt: "desc" },
-    });
+      pagination,
+    );
   }
 
-  async findOne(id: string) {
+  // Aggregate totals across every contract matching the filters — independent of pagination —
+  // so the list page's summary cards (count/active/value) stay accurate for the full filtered
+  // set rather than just whatever page is currently on screen.
+  async summary(
+    filters: { departmentId?: string; clientId?: string; status?: ContractStatus; q?: string },
+    viewer: AuthenticatedUser,
+  ) {
+    const deptCodes = viewerDepartmentCodes(viewer);
+    const where = {
+      ...(filters.departmentId && { departmentId: filters.departmentId }),
+      ...(filters.clientId && { clientId: filters.clientId }),
+      ...(filters.status && { status: filters.status }),
+      ...(filters.q && {
+        OR: [
+          { title: { contains: filters.q } },
+          { contractNumber: { contains: filters.q } },
+          { client: { name: { contains: filters.q } } },
+        ],
+      }),
+      ...(deptCodes && { department: { code: { in: deptCodes } } }),
+    };
+    const [totals, activeTotals] = await Promise.all([
+      this.prisma.contract.aggregate({ where, _count: true, _sum: { value: true } }),
+      this.prisma.contract.aggregate({
+        where: { ...where, status: "active" as ContractStatus },
+        _count: true,
+        _sum: { value: true },
+      }),
+    ]);
+    return {
+      count: totals._count,
+      value: totals._sum.value ?? 0,
+      activeCount: activeTotals._count,
+      activeValue: activeTotals._sum.value ?? 0,
+    };
+  }
+
+  // 404 (not 403) for an out-of-scope contract, same convention as Projects.findOne.
+  async findOne(id: string, viewer: AuthenticatedUser) {
     const contract = await this.prisma.contract.findUniqueOrThrow({
       where: { id },
-      include: { client: true, department: true, serviceLine: true, documents: true },
+      include: {
+        client: true,
+        department: true,
+        serviceLine: true,
+        documents: true,
+        tender: { select: { id: true, referenceNumber: true, title: true } },
+        clientRequest: { select: { id: true, referenceNumber: true, title: true } },
+        projects: { select: { id: true, name: true } },
+        _count: { select: { invoices: true } },
+      },
     });
+    const deptCodes = viewerDepartmentCodes(viewer);
+    if (deptCodes && (!contract.department || !deptCodes.includes(contract.department.code))) {
+      throw new NotFoundException("Contract not found");
+    }
     return { ...contract, documents: contract.documents.map(serializeDocument) };
   }
 
@@ -99,10 +175,9 @@ export class ContractsService {
     dto: UploadDocumentDto,
     userId: string,
   ) {
-    await fs.mkdir(UPLOADS_DIR, { recursive: true });
     const safeName = file.originalname.replace(/[^a-z0-9.\-_]+/gi, "_");
     const storedName = `${contractId}-${Date.now()}-${safeName}`;
-    await fs.writeFile(path.join(UPLOADS_DIR, storedName), file.buffer);
+    await this.storage.write(`${KEY_PREFIX}/${storedName}`, file.buffer);
 
     const doc = await this.prisma.contractDocument.create({
       data: {
@@ -120,18 +195,12 @@ export class ContractsService {
 
   async getDocumentFile(documentId: string) {
     const doc = await this.prisma.contractDocument.findUniqueOrThrow({ where: { id: documentId } });
-    const fullPath = path.join(UPLOADS_DIR, doc.storagePath);
-    try {
-      await fs.access(fullPath);
-    } catch {
-      throw new NotFoundException("Document file is missing from storage");
-    }
-    return { doc, fullPath };
+    return { doc, key: `${KEY_PREFIX}/${doc.storagePath}` };
   }
 
   async deleteDocument(documentId: string) {
     const doc = await this.prisma.contractDocument.findUniqueOrThrow({ where: { id: documentId } });
-    await fs.rm(path.join(UPLOADS_DIR, doc.storagePath), { force: true });
+    await this.storage.delete(`${KEY_PREFIX}/${doc.storagePath}`);
     const deleted = await this.prisma.contractDocument.delete({ where: { id: documentId } });
     return serializeDocument(deleted);
   }

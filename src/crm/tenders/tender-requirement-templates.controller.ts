@@ -8,7 +8,7 @@ import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 
-const WRITE_ROLES = ["finance", "hr", "it", "marketing_ops", "tender"] as const;
+const WRITE_ROLES = ["finance", "hr", "it", "marketing", "tender"] as const;
 
 @Controller("tender-requirement-templates")
 export class TenderRequirementTemplatesController {

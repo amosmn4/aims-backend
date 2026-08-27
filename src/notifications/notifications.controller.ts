@@ -1,7 +1,9 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put } from "@nestjs/common";
 import { NotificationsService } from "./notifications.service";
 import { NotificationsSweepService } from "./notifications-sweep.service";
+import { NotificationsDigestService } from "./email/notifications-digest.service";
 import { CreateReminderDto } from "./dto/create-reminder.dto";
+import { UpdateNotificationPreferencesDto } from "./dto/update-notification-preferences.dto";
 import { Roles } from "../auth/decorators/roles.decorator";
 import { CurrentUser } from "../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
@@ -11,6 +13,7 @@ export class NotificationsController {
   constructor(
     private readonly notificationsService: NotificationsService,
     private readonly sweep: NotificationsSweepService,
+    private readonly digest: NotificationsDigestService,
   ) {}
 
   @Get()
@@ -23,6 +26,21 @@ export class NotificationsController {
   @Roles()
   unreadCount(@CurrentUser() user: AuthenticatedUser) {
     return this.notificationsService.unreadCount(user.id);
+  }
+
+  @Get("preferences")
+  @Roles()
+  getPreferences(@CurrentUser() user: AuthenticatedUser) {
+    return this.notificationsService.getPreferences(user.id);
+  }
+
+  @Put("preferences")
+  @Roles()
+  updatePreferences(
+    @Body() dto: UpdateNotificationPreferencesDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.notificationsService.updatePreferences(user.id, dto);
   }
 
   @Post()
@@ -56,5 +74,13 @@ export class NotificationsController {
   async sweepNow() {
     await this.sweep.runSweep();
     return { success: true };
+  }
+
+  // Manual trigger for the email digest, gated to system_admin — same shape as sweep-now.
+  // Returns a clean "not configured" result rather than a 500 when SMTP isn't set up.
+  @Post("digest-now")
+  @Roles("system_admin")
+  digestNow() {
+    return this.digest.runDigest();
   }
 }

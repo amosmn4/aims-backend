@@ -12,39 +12,69 @@ import {
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
+import type { ContractStatus } from "@prisma/client";
 import type { Response } from "express";
 import { ContractsService } from "./contracts.service";
+import { StorageService } from "../../storage/storage.service";
 import { CreateContractDto } from "./dto/create-contract.dto";
 import { UpdateContractDto } from "./dto/update-contract.dto";
 import { UploadDocumentDto } from "./dto/upload-document.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
+import { parsePaginationQuery } from "../../common/pagination";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 
 @Controller("contracts")
 export class ContractsController {
-  constructor(private readonly contractsService: ContractsService) {}
+  constructor(
+    private readonly contractsService: ContractsService,
+    private readonly storage: StorageService,
+  ) {}
 
   @Get()
   @Roles()
-  findAll(@Query("departmentId") departmentId?: string, @Query("clientId") clientId?: string) {
-    return this.contractsService.findAll({ departmentId, clientId });
+  findAll(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("departmentId") departmentId?: string,
+    @Query("clientId") clientId?: string,
+    @Query("status") status?: ContractStatus,
+    @Query("q") q?: string,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
+  ) {
+    return this.contractsService.findAll(
+      { departmentId, clientId, status, q },
+      parsePaginationQuery(page, pageSize),
+      user,
+    );
+  }
+
+  @Get("summary")
+  @Roles()
+  summary(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("departmentId") departmentId?: string,
+    @Query("clientId") clientId?: string,
+    @Query("status") status?: ContractStatus,
+    @Query("q") q?: string,
+  ) {
+    return this.contractsService.summary({ departmentId, clientId, status, q }, user);
   }
 
   @Get(":id")
   @Roles()
-  findOne(@Param("id") id: string) {
-    return this.contractsService.findOne(id);
+  findOne(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.contractsService.findOne(id, user);
   }
 
   @Post()
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   create(@Body() dto: CreateContractDto, @CurrentUser() user: AuthenticatedUser) {
     return this.contractsService.create(dto, user);
   }
 
   @Patch(":id")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   update(
     @Param("id") id: string,
     @Body() dto: UpdateContractDto,
@@ -54,7 +84,7 @@ export class ContractsController {
   }
 
   @Delete(":id")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   remove(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.contractsService.remove(id, user);
   }
@@ -80,8 +110,11 @@ export class ContractsController {
   @Get("documents/:documentId/download")
   @Roles()
   async downloadDocument(@Param("documentId") documentId: string, @Res() res: Response) {
-    const { doc, fullPath } = await this.contractsService.getDocumentFile(documentId);
-    res.download(fullPath, doc.fileName);
+    const { doc, key } = await this.contractsService.getDocumentFile(documentId);
+    await this.storage.streamToResponse(key, res, {
+      disposition: "attachment",
+      fileName: doc.fileName,
+    });
   }
 
   @Delete("documents/:documentId")

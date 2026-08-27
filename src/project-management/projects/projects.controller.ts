@@ -17,6 +17,7 @@ import { UpdateRaidEntryDto } from "./dto/update-raid-entry.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
+import { parsePaginationQuery } from "../../common/pagination";
 
 @Controller("projects")
 export class ProjectsController {
@@ -27,27 +28,35 @@ export class ProjectsController {
   @Get()
   @Roles()
   findAll(
+    @CurrentUser() user: AuthenticatedUser,
     @Query("departmentId") departmentId?: string,
     @Query("status") status?: ProjectStatus,
     @Query("clientId") clientId?: string,
+    @Query("sharedWithMe") sharedWithMe?: string,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
   ) {
-    return this.projectsService.findAll({ departmentId, status, clientId });
+    return this.projectsService.findAll(
+      { departmentId, status, clientId, sharedWithMe: sharedWithMe === "true" },
+      parsePaginationQuery(page, pageSize),
+      user,
+    );
   }
 
   @Get(":id")
   @Roles()
-  findOne(@Param("id") id: string) {
-    return this.projectsService.findOne(id);
+  findOne(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.projectsService.findOne(id, user);
   }
 
   @Post()
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   create(@Body() dto: CreateProjectDto, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.create(dto, user);
   }
 
   @Patch(":id")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   update(
     @Param("id") id: string,
     @Body() dto: UpdateProjectDto,
@@ -56,10 +65,14 @@ export class ProjectsController {
     return this.projectsService.update(id, dto, user);
   }
 
+  // Department-scoped, same as update()/create() above — system_admin/ceo can delete any
+  // project, a department's own staff can delete their own department's projects, enforced in
+  // the service via assertDepartmentAccess (not just the role list here, since that alone
+  // can't tell "your department" apart from "any department with a matching role").
   @Delete(":id")
-  @Roles("system_admin")
-  remove(@Param("id") id: string) {
-    return this.projectsService.remove(id);
+  @Roles("finance", "hr", "it", "marketing", "tender")
+  remove(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.projectsService.remove(id, user);
   }
 
   @Get(":id/financials")
@@ -75,7 +88,7 @@ export class ProjectsController {
   }
 
   @Post(":id/milestones")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   createMilestone(
     @Param("id") id: string,
     @Body() dto: CreateMilestoneDto,
@@ -85,7 +98,7 @@ export class ProjectsController {
   }
 
   @Patch("milestones/:milestoneId")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   updateMilestone(
     @Param("milestoneId") milestoneId: string,
     @Body() dto: UpdateMilestoneDto,
@@ -95,7 +108,7 @@ export class ProjectsController {
   }
 
   @Delete("milestones/:milestoneId")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   removeMilestone(
     @Param("milestoneId") milestoneId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -110,7 +123,7 @@ export class ProjectsController {
   }
 
   @Post(":id/activities")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   createActivity(
     @Param("id") id: string,
     @Body() dto: CreateProjectActivityDto,
@@ -134,7 +147,7 @@ export class ProjectsController {
   }
 
   @Post(":id/cost-items")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   createCostItem(
     @Param("id") id: string,
     @Body() dto: CreateCostItemDto,
@@ -144,7 +157,7 @@ export class ProjectsController {
   }
 
   @Patch("cost-items/:itemId")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   updateCostItem(
     @Param("itemId") itemId: string,
     @Body() dto: UpdateCostItemDto,
@@ -154,7 +167,7 @@ export class ProjectsController {
   }
 
   @Delete("cost-items/:itemId")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   deleteCostItem(@Param("itemId") itemId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.deleteCostItem(itemId, user);
   }
@@ -168,7 +181,7 @@ export class ProjectsController {
   }
 
   @Post(":id/team")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   createTeamMember(
     @Param("id") id: string,
     @Body() dto: CreateTeamMemberDto,
@@ -178,7 +191,7 @@ export class ProjectsController {
   }
 
   @Patch("team/:memberId")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   updateTeamMember(
     @Param("memberId") memberId: string,
     @Body() dto: UpdateTeamMemberDto,
@@ -188,7 +201,7 @@ export class ProjectsController {
   }
 
   @Delete("team/:memberId")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   deleteTeamMember(@Param("memberId") memberId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.deleteTeamMember(memberId, user);
   }
@@ -202,7 +215,7 @@ export class ProjectsController {
   }
 
   @Post(":id/raci")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   createRaciEntry(
     @Param("id") id: string,
     @Body() dto: CreateRaciEntryDto,
@@ -212,7 +225,7 @@ export class ProjectsController {
   }
 
   @Patch("raci/:entryId")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   updateRaciEntry(
     @Param("entryId") entryId: string,
     @Body() dto: UpdateRaciEntryDto,
@@ -222,7 +235,7 @@ export class ProjectsController {
   }
 
   @Delete("raci/:entryId")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   deleteRaciEntry(@Param("entryId") entryId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.deleteRaciEntry(entryId, user);
   }
@@ -236,7 +249,7 @@ export class ProjectsController {
   }
 
   @Post(":id/raid")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   createRaidEntry(
     @Param("id") id: string,
     @Body() dto: CreateRaidEntryDto,
@@ -246,7 +259,7 @@ export class ProjectsController {
   }
 
   @Patch("raid/:entryId")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   updateRaidEntry(
     @Param("entryId") entryId: string,
     @Body() dto: UpdateRaidEntryDto,
@@ -256,7 +269,7 @@ export class ProjectsController {
   }
 
   @Delete("raid/:entryId")
-  @Roles("finance", "hr", "it", "marketing_ops", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender")
   deleteRaidEntry(@Param("entryId") entryId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.deleteRaidEntry(entryId, user);
   }

@@ -74,7 +74,10 @@ export class NotificationsSweepService {
         userId: t.assigneeId,
         type: "task_due",
         severity,
-        title: daysLeft < 0 ? `Task overdue: ${t.title}` : `Task due ${this.relativeDay(daysLeft)}: ${t.title}`,
+        title:
+          daysLeft < 0
+            ? `Task overdue: ${t.title}`
+            : `Task due ${this.relativeDay(daysLeft)}: ${t.title}`,
         body: t.dueDate.toISOString().slice(0, 10),
         resourceType: "task",
         resourceId: t.id,
@@ -144,7 +147,11 @@ export class NotificationsSweepService {
       // Most invoices here are billed directly against a client, not a contract — fall
       // through contract owner -> client's account manager -> whoever raised the invoice
       // rather than only recognizing the (rarer) contract-linked case.
-      const recipient = inv.contract?.accountManagerId ?? inv.contract?.createdBy ?? inv.client?.accountManagerId ?? inv.createdBy;
+      const recipient =
+        inv.contract?.accountManagerId ??
+        inv.contract?.createdBy ??
+        inv.client?.accountManagerId ??
+        inv.createdBy;
       if (!recipient) continue;
       const daysOverdue = daysBetween(inv.dueDate, now);
       entries.push({
@@ -165,7 +172,7 @@ export class NotificationsSweepService {
     const windowEnd = new Date(now.getTime() + TENDER_DEADLINE_WINDOW_DAYS * DAY_MS);
     const tenders = await this.prisma.tender.findMany({
       where: {
-        stage: { notIn: ["won", "lost", "withdrawn"] },
+        stage: { notIn: ["won", "lost", "withdrawn", "cancelled"] },
         submissionDeadline: { lte: windowEnd, not: null },
       },
       select: {
@@ -203,7 +210,13 @@ export class NotificationsSweepService {
 
   private async sweepProjectsOverdue(now: Date) {
     const projects = await this.prisma.project.findMany({
-      where: { status: { notIn: ["completed", "cancelled"] }, endDate: { lt: now, not: null } },
+      where: {
+        status: { notIn: ["completed", "cancelled"] },
+        endDate: { lt: now, not: null },
+        // Ongoing/retainer work has no natural end — never "overdue" the way a bounded
+        // delivery is (see Project.engagementType).
+        engagementType: { not: "ongoing" },
+      },
       select: { id: true, name: true, endDate: true, createdBy: true },
     });
 
