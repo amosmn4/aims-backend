@@ -15,6 +15,7 @@ import type { CreateUserDto } from "./dto/create-user.dto";
 import type { UpdateUserDto } from "./dto/update-user.dto";
 import { EmailService } from "../notifications/email/email.service";
 import { renderInviteEmail, renderResetPasswordEmail } from "./user-invite-email.util";
+import { parseCorsOrigins } from "../config/env.validation";
 
 const SETUP_TOKEN_TTL_MS = 72 * 60 * 60 * 1000; // 72 hours
 
@@ -138,7 +139,9 @@ export class UsersService {
       },
     });
 
-    const frontendUrl = this.config.get<string>("CORS_ORIGIN") ?? "http://localhost:3000";
+    // CORS_ORIGIN may list multiple origins comma-separated (production + a local dev URL) —
+    // the first one is the real frontend to send users to, never the raw joined string.
+    const frontendUrl = parseCorsOrigins(this.config.get<string>("CORS_ORIGIN"))[0];
     const setupLink = `${frontendUrl}/set-password?token=${rawToken}`;
     const inviteSent = await this.email.send(
       user.email,

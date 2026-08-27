@@ -19,7 +19,9 @@ import type { Paginated } from "../common/pagination";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import type { UploadDocumentDto } from "./dto/upload-document.dto";
 import type { UpdateDocumentDto } from "./dto/update-document.dto";
-import type { SetAccessGrantsDto } from "./dto/set-access-grants.dto";
+import type { SetAccessGrantsDto, AccessGrantInput } from "./dto/set-access-grants.dto";
+
+const ACCESS_TYPES = new Set(["everyone", "department", "user"]);
 
 // Documents live under the "documents/" key prefix in whatever StorageService resolves to
 // (S3 when configured, local disk uploads/documents/ otherwise) — storagePath is a plain key,
@@ -425,12 +427,110 @@ export class DocumentsService {
       },
     });
 
-    const updated = await this.prisma.document.update({
+    await this.prisma.document.update({
       where: { id: doc.id },
       data: { latestVersionId: version.id },
+    });
+
+    // Omitted/empty `dto.access` means no grants at all, which canView() already treats as
+    // "everyone" — the same default as before this field existed, so a caller that doesn't send
+    // it (or an older client) behaves exactly as it always has.
+    await this.applyAccessGrants(doc.id, this.parseAccessGrants(dto.access), user, doc.title);
+
+    const final = await this.prisma.document.findUniqueOrThrow({
+      where: { id: doc.id },
       include: { latestVersion: true, accessGrants: true },
     });
-    return serializeDocument(updated);
+    return serializeDocument(final);
+  }
+
+  // JSON-encoded on the wire (see UploadDocumentDto.access) since it's a small structured array
+  // riding along a multipart form, not a real request body — validated by hand here rather than
+  // through class-validator's nested-DTO pipeline, which only runs on the top-level body.
+  private parseAccessGrants(raw: string | undefined): AccessGrantInput[] {
+    if (!raw) return [];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new BadRequestException("Invalid access grants payload");
+    }
+    if (!Array.isArray(parsed)) throw new BadRequestException("Invalid access grants payload");
+    return parsed.map((g): AccessGrantInput => {
+      if (
+        !g ||
+        typeof g !== "object" ||
+        !ACCESS_TYPES.has((g as { accessType?: unknown }).accessType as string)
+      ) {
+        throw new BadRequestException("Invalid access grant");
+      }
+      const grant = g as { accessType: string; departmentId?: unknown; userId?: unknown };
+      return {
+        accessType: grant.accessType as AccessGrantInput["accessType"],
+        departmentId: typeof grant.departmentId === "string" ? grant.departmentId : undefined,
+        userId: typeof grant.userId === "string" ? grant.userId : undefined,
+      };
+    });
+  }
+
+  // Shared by upload() (initial access, no "previous grants" to diff against — every `user`
+  // grant is new) and setAccess() (a full replace, diffed against what was there before so only
+  // newly-granted people get notified, not everyone on every unrelated re-save).
+  private async applyAccessGrants(
+    documentId: string,
+    grants: AccessGrantInput[],
+    user: AuthenticatedUser,
+    docTitle: string,
+  ) {
+    // De-duplicate — MySQL unique indexes don't dedupe NULLs, so this has to happen here
+    // rather than at the DB level. "Everyone" collapses to a single grant.
+    const seen = new Set<string>();
+    const deduped = grants.filter((g) => {
+      const key = `${g.accessType}:${g.departmentId ?? ""}:${g.userId ?? ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    const previousUserGrants = await this.prisma.documentAccessGrant.findMany({
+      where: { documentId, accessType: "user" },
+      select: { userId: true },
+    });
+    const previouslyGranted = new Set(previousUserGrants.map((g) => g.userId));
+    const newlyGrantedUserIds = deduped
+      .filter((g) => g.accessType === "user" && g.userId && !previouslyGranted.has(g.userId))
+      .map((g) => g.userId!);
+
+    await this.prisma.$transaction([
+      this.prisma.documentAccessGrant.deleteMany({ where: { documentId } }),
+      ...(deduped.length > 0
+        ? [
+            this.prisma.documentAccessGrant.createMany({
+              data: deduped.map((g) => ({
+                documentId,
+                accessType: g.accessType,
+                departmentId: g.accessType === "department" ? g.departmentId : undefined,
+                userId: g.accessType === "user" ? g.userId : undefined,
+              })),
+            }),
+          ]
+        : []),
+    ]);
+
+    await Promise.all(
+      newlyGrantedUserIds
+        .filter((userId) => userId !== user.id)
+        .map((userId) =>
+          this.notificationsService.notify({
+            userId,
+            type: "document_shared",
+            title: `A document was shared with you: ${docTitle}`,
+            resourceType: "document",
+            resourceId: documentId,
+            createdBy: user.id,
+          }),
+        ),
+    );
   }
 
   async addVersion(documentId: string, file: Express.Multer.File, user: AuthenticatedUser) {
@@ -581,57 +681,7 @@ export class DocumentsService {
     const doc = await this.prisma.document.findUniqueOrThrow({ where: { id: documentId } });
     await this.assertCanAttach(doc.resourceType, doc.resourceId, user);
 
-    // De-duplicate — MySQL unique indexes don't dedupe NULLs, so this has to happen here
-    // rather than at the DB level. "Everyone" collapses to a single grant.
-    const seen = new Set<string>();
-    const grants = dto.grants.filter((g) => {
-      const key = `${g.accessType}:${g.departmentId ?? ""}:${g.userId ?? ""}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-
-    // Notify only newly-granted individuals — every save replaces the whole grant list, so
-    // diffing against what was there before avoids re-notifying someone on every unrelated edit.
-    const previousUserGrants = await this.prisma.documentAccessGrant.findMany({
-      where: { documentId, accessType: "user" },
-      select: { userId: true },
-    });
-    const previouslyGranted = new Set(previousUserGrants.map((g) => g.userId));
-    const newlyGrantedUserIds = grants
-      .filter((g) => g.accessType === "user" && g.userId && !previouslyGranted.has(g.userId))
-      .map((g) => g.userId!);
-
-    await this.prisma.$transaction([
-      this.prisma.documentAccessGrant.deleteMany({ where: { documentId } }),
-      ...(grants.length > 0
-        ? [
-            this.prisma.documentAccessGrant.createMany({
-              data: grants.map((g) => ({
-                documentId,
-                accessType: g.accessType,
-                departmentId: g.accessType === "department" ? g.departmentId : undefined,
-                userId: g.accessType === "user" ? g.userId : undefined,
-              })),
-            }),
-          ]
-        : []),
-    ]);
-
-    await Promise.all(
-      newlyGrantedUserIds
-        .filter((userId) => userId !== user.id)
-        .map((userId) =>
-          this.notificationsService.notify({
-            userId,
-            type: "document_shared",
-            title: `A document was shared with you: ${doc.title}`,
-            resourceType: "document",
-            resourceId: documentId,
-            createdBy: user.id,
-          }),
-        ),
-    );
+    await this.applyAccessGrants(documentId, dto.grants, user, doc.title);
 
     return this.prisma.documentAccessGrant.findMany({ where: { documentId } });
   }

@@ -32,4 +32,11 @@ export class UploadDocumentDto {
   @IsOptional()
   @IsString()
   tags?: string;
+
+  // JSON-encoded `AccessGrantInput[]` (see SetAccessGrantsDto) — lets the upload form set access
+  // in the same request instead of a mandatory separate "Sharing" step afterwards. Parsed and
+  // validated in DocumentsService.upload(); omitted/empty means "everyone" (unchanged default).
+  @IsOptional()
+  @IsString()
+  access?: string;
 }

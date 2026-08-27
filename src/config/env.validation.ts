@@ -55,6 +55,21 @@ const envSchema = z.object({
 
 export type EnvConfig = z.infer<typeof envSchema>;
 
+// CORS_ORIGIN accepts one or more origins as a comma-separated list (e.g.
+// "https://management.amsol.africa,http://localhost:5173"). Centralized here so main.ts (needs
+// the full list to match the request's Origin header against) and UsersService (needs a single
+// "primary" URL to build password-setup/invite email links) can't drift on how it's split — and
+// so main.ts never passes the raw joined string straight to `cors`'s `origin` option, which
+// does a strict-equality match against a *string* value and would then reject every real origin.
+export function parseCorsOrigins(raw: string | undefined): string[] {
+  return raw
+    ? raw
+        .split(",")
+        .map((o) => o.trim())
+        .filter(Boolean)
+    : ["http://localhost:3000"];
+}
+
 export function validateEnv(config: Record<string, unknown>): EnvConfig {
   // `KEY=""` in .env (the placeholder style .env.example uses for every optional integration)
   // parses as the empty string, not undefined — `.optional()` only forgives a key that's absent

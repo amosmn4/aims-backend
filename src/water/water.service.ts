@@ -733,23 +733,30 @@ export class WaterService {
     const zoneIds = filters.zoneId ? await this.zoneAndDescendantIds(filters.zoneId) : undefined;
     const hhWhere = this.householdWhere(zoneIds);
 
-    const [activeHouseholds, hhAgg, hhPrevAgg, mainTotal, bulkTotal] = await Promise.all([
-      this.prisma.waterCustomer.count({
-        where: { isActive: true, ...(zoneIds && { zoneId: { in: zoneIds } }) },
-      }),
-      this.prisma.waterUsageRecord.aggregate({
-        where: { recordedAt: { gte: start, lt: end }, ...hhWhere },
-        _sum: { unitsSold: true, amountPaid: true },
-      }),
-      this.prisma.waterUsageRecord.aggregate({
-        where: { recordedAt: { gte: prevRange.start, lt: prevRange.end }, ...hhWhere },
-        _sum: { unitsSold: true },
-      }),
-      // The main meter (borehole) is never zone-filtered — it covers everything pumped, by
-      // definition upstream of every zone.
-      this.readingUsageForType("main", start, end),
-      this.readingUsageForType("bulk", start, end, zoneIds),
-    ]);
+    const [activeHouseholds, activeMeters, hhAgg, hhPrevAgg, mainTotal, bulkTotal] =
+      await Promise.all([
+        this.prisma.waterCustomer.count({
+          where: { isActive: true, ...(zoneIds && { zoneId: { in: zoneIds } }) },
+        }),
+        // Every meter type combined (household + bulk + main), unlike activeHouseholds above
+        // which is household-customer-only — this is "how many physical meters are actually in
+        // service right now" across the whole network, not just the vending/billing side of it.
+        this.prisma.waterMeter.count({
+          where: { isActive: true, ...(zoneIds && { zoneId: { in: zoneIds } }) },
+        }),
+        this.prisma.waterUsageRecord.aggregate({
+          where: { recordedAt: { gte: start, lt: end }, ...hhWhere },
+          _sum: { unitsSold: true, amountPaid: true },
+        }),
+        this.prisma.waterUsageRecord.aggregate({
+          where: { recordedAt: { gte: prevRange.start, lt: prevRange.end }, ...hhWhere },
+          _sum: { unitsSold: true },
+        }),
+        // The main meter (borehole) is never zone-filtered — it covers everything pumped, by
+        // definition upstream of every zone.
+        this.readingUsageForType("main", start, end),
+        this.readingUsageForType("bulk", start, end, zoneIds),
+      ]);
 
     const unitsSold = Number(hhAgg._sum.unitsSold ?? 0);
     const unitsSoldPrev = Number(hhPrevAgg._sum.unitsSold ?? 0);
@@ -764,6 +771,7 @@ export class WaterService {
     return {
       month: filters.month ?? shiftMonth(undefined, 0),
       activeHouseholds,
+      activeMeters,
       unitsSold,
       unitsSoldChangePct: unitsChangePct,
       revenue,
