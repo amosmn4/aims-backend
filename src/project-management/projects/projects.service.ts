@@ -40,7 +40,7 @@ export class ProjectsService {
   // exception is `sharedWithMe`: a project outside the viewer's department they've been
   // explicitly added to as a team member — an opt-in grant, not a blanket leak, so it uses its
   // own narrower authorization (team membership) instead of the department-code check.
-  findAll(
+  async findAll(
     filters: {
       departmentId?: string;
       status?: ProjectStatus;
@@ -50,7 +50,7 @@ export class ProjectsService {
     pagination: PaginationQueryDto = {},
     viewer: AuthenticatedUser,
   ) {
-    const deptCodes = viewerDepartmentCodes(viewer);
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     return maybePaginate(
       this.prisma.project,
       {
@@ -99,7 +99,7 @@ export class ProjectsService {
         clientRequest: { select: { id: true, referenceNumber: true, title: true } },
       },
     });
-    const deptCodes = viewerDepartmentCodes(viewer);
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     const needsMembershipCheck = deptCodes
       ? !deptCodes.includes(project.department.code) ||
         (project.visibility === "restricted" && project.createdBy !== viewer.id)
@@ -118,7 +118,7 @@ export class ProjectsService {
     const department = await this.prisma.department.findUniqueOrThrow({
       where: { id: dto.departmentId },
     });
-    assertDepartmentAccess(department, user);
+    await assertDepartmentAccess(department, user, this.prisma);
 
     const project = await this.prisma.project.create({
       data: {
@@ -191,7 +191,7 @@ export class ProjectsService {
       where: { id },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
 
     const isAdminOrCeo = user.roles.includes("system_admin") || user.roles.includes("ceo");
     if (dto.departmentId && dto.departmentId !== project.departmentId && !isAdminOrCeo) {
@@ -242,7 +242,7 @@ export class ProjectsService {
       where: { id },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
 
     const tasks = await this.prisma.task.findMany({
       where: { projectId: id },
@@ -265,7 +265,7 @@ export class ProjectsService {
       where: { id: projectId },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
 
     return this.prisma.milestone.create({
       data: {
@@ -283,7 +283,7 @@ export class ProjectsService {
       where: { id: milestoneId },
       include: { project: { include: { department: true } } },
     });
-    assertDepartmentAccess(milestone.project.department, user);
+    await assertDepartmentAccess(milestone.project.department, user, this.prisma);
 
     return this.prisma.milestone.update({
       where: { id: milestoneId },
@@ -299,7 +299,7 @@ export class ProjectsService {
       where: { id: milestoneId },
       include: { project: { include: { department: true } } },
     });
-    assertDepartmentAccess(milestone.project.department, user);
+    await assertDepartmentAccess(milestone.project.department, user, this.prisma);
     return this.prisma.milestone.delete({ where: { id: milestoneId } });
   }
 
@@ -390,7 +390,7 @@ export class ProjectsService {
       where: { id: projectId },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
 
     const activity = await this.prisma.projectActivity.create({
       data: {
@@ -424,7 +424,7 @@ export class ProjectsService {
       where: { id: projectId },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
     return project;
   }
 

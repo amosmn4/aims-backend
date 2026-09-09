@@ -51,6 +51,12 @@ const envSchema = z.object({
   // (plain <img>/<video> tags can't send custom headers). Optional at boot so the app still
   // starts without it, but those two routes reject every request until it's set.
   PUBLIC_BLOG_API_KEY: z.string().min(1).optional(),
+
+  // AI insights/chat (water module only for now). OpenAI primary, Gemini fallback. Both optional.
+  OPENAI_API_KEY: z.string().min(1).optional(),
+  OPENAI_MODEL: z.string().min(1).optional(),
+  GEMINI_API_KEY: z.string().min(1).optional(),
+  GEMINI_MODEL: z.string().min(1).optional(),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

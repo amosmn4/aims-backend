@@ -102,7 +102,7 @@ export class DocumentsService {
         where: { id: resourceId },
         include: { department: true },
       });
-      assertDepartmentAccess(project.department, user);
+      await assertDepartmentAccess(project.department, user, this.prisma);
       return;
     }
 
@@ -112,7 +112,7 @@ export class DocumentsService {
         include: { project: { include: { department: true } } },
       });
       if (task.assigneeId === user.id) return;
-      assertDepartmentAccess(task.project.department, user);
+      await assertDepartmentAccess(task.project.department, user, this.prisma);
       return;
     }
 
@@ -121,7 +121,7 @@ export class DocumentsService {
         where: { id: resourceId },
         include: { department: true },
       });
-      assertDepartmentAccess(tender.department, user);
+      await assertDepartmentAccess(tender.department, user, this.prisma);
       return;
     }
 
@@ -142,7 +142,7 @@ export class DocumentsService {
         if (isAdminOrCeo(user) || user.roles.includes("tender")) return;
         throw new ForbiddenException("Only Tender can manage an unrouted request's documents");
       }
-      assertDepartmentAccess(request.department, user);
+      await assertDepartmentAccess(request.department, user, this.prisma);
       return;
     }
 
@@ -260,7 +260,7 @@ export class DocumentsService {
     // themselves; finance_report documents are Finance-only, since that resource type carries
     // no department at all.
     if (!filters.mine && !filters.sharedWithMe) {
-      const deptCodes = viewerDepartmentCodes(user);
+      const deptCodes = await viewerDepartmentCodes(user, this.prisma);
       if (deptCodes !== null) {
         const seesTenderPipeline = deptCodes.includes("tender");
         const seesIntakeQueue = seesTenderPipeline || deptCodes.includes("operations");
@@ -301,7 +301,7 @@ export class DocumentsService {
     const includeContracts =
       !filters.resourceId && (!filters.resourceType || filters.resourceType === "contract");
     if (includeContracts && !filters.tag) {
-      const deptCodes = filters.mine ? null : viewerDepartmentCodes(user);
+      const deptCodes = filters.mine ? null : await viewerDepartmentCodes(user, this.prisma);
       const contractDocs = await this.prisma.contractDocument.findMany({
         where: {
           ...(filters.mine && { uploadedBy: user.id }),

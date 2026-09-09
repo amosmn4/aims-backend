@@ -8,6 +8,7 @@ import { UpdateClientRequestStageDto } from "./dto/update-client-request-stage.d
 import { ConvertToProjectDto } from "./dto/convert-to-project.dto";
 import { ConvertToContractDto } from "./dto/convert-to-contract.dto";
 import { CreateActivityDto } from "./dto/create-activity.dto";
+import { CreateAccessGrantDto } from "../../common/dto/create-access-grant.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
@@ -16,7 +17,16 @@ import { parsePaginationQuery } from "../../common/pagination";
 // Any of the 5 delivery departments can be *routed* a request and then manage it from there.
 // Operations owns intake — creating and routing a request is restricted to operations — but
 // keeps write access here too so it can still update/annotate/convert requests it originated.
-const DEPT_WRITE_ROLES = ["finance", "hr", "it", "marketing", "tender", "operations"] as const;
+const DEPT_WRITE_ROLES = [
+  "finance",
+  "hr",
+  "it",
+  "marketing",
+  "tender",
+  "operations",
+  "department_head",
+  "account_manager",
+] as const;
 
 @Controller("client-requests")
 export class ClientRequestsController {
@@ -101,8 +111,10 @@ export class ClientRequestsController {
     return this.requestsService.create(dto, user);
   }
 
+  // Open outer gate (any authenticated user) — the real check is inside update(), which also
+  // honors an explicit access grant on this specific request, not just a department-code role.
   @Patch(":id")
-  @Roles(...DEPT_WRITE_ROLES)
+  @Roles()
   update(
     @Param("id") id: string,
     @Body() dto: UpdateClientRequestDto,
@@ -135,6 +147,34 @@ export class ClientRequestsController {
   @Roles("system_admin")
   remove(@Param("id") id: string) {
     return this.requestsService.remove(id);
+  }
+
+  /* ---------- Access grants (share this request outside its own department) ---------- */
+
+  @Get(":id/access-grants")
+  @Roles()
+  listAccessGrants(@Param("id") id: string) {
+    return this.requestsService.listAccessGrants(id);
+  }
+
+  @Post(":id/access-grants")
+  @Roles()
+  createAccessGrant(
+    @Param("id") id: string,
+    @Body() dto: CreateAccessGrantDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.requestsService.createAccessGrant(id, dto, user);
+  }
+
+  @Delete(":id/access-grants/:grantId")
+  @Roles()
+  deleteAccessGrant(
+    @Param("id") id: string,
+    @Param("grantId") grantId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.requestsService.deleteAccessGrant(id, grantId, user);
   }
 
   @Post(":id/convert-to-project")

@@ -15,9 +15,6 @@ import { CurrentUser } from "../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import { parsePaginationQuery } from "../common/pagination";
 
-// A standalone top-level module, not tied to any of the six core departments. Access is granted
-// per user via the "water" role (assigned individually in Admin > Users & Roles), on top of the
-// system_admin/ceo bypass every @Roles() check already gets.
 @Controller("water")
 @Roles("water")
 export class WaterController {
@@ -203,8 +200,7 @@ export class WaterController {
     return this.waterService.reportSummary({ month });
   }
 
-  // Daily/weekly/monthly comparison series for main/bulk meter readings, over an explicit date
-  // range — the period-filterable chart data behind the Reports page's comparison views.
+  // Reading comparison series for the Reports page's period-filterable charts.
   @Get("readings/series")
   readingSeries(
     @Query("meterType") meterType: WaterMeterType,
@@ -222,8 +218,7 @@ export class WaterController {
     });
   }
 
-  // The literal reading log with each row's own computed delta — the "daily main meter readings"
-  // table.
+  // The reading log with each row's own computed delta.
   @Get("readings/with-delta")
   readingsWithDelta(
     @Query("meterId") meterId?: string,

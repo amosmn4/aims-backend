@@ -9,6 +9,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { DocumentsService } from "../../documents/documents.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
 import { viewerDepartmentCodes } from "../../common/department-scope";
+import { hasResourceGrant } from "../../common/has-resource-grant";
 import { maskUserRef } from "../../common/mask-user-ref";
 import { TtlCache } from "../../common/ttl-cache";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
@@ -64,8 +65,11 @@ function isAdminOrCeo(user: AuthenticatedUser) {
 // The Tender department runs the whole company's bid pipeline — a tender's `departmentId` is
 // who it's *destined for* once won, not who's working the bid — so a Tender-role viewer sees
 // every tender same as admin/CEO, while every other department only sees the ones routed to it.
-function tenderDeptFilter(viewer: AuthenticatedUser): Prisma.TenderWhereInput {
-  const deptCodes = viewerDepartmentCodes(viewer);
+async function tenderDeptFilter(
+  viewer: AuthenticatedUser,
+  prisma: PrismaService,
+): Promise<Prisma.TenderWhereInput> {
+  const deptCodes = await viewerDepartmentCodes(viewer, prisma);
   if (deptCodes === null || deptCodes.includes("tender")) return {};
   return { department: { code: { in: deptCodes } } };
 }
@@ -123,7 +127,7 @@ export class TendersService {
     const result = await maybePaginate(
       this.prisma.tender,
       {
-        where: { ...buildWhere(filters), ...tenderDeptFilter(viewer) },
+        where: { ...buildWhere(filters), ...(await tenderDeptFilter(viewer, this.prisma)) },
         include: {
           client: { select: { id: true, name: true } },
           department: { select: { id: true, name: true, code: true } },
@@ -163,8 +167,9 @@ export class TendersService {
   // distinct filter set *and* viewer scope — the cache key includes the viewer's department
   // codes so a department-scoped viewer can never be served a cached result computed for a
   // different (wider) visibility scope.
-  pipelineSummary(filters: TenderFilters, viewer: AuthenticatedUser) {
-    const cacheKey = JSON.stringify({ filters, scope: viewerDepartmentCodes(viewer) });
+  async pipelineSummary(filters: TenderFilters, viewer: AuthenticatedUser) {
+    const scope = await viewerDepartmentCodes(viewer, this.prisma);
+    const cacheKey = JSON.stringify({ filters, scope });
     return this.pipelineSummaryCache.getOrSet(cacheKey, () =>
       this.computePipelineSummary(filters, viewer),
     );
@@ -184,7 +189,7 @@ export class TendersService {
   // everything before it) even though its current `stage` is "lost", so it's attributed via
   // `lostFromStage`, not the live `stage` column.
   private async computePipelineSummary(filters: TenderFilters, viewer: AuthenticatedUser) {
-    const where = { ...buildWhere(filters), ...tenderDeptFilter(viewer) };
+    const where = { ...buildWhere(filters), ...(await tenderDeptFilter(viewer, this.prisma)) };
     const [liveRows, lostRows] = await Promise.all([
       this.prisma.tender.groupBy({
         by: ["stage"],
@@ -244,7 +249,7 @@ export class TendersService {
   // right now" list is the actionable half of this metric.
   async timeMetrics(filters: TenderFilters, viewer: AuthenticatedUser) {
     const rows = await this.prisma.tender.findMany({
-      where: { ...buildWhere(filters), ...tenderDeptFilter(viewer) },
+      where: { ...buildWhere(filters), ...(await tenderDeptFilter(viewer, this.prisma)) },
       select: {
         id: true,
         title: true,
@@ -305,13 +310,13 @@ export class TendersService {
         project: { select: { id: true, name: true } },
       },
     });
-    const deptCodes = viewerDepartmentCodes(viewer);
-    if (
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
+    const outOfScope =
       deptCodes &&
       !deptCodes.includes("tender") &&
       !deptCodes.includes(tender.department.code) &&
-      tender.accountManagerId !== viewer.id
-    ) {
+      tender.accountManagerId !== viewer.id;
+    if (outOfScope && !(await hasResourceGrant("tender", id, viewer, "read", this.prisma))) {
       throw new NotFoundException("Tender not found");
     }
     return {
@@ -320,11 +325,23 @@ export class TendersService {
     };
   }
 
-  private async assertTenderDeptAccess(departmentId: string, user: AuthenticatedUser) {
+  // `tenderId` is optional — when given, write access explicitly shared via a ResourceAccessGrant
+  // (see access-grant methods below) also satisfies this, on top of plain department access.
+  private async assertTenderDeptAccess(
+    departmentId: string,
+    user: AuthenticatedUser,
+    tenderId?: string,
+  ) {
     const department = await this.prisma.department.findUniqueOrThrow({
       where: { id: departmentId },
     });
-    assertDepartmentAccess(department, user);
+    try {
+      await assertDepartmentAccess(department, user, this.prisma);
+    } catch (err) {
+      if (!tenderId || !(await hasResourceGrant("tender", tenderId, user, "write", this.prisma))) {
+        throw err;
+      }
+    }
   }
 
   async create(dto: CreateTenderDto, user: AuthenticatedUser) {
@@ -340,7 +357,7 @@ export class TendersService {
 
   async update(id: string, dto: UpdateTenderDto, user: AuthenticatedUser) {
     const existing = await this.prisma.tender.findUniqueOrThrow({ where: { id } });
-    await this.assertTenderDeptAccess(existing.departmentId, user);
+    await this.assertTenderDeptAccess(existing.departmentId, user, existing.id);
 
     return this.prisma.tender.update({
       where: { id },
@@ -376,6 +393,51 @@ export class TendersService {
   async remove(id: string) {
     await this.documentsService.deleteAllForResource("tender", id);
     return this.prisma.tender.delete({ where: { id } });
+  }
+
+  /* ---------- Access grants (share this tender outside its own department) ---------- */
+
+  listAccessGrants(tenderId: string) {
+    return this.prisma.resourceAccessGrant.findMany({
+      where: { resourceType: "tender", resourceId: tenderId },
+      include: {
+        user: { select: { id: true, fullName: true, email: true } },
+        department: { select: { id: true, name: true, code: true } },
+        creator: { select: { id: true, fullName: true, email: true } },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+
+  async createAccessGrant(
+    tenderId: string,
+    dto: { userId?: string; departmentId?: string; level: "read" | "write" },
+    user: AuthenticatedUser,
+  ) {
+    const tender = await this.prisma.tender.findUniqueOrThrow({ where: { id: tenderId } });
+    await this.assertTenderDeptAccess(tender.departmentId, user, tender.id);
+    if (!dto.userId && !dto.departmentId) {
+      throw new BadRequestException("Share with either a user or a department");
+    }
+    return this.prisma.resourceAccessGrant.create({
+      data: {
+        resourceType: "tender",
+        resourceId: tenderId,
+        userId: dto.userId,
+        departmentId: dto.departmentId,
+        level: dto.level,
+        createdBy: user.id,
+      },
+    });
+  }
+
+  async deleteAccessGrant(tenderId: string, grantId: string, user: AuthenticatedUser) {
+    const tender = await this.prisma.tender.findUniqueOrThrow({ where: { id: tenderId } });
+    await this.assertTenderDeptAccess(tender.departmentId, user, tender.id);
+    await this.prisma.resourceAccessGrant.deleteMany({
+      where: { id: grantId, resourceType: "tender", resourceId: tenderId },
+    });
+    return { id: grantId };
   }
 
   async convertToContract(id: string, dto: ConvertToContractDto, user: AuthenticatedUser) {

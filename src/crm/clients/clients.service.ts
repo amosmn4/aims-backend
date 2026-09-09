@@ -17,8 +17,8 @@ export class ClientsService {
   // their departments. Operations/Tender additionally see every client tied only to an unrouted
   // (department-less) client request, matching the same intake-ownership exception used for
   // Client Requests themselves.
-  private scopeWhere(viewer: AuthenticatedUser) {
-    const deptCodes = viewerDepartmentCodes(viewer);
+  private async scopeWhere(viewer: AuthenticatedUser) {
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     const unrestricted =
       deptCodes === null || deptCodes.includes("operations") || deptCodes.includes("tender");
     return unrestricted
@@ -33,12 +33,12 @@ export class ClientsService {
         };
   }
 
-  findAll(
+  async findAll(
     filters: { industry?: string; segment?: string; q?: string } = {},
     pagination: PaginationQueryDto = {},
     viewer: AuthenticatedUser,
   ) {
-    const scope = this.scopeWhere(viewer);
+    const scope = await this.scopeWhere(viewer);
     return maybePaginate(
       this.prisma.client,
       {
@@ -60,7 +60,7 @@ export class ClientsService {
   // the industry/segment/q filters on findAll, so the filter dropdowns always list every option
   // rather than shrinking to whatever the current filter selection already narrowed to.
   async facets(viewer: AuthenticatedUser) {
-    const where = this.scopeWhere(viewer);
+    const where = await this.scopeWhere(viewer);
     const [industries, segments] = await Promise.all([
       this.prisma.client.findMany({
         where: { ...where, industry: { not: null } },

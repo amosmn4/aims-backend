@@ -1,19 +1,22 @@
 import { ForbiddenException } from "@nestjs/common";
-import type { AppRole } from "@prisma/client";
+import type { PrismaService } from "../prisma/prisma.service";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
+import { can, type PermissionDepartment } from "./permission-resolution";
 
 /**
  * Project Management is cross-department (every department gets "Edit" on its own
  * projects per the RBAC matrix), so it can't use a single static @Roles(...) gate like
- * Finance/Budgets. Department codes match AppRole names 1:1 (finance/hr/it/marketing/tender),
- * so membership is just a role check against the resource's actual department.
+ * Finance/Budgets. Delegates to permission-resolution's `can()` for the actual write check —
+ * role default, unless a per-user override says otherwise.
  */
-export function assertDepartmentAccess(
-  department: { code: string },
+export async function assertDepartmentAccess(
+  department: PermissionDepartment,
   user: AuthenticatedUser,
-): void {
-  if (user.roles.includes("system_admin") || user.roles.includes("ceo")) return;
-  if (!user.roles.includes(department.code as AppRole)) {
-    throw new ForbiddenException(`You do not have access to the ${department.code} department`);
+  prisma: PrismaService,
+): Promise<void> {
+  if (!(await can(user, department, "write", prisma))) {
+    throw new ForbiddenException(
+      `You do not have write access to the ${department.code} department`,
+    );
   }
 }

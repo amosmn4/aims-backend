@@ -13,7 +13,7 @@ export class RecruitmentService {
       where: { id: projectId },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
     return project;
   }
 

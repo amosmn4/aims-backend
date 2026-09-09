@@ -68,13 +68,13 @@ export class ContractsController {
   }
 
   @Post()
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   create(@Body() dto: CreateContractDto, @CurrentUser() user: AuthenticatedUser) {
     return this.contractsService.create(dto, user);
   }
 
   @Patch(":id")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   update(
     @Param("id") id: string,
     @Body() dto: UpdateContractDto,
@@ -84,7 +84,7 @@ export class ContractsController {
   }
 
   @Delete(":id")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   remove(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.contractsService.remove(id, user);
   }

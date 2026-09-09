@@ -22,7 +22,7 @@ export class RecruitmentController {
   }
 
   @Put(":projectId")
-  @Roles("hr")
+  @Roles("hr", "department_head", "account_manager")
   upsert(
     @Param("projectId") projectId: string,
     @Body() dto: UpsertRecruitmentFunnelDto,

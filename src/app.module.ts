@@ -38,6 +38,7 @@ import { InventoryModule } from "./it/inventory/inventory.module";
 import { CampaignsModule } from "./marketing/campaigns/campaigns.module";
 import { CalendarModule } from "./calendar/calendar.module";
 import { WaterModule } from "./water/water.module";
+import { PermissionsModule } from "./permissions/permissions.module";
 
 @Module({
   imports: [
@@ -79,6 +80,7 @@ import { WaterModule } from "./water/water.module";
     CampaignsModule,
     CalendarModule,
     WaterModule,
+    PermissionsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

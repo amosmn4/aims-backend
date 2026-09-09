@@ -17,12 +17,21 @@ import { UpdateTenderPricingItemDto } from "./dto/update-tender-pricing-item.dto
 import { CreateTenderRequirementDto } from "./dto/create-tender-requirement.dto";
 import { UpdateTenderRequirementDto } from "./dto/update-tender-requirement.dto";
 import { SaveAsTemplateDto } from "./dto/save-as-template.dto";
+import { CreateAccessGrantDto } from "../../common/dto/create-access-grant.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import { parsePaginationQuery } from "../../common/pagination";
 
-const WRITE_ROLES = ["finance", "hr", "it", "marketing", "tender"] as const;
+const WRITE_ROLES = [
+  "finance",
+  "hr",
+  "it",
+  "marketing",
+  "tender",
+  "department_head",
+  "account_manager",
+] as const;
 
 @Controller("tenders")
 export class TendersController {
@@ -109,8 +118,10 @@ export class TendersController {
     return this.tendersService.create(dto, user);
   }
 
+  // Open outer gate (any authenticated user) — the real check is inside update(), which also
+  // honors an explicit access grant on this specific tender, not just a department-code role.
   @Patch(":id")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   update(
     @Param("id") id: string,
     @Body() dto: UpdateTenderDto,
@@ -127,6 +138,34 @@ export class TendersController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.tendersService.updateStage(id, dto, user);
+  }
+
+  /* ---------- Access grants (share this tender outside its own department) ---------- */
+
+  @Get(":id/access-grants")
+  @Roles()
+  listAccessGrants(@Param("id") id: string) {
+    return this.tendersService.listAccessGrants(id);
+  }
+
+  @Post(":id/access-grants")
+  @Roles()
+  createAccessGrant(
+    @Param("id") id: string,
+    @Body() dto: CreateAccessGrantDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.tendersService.createAccessGrant(id, dto, user);
+  }
+
+  @Delete(":id/access-grants/:grantId")
+  @Roles()
+  deleteAccessGrant(
+    @Param("id") id: string,
+    @Param("grantId") grantId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.tendersService.deleteAccessGrant(id, grantId, user);
   }
 
   @Delete(":id")

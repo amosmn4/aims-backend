@@ -30,7 +30,7 @@ export class TasksService {
   // filtering for your own assigned tasks ("My Tasks") is itself a safe, self-limiting signal, so
   // it's allowed to surface tasks outside your department the same way Project's `sharedWithMe`
   // does for project-level access.
-  findAll(
+  async findAll(
     filters: {
       projectId?: string;
       departmentId?: string;
@@ -40,7 +40,7 @@ export class TasksService {
     pagination: PaginationQueryDto = {},
     viewer: AuthenticatedUser,
   ) {
-    const deptCodes = viewerDepartmentCodes(viewer);
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     const isOwnAssigneeFilter = !!filters.assigneeId && filters.assigneeId === viewer.id;
     const projectWhere: Record<string, unknown> = {};
     if (filters.departmentId) projectWhere.departmentId = filters.departmentId;
@@ -85,7 +85,7 @@ export class TasksService {
         dependsOn: { include: { dependsOn: { select: { id: true, title: true, status: true } } } },
       },
     });
-    const deptCodes = viewerDepartmentCodes(viewer);
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     const needsMembershipCheck =
       !!deptCodes &&
       (!deptCodes.includes(task.project.department.code) ||
@@ -132,7 +132,7 @@ export class TasksService {
       include: { project: { include: { department: true } } },
     });
     if (task.assigneeId === user.id) return task;
-    assertDepartmentAccess(task.project.department, user);
+    await assertDepartmentAccess(task.project.department, user, this.prisma);
     return task;
   }
 
@@ -141,7 +141,7 @@ export class TasksService {
       where: { id: dto.projectId },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
 
     const task = await this.prisma.task.create({
       data: {

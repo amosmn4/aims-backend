@@ -50,13 +50,13 @@ export class ProjectsController {
   }
 
   @Post()
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   create(@Body() dto: CreateProjectDto, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.create(dto, user);
   }
 
   @Patch(":id")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   update(
     @Param("id") id: string,
     @Body() dto: UpdateProjectDto,
@@ -70,7 +70,7 @@ export class ProjectsController {
   // the service via assertDepartmentAccess (not just the role list here, since that alone
   // can't tell "your department" apart from "any department with a matching role").
   @Delete(":id")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   remove(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.remove(id, user);
   }
@@ -88,7 +88,7 @@ export class ProjectsController {
   }
 
   @Post(":id/milestones")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   createMilestone(
     @Param("id") id: string,
     @Body() dto: CreateMilestoneDto,
@@ -98,7 +98,7 @@ export class ProjectsController {
   }
 
   @Patch("milestones/:milestoneId")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   updateMilestone(
     @Param("milestoneId") milestoneId: string,
     @Body() dto: UpdateMilestoneDto,
@@ -108,7 +108,7 @@ export class ProjectsController {
   }
 
   @Delete("milestones/:milestoneId")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   removeMilestone(
     @Param("milestoneId") milestoneId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -123,7 +123,7 @@ export class ProjectsController {
   }
 
   @Post(":id/activities")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   createActivity(
     @Param("id") id: string,
     @Body() dto: CreateProjectActivityDto,
@@ -147,7 +147,7 @@ export class ProjectsController {
   }
 
   @Post(":id/cost-items")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   createCostItem(
     @Param("id") id: string,
     @Body() dto: CreateCostItemDto,
@@ -157,7 +157,7 @@ export class ProjectsController {
   }
 
   @Patch("cost-items/:itemId")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   updateCostItem(
     @Param("itemId") itemId: string,
     @Body() dto: UpdateCostItemDto,
@@ -167,7 +167,7 @@ export class ProjectsController {
   }
 
   @Delete("cost-items/:itemId")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   deleteCostItem(@Param("itemId") itemId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.deleteCostItem(itemId, user);
   }
@@ -181,7 +181,7 @@ export class ProjectsController {
   }
 
   @Post(":id/team")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   createTeamMember(
     @Param("id") id: string,
     @Body() dto: CreateTeamMemberDto,
@@ -191,7 +191,7 @@ export class ProjectsController {
   }
 
   @Patch("team/:memberId")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   updateTeamMember(
     @Param("memberId") memberId: string,
     @Body() dto: UpdateTeamMemberDto,
@@ -201,7 +201,7 @@ export class ProjectsController {
   }
 
   @Delete("team/:memberId")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   deleteTeamMember(@Param("memberId") memberId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.deleteTeamMember(memberId, user);
   }
@@ -215,7 +215,7 @@ export class ProjectsController {
   }
 
   @Post(":id/raci")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   createRaciEntry(
     @Param("id") id: string,
     @Body() dto: CreateRaciEntryDto,
@@ -225,7 +225,7 @@ export class ProjectsController {
   }
 
   @Patch("raci/:entryId")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   updateRaciEntry(
     @Param("entryId") entryId: string,
     @Body() dto: UpdateRaciEntryDto,
@@ -235,7 +235,7 @@ export class ProjectsController {
   }
 
   @Delete("raci/:entryId")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   deleteRaciEntry(@Param("entryId") entryId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.deleteRaciEntry(entryId, user);
   }
@@ -249,7 +249,7 @@ export class ProjectsController {
   }
 
   @Post(":id/raid")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   createRaidEntry(
     @Param("id") id: string,
     @Body() dto: CreateRaidEntryDto,
@@ -259,7 +259,7 @@ export class ProjectsController {
   }
 
   @Patch("raid/:entryId")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   updateRaidEntry(
     @Param("entryId") entryId: string,
     @Body() dto: UpdateRaidEntryDto,
@@ -269,7 +269,7 @@ export class ProjectsController {
   }
 
   @Delete("raid/:entryId")
-  @Roles("finance", "hr", "it", "marketing", "tender")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
   deleteRaidEntry(@Param("entryId") entryId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.deleteRaidEntry(entryId, user);
   }

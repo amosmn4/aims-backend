@@ -29,12 +29,12 @@ export class ContractsService {
   // department-scoped viewer only their own department's. A department-less contract (rare —
   // see assertContractDeptAccess below) is admin/CEO-only for the same reason it's admin/CEO-only
   // to manage: nobody's department claims it.
-  findAll(
+  async findAll(
     filters: { departmentId?: string; clientId?: string; status?: ContractStatus; q?: string },
     pagination: PaginationQueryDto = {},
     viewer: AuthenticatedUser,
   ) {
-    const deptCodes = viewerDepartmentCodes(viewer);
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     return maybePaginate(
       this.prisma.contract,
       {
@@ -64,7 +64,7 @@ export class ContractsService {
     filters: { departmentId?: string; clientId?: string; status?: ContractStatus; q?: string },
     viewer: AuthenticatedUser,
   ) {
-    const deptCodes = viewerDepartmentCodes(viewer);
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     const where = {
       ...(filters.departmentId && { departmentId: filters.departmentId }),
       ...(filters.clientId && { clientId: filters.clientId }),
@@ -109,7 +109,7 @@ export class ContractsService {
         _count: { select: { invoices: true } },
       },
     });
-    const deptCodes = viewerDepartmentCodes(viewer);
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     if (deptCodes && (!contract.department || !deptCodes.includes(contract.department.code))) {
       throw new NotFoundException("Contract not found");
     }
@@ -124,7 +124,7 @@ export class ContractsService {
     const department = await this.prisma.department.findUniqueOrThrow({
       where: { id: departmentId },
     });
-    assertDepartmentAccess(department, user);
+    await assertDepartmentAccess(department, user, this.prisma);
   }
 
   async create(dto: CreateContractDto, user: AuthenticatedUser) {

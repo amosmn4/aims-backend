@@ -282,6 +282,8 @@ model Department {
   tenders              Tender[]
   clientRequests       ClientRequest[]
   serviceLines         ServiceLine[]
+  permissionOverrides  UserPermissionOverride[]
+  resourceAccessGrants ResourceAccessGrant[]
 
   @@map("departments")
 }
@@ -304,41 +306,47 @@ model User {
   office     Office?     @relation(fields: [officeId], references: [id], onDelete: SetNull)
   roles      UserRole[]
 
-  accountManagedClients     Client[]                @relation("ClientAccountManager")
-  accountManagedContracts   Contract[]              @relation("ContractAccountManager")
-  createdContracts          Contract[]              @relation("ContractCreatedBy")
-  createdFinanceReports     FinanceReport[]         @relation("FinanceReportCreatedBy")
-  reviewedFinanceReports    FinanceReport[]         @relation("FinanceReportReviewedBy")
-  financeReportComments     FinanceReportComment[]
-  uploadedContractDocs      ContractDocument[]
-  auditLogEntries           AuditLog[]
-  taskComments              TaskComment[]
-  documents                 Document[]              @relation("DocumentCreatedBy")
-  uploadedDocumentVersions  DocumentVersion[]       @relation("DocumentVersionUploadedBy")
-  documentAccessGrants      DocumentAccessGrant[]   @relation("DocumentAccessGrantUser")
-  accountManagedTenders     Tender[]                @relation("TenderAccountManager")
-  createdTenders            Tender[]                @relation("TenderCreatedBy")
-  tenderResourceAssignments TenderResource[]        @relation("TenderResourceUser")
-  tenderTimeEntries         TenderTimeEntry[]       @relation("TenderTimeEntryUser")
-  assignedClientRequests    ClientRequest[]         @relation("ClientRequestAssignee")
-  createdClientRequests     ClientRequest[]         @relation("ClientRequestCreatedBy")
-  clientRequestActivities   ClientRequestActivity[] @relation("ClientRequestActivityCreatedBy")
-  notifications             Notification[]          @relation("NotificationRecipient")
-  createdNotifications      Notification[]          @relation("NotificationCreatedBy")
-  projectActivities         ProjectActivity[]       @relation("ProjectActivityCreatedBy")
-  tenderActivities          TenderActivity[]        @relation("TenderActivityCreatedBy")
-  projectTeamMemberships    ProjectTeamMember[]
-  leadActivities            LeadActivity[]          @relation("LeadActivityCreatedBy")
-  blogPosts                 BlogPost[]              @relation("BlogPostCreatedBy")
-  ticketsRequested          Ticket[]                @relation("TicketRequester")
-  ticketsAssigned           Ticket[]                @relation("TicketAssignee")
-  ticketsCreated            Ticket[]                @relation("TicketCreatedBy")
-  campaignsCreated          Campaign[]              @relation("CampaignCreatedBy")
-  passwordSetupTokens       PasswordSetupToken[]
-  waterUsageUploads         WaterUsageUpload[]      @relation("WaterUsageUploadCreatedBy")
-  waterMeterReadings        WaterMeterReading[]     @relation("WaterMeterReadingCreatedBy")
-  timelineExtensions        TimelineExtension[]     @relation("TimelineExtensionCreatedBy")
-  notificationPreference    NotificationPreference?
+  accountManagedClients      Client[]                 @relation("ClientAccountManager")
+  accountManagedContracts    Contract[]               @relation("ContractAccountManager")
+  createdContracts           Contract[]               @relation("ContractCreatedBy")
+  createdFinanceReports      FinanceReport[]          @relation("FinanceReportCreatedBy")
+  reviewedFinanceReports     FinanceReport[]          @relation("FinanceReportReviewedBy")
+  financeReportComments      FinanceReportComment[]
+  uploadedContractDocs       ContractDocument[]
+  auditLogEntries            AuditLog[]
+  taskComments               TaskComment[]
+  documents                  Document[]               @relation("DocumentCreatedBy")
+  uploadedDocumentVersions   DocumentVersion[]        @relation("DocumentVersionUploadedBy")
+  documentAccessGrants       DocumentAccessGrant[]    @relation("DocumentAccessGrantUser")
+  accountManagedTenders      Tender[]                 @relation("TenderAccountManager")
+  createdTenders             Tender[]                 @relation("TenderCreatedBy")
+  tenderResourceAssignments  TenderResource[]         @relation("TenderResourceUser")
+  tenderTimeEntries          TenderTimeEntry[]        @relation("TenderTimeEntryUser")
+  assignedClientRequests     ClientRequest[]          @relation("ClientRequestAssignee")
+  createdClientRequests      ClientRequest[]          @relation("ClientRequestCreatedBy")
+  clientRequestActivities    ClientRequestActivity[]  @relation("ClientRequestActivityCreatedBy")
+  notifications              Notification[]           @relation("NotificationRecipient")
+  createdNotifications       Notification[]           @relation("NotificationCreatedBy")
+  projectActivities          ProjectActivity[]        @relation("ProjectActivityCreatedBy")
+  tenderActivities           TenderActivity[]         @relation("TenderActivityCreatedBy")
+  projectTeamMemberships     ProjectTeamMember[]
+  leadActivities             LeadActivity[]           @relation("LeadActivityCreatedBy")
+  blogPosts                  BlogPost[]               @relation("BlogPostCreatedBy")
+  ticketsRequested           Ticket[]                 @relation("TicketRequester")
+  ticketsAssigned            Ticket[]                 @relation("TicketAssignee")
+  ticketsCreated             Ticket[]                 @relation("TicketCreatedBy")
+  campaignsCreated           Campaign[]               @relation("CampaignCreatedBy")
+  passwordSetupTokens        PasswordSetupToken[]
+  waterUsageUploads          WaterUsageUpload[]       @relation("WaterUsageUploadCreatedBy")
+  waterMeterReadings         WaterMeterReading[]      @relation("WaterMeterReadingCreatedBy")
+  waterAiInsightsGenerated   WaterAiInsight[]         @relation("WaterAiInsightGeneratedBy")
+  waterAiChatMessages        WaterAiChatMessage[]     @relation("WaterAiChatMessageUser")
+  permissionOverrides        UserPermissionOverride[] @relation("PermissionOverrideUser")
+  permissionOverridesGranted UserPermissionOverride[] @relation("PermissionOverrideCreatedBy")
+  resourceAccessGrants       ResourceAccessGrant[]    @relation("ResourceAccessGrantUser")
+  resourceAccessGrantsGiven  ResourceAccessGrant[]    @relation("ResourceAccessGrantCreatedBy")
+  timelineExtensions         TimelineExtension[]      @relation("TimelineExtensionCreatedBy")
+  notificationPreference     NotificationPreference?
 
   @@map("users")
 }
@@ -1742,9 +1750,8 @@ model NotificationPreference {
 /**
  * ================= Water Project =================
  */
-// A self-contained module: borehole/main meter -> zone bulk meters -> household meters ->
-// customers, with dated usage/payment records (seeded from a CSV export, or uploaded later) and
-// separate dial readings for main/bulk meters used to compute distribution loss (NRW).
+// Self-contained module: main meter -> zone bulk meters -> household meters -> customers.
+// Dial readings compute distribution loss (NRW).
 
 enum WaterMeterType {
   main
@@ -1763,10 +1770,7 @@ enum WaterUsageSource {
   manual
 }
 
-// Zones nest arbitrarily deep (a zone can sit inside another zone) rather than a fixed two-tier
-// zone/sub-zone split — Meters and Customers forms still present it as "Zone" then "Sub-zone"
-// (top-level pick, then one of its children), but that's just two levels of the same tree walked
-// from the frontend; the data model itself doesn't cap the depth.
+// Zones nest arbitrarily deep. Forms present it as "Zone" then "Sub-zone" but the model has no depth cap.
 model WaterZone {
   id           String   @id @default(uuid()) @db.Char(36)
   name         String
@@ -1800,19 +1804,13 @@ model WaterCustomer {
   @@map("water_customers")
 }
 
-// Meters are the module's primary entry point — registering one captures who it's assigned to,
-// where (plot number, zone) and when it was installed, rather than requiring a customer to be
-// created as a separate step first (see WaterService.createMeter's find-or-create-by-name).
+// Meters are the module's primary entry point — registering one finds-or-creates its customer.
 model WaterMeter {
   id              String             @id @default(uuid()) @db.Char(36)
   meterNumber     String             @unique @map("meter_number")
   meterType       WaterMeterType     @default(household) @map("meter_type")
-  // Household meters are identified by their customer; main/bulk meters have no customer and are
-  // identified by a friendly name + physical location instead (e.g. "Borehole Main Meter" /
-  // "Borehole pump house"). A bulk meter's `zoneId` is the zone it reconciles — since zones nest
-  // arbitrarily, that single assignment already covers every sub-zone beneath it (a bulk meter
-  // "having multiple sub-zones" falls straight out of the existing zone tree, no separate
-  // many-to-many needed — see WaterService's zoneAndDescendantIds).
+  // Household meters are identified by customer; main/bulk meters use name + location.
+  // A bulk meter's `zoneId` covers every sub-zone via the zone tree.
   name            String?
   location        String?
   customerId      String?            @map("customer_id") @db.Char(36)
@@ -1820,14 +1818,9 @@ model WaterMeter {
   installedAt     DateTime?          @map("installed_at")
   zoneId          String?            @map("zone_id") @db.Char(36)
   isActive        Boolean            @default(true) @map("is_active")
-  // Which vending platform this meter is read/topped-up through — distinct customer bases and
-  // account-number formats per system, not a billing/technical detail. Defaults to `amsol` so
-  // every meter already in AIMS is correctly tagged with no code changes.
+  // Which vending platform reads/tops up this meter. Defaults to `amsol` for existing meters.
   vendingSystem   WaterVendingSystem @default(amsol) @map("vending_system")
-  // Set when this meter physically replaced another (e.g. a faulty unit swapped out) — an audit
-  // trail only. The actual vending-history continuity comes from both meters sharing the same
-  // `customerId`, not from this field; see WaterMeter model comment in the plan for the full
-  // reasoning. Self-relation, so both directions are queryable from either meter.
+  // Set when this meter physically replaced another — audit trail only, not vending-history data.
   replacesMeterId String?            @unique @map("replaces_meter_id") @db.Char(36)
   createdAt       DateTime           @default(now()) @map("created_at")
   updatedAt       DateTime           @updatedAt @map("updated_at")
@@ -1846,9 +1839,7 @@ model WaterMeter {
   @@map("water_meters")
 }
 
-// One row per confirmed CSV/Excel upload — dated snapshots, so usage records stay traceable to
-// the batch (and file) they arrived in, matching maybePaginate's "opt-in envelope" pattern used
-// everywhere else: a plain list of uploads, each with a rollup of its own records.
+// One row per confirmed CSV/Excel upload, so usage records stay traceable to their batch.
 model WaterUsageUpload {
   id          String   @id @default(uuid()) @db.Char(36)
   fileName    String   @map("file_name")
@@ -1862,10 +1853,7 @@ model WaterUsageUpload {
   @@map("water_usage_uploads")
 }
 
-// A single purchase/consumption transaction against a household meter — units sold + amount
-// paid, dated by `recordedAt` (the actual purchase date, not when it was entered into AIMS).
-// `customerName` is kept verbatim from the source row even when `customerId` resolves, since a
-// meter can change hands and the historical record should still say who actually paid.
+// A purchase/consumption transaction. `customerName` stays verbatim since a meter can change hands.
 model WaterUsageRecord {
   id           String           @id @default(uuid()) @db.Char(36)
   meterId      String           @map("meter_id") @db.Char(36)
@@ -1887,9 +1875,7 @@ model WaterUsageRecord {
   @@map("water_usage_records")
 }
 
-// A dial reading for a main or bulk meter — distinct from WaterUsageRecord (no customer/payment
-// involved). Consecutive readings for the same meter are compared to derive period consumption
-// for the loss ladder / NRW calculations, same semantics as the reference dashboard.
+// A dial reading for a main/bulk meter. Consecutive readings derive period usage for NRW.
 model WaterMeterReading {
   id          String   @id @default(uuid()) @db.Char(36)
   meterId     String   @map("meter_id") @db.Char(36)
@@ -1904,4 +1890,98 @@ model WaterMeterReading {
 
   @@index([meterId, readingDate])
   @@map("water_meter_readings")
+}
+
+enum WaterAiChatRole {
+  user
+  assistant
+}
+
+// One row per "Generate insights" click, not auto-refreshed. Bounds AI cost per month.
+model WaterAiInsight {
+  id          String   @id @default(uuid()) @db.Char(36)
+  month       String   @db.VarChar(7) // "YYYY-MM"
+  summary     String   @db.Text
+  anomalies   Json
+  reasons     Json
+  provider    String // "openai" | "gemini" — whichever provider actually served this generation
+  generatedBy String?  @map("generated_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  generator User? @relation("WaterAiInsightGeneratedBy", fields: [generatedBy], references: [id], onDelete: SetNull)
+
+  @@index([month, createdAt])
+  @@map("water_ai_insights")
+}
+
+// Per-user chat transcript for the water AI assistant — each viewer gets their own conversation.
+model WaterAiChatMessage {
+  id        String          @id @default(uuid()) @db.Char(36)
+  userId    String          @map("user_id") @db.Char(36)
+  role      WaterAiChatRole
+  content   String          @db.Text
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  user User @relation("WaterAiChatMessageUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("water_ai_chat_messages")
+}
+
+/**
+ * ================= Permissions expansion =================
+ */
+
+enum PermissionAction {
+  read
+  write
+}
+
+enum PermissionEffect {
+  grant
+  deny
+}
+
+// A per-user exception to their role's default read/write on one department, e.g. a finance-role
+// user denied write (read-only), or a non-finance user granted read. Absence = pure role default.
+model UserPermissionOverride {
+  id           String           @id @default(uuid()) @db.Char(36)
+  userId       String           @map("user_id") @db.Char(36)
+  departmentId String           @map("department_id") @db.Char(36)
+  action       PermissionAction
+  effect       PermissionEffect
+  createdBy    String?          @map("created_by") @db.Char(36)
+  createdAt    DateTime         @default(now()) @map("created_at")
+
+  user       User       @relation("PermissionOverrideUser", fields: [userId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  creator    User?      @relation("PermissionOverrideCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@unique([userId, departmentId, action])
+  @@map("user_permission_overrides")
+}
+
+enum ResourceAccessLevel {
+  read
+  write
+}
+
+// Shares one specific record (a tender, a client request) with a user or department outside its
+// own owning department — layers on top of department access, doesn't replace it.
+model ResourceAccessGrant {
+  id           String              @id @default(uuid()) @db.Char(36)
+  resourceType String              @map("resource_type")
+  resourceId   String              @map("resource_id") @db.Char(36)
+  departmentId String?             @map("department_id") @db.Char(36)
+  userId       String?             @map("user_id") @db.Char(36)
+  level        ResourceAccessLevel @default(read)
+  createdBy    String?             @map("created_by") @db.Char(36)
+  createdAt    DateTime            @default(now()) @map("created_at")
+
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  user       User?       @relation("ResourceAccessGrantUser", fields: [userId], references: [id], onDelete: Cascade)
+  creator    User?       @relation("ResourceAccessGrantCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([resourceType, resourceId])
+  @@map("resource_access_grants")
 }
