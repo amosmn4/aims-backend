@@ -66,6 +66,15 @@ npm run water:seed                  # loads the new files (safe to re-run; dupli
 npm run water:seed -- --accounts    # also registers mPaya accounts that have no payments yet
 ```
 
+If a command stops with `Property 'waterAiInsight' does not exist on type 'PrismaClient'` (or a
+similar unknown-table error), this server's Prisma client is older than the schema. Run steps 2
+and 3 of the deploy above first:
+
+```bash
+npx prisma migrate deploy
+npx prisma generate
+```
+
 Both commands print the database host and name first — check it before using `--yes`. The clear
 keeps zones, main and bulk meters, dial readings, hand-entered payments, AI chat history, and any
 household meter staff have put in a zone or given readings. Mpaya dates are read as Nairobi time.
