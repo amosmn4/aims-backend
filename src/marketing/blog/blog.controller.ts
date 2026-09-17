@@ -17,6 +17,7 @@ import { StorageService } from "../../storage/storage.service";
 import { CreateBlogPostDto } from "./dto/create-blog-post.dto";
 import { UpdateBlogPostDto } from "./dto/update-blog-post.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
+import { RequireCapability } from "../../auth/decorators/require-capability.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 
@@ -42,25 +43,29 @@ export class BlogController {
   }
 
   @Post()
-  @Roles("marketing")
+  @Roles()
+  @RequireCapability("publish_blog")
   create(@Body() dto: CreateBlogPostDto, @CurrentUser() user: AuthenticatedUser) {
     return this.blogService.create(dto, user);
   }
 
   @Patch(":id")
-  @Roles("marketing")
+  @Roles()
+  @RequireCapability("publish_blog")
   update(@Param("id") id: string, @Body() dto: UpdateBlogPostDto) {
     return this.blogService.update(id, dto);
   }
 
   @Delete(":id")
-  @Roles("marketing")
+  @Roles()
+  @RequireCapability("publish_blog")
   remove(@Param("id") id: string) {
     return this.blogService.remove(id);
   }
 
   @Post(":id/image")
-  @Roles("marketing")
+  @Roles()
+  @RequireCapability("publish_blog")
   @UseInterceptors(FileInterceptor("file"))
   uploadImage(@Param("id") id: string, @UploadedFile() file: Express.Multer.File) {
     return this.blogService.uploadImage(id, file);
@@ -75,7 +80,8 @@ export class BlogController {
   }
 
   @Post(":id/video")
-  @Roles("marketing")
+  @Roles()
+  @RequireCapability("publish_blog")
   @UseInterceptors(FileInterceptor("file"))
   uploadVideo(@Param("id") id: string, @UploadedFile() file: Express.Multer.File) {
     return this.blogService.uploadVideo(id, file);
@@ -90,13 +96,15 @@ export class BlogController {
   }
 
   @Post(":id/publish")
-  @Roles("marketing")
+  @Roles()
+  @RequireCapability("publish_blog")
   publish(@Param("id") id: string) {
     return this.blogService.publish(id);
   }
 
   @Post(":id/unpublish")
-  @Roles("marketing")
+  @Roles()
+  @RequireCapability("publish_blog")
   unpublish(@Param("id") id: string) {
     return this.blogService.unpublish(id);
   }
