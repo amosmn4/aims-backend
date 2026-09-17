@@ -5,4 +5,5 @@ export type AuthenticatedUser = {
   email: string;
   roles: AppRole[];
   departmentId: string | null;
+  actorId?: string;
 };

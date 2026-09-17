@@ -1,4 +1,4 @@
-import { IsIn, IsOptional, IsString, MinLength } from "class-validator";
+import { IsIn, IsOptional, IsString, MinLength, IsUUID } from "class-validator";
 
 const ACTIVITY_TYPES = ["note", "call", "email", "meeting"] as const;
 
@@ -14,4 +14,8 @@ export class CreateTenderActivityDto {
   @IsOptional()
   @IsString()
   occurredAt?: string;
+
+  @IsOptional()
+  @IsUUID()
+  parentId?: string;
 }

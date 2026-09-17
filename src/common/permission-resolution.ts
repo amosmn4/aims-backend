@@ -2,6 +2,7 @@ import type { AppRole } from "@prisma/client";
 import type { PrismaService } from "../prisma/prisma.service";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import { isAdminOrCeo } from "./is-admin-or-ceo";
+import { roleAppliesTo, roleCan, userCan, type Capability } from "./capabilities";
 
 export type PermissionDepartment = { id: string; code: string };
 export type PermissionAction = "read" | "write";
@@ -37,10 +38,27 @@ export function roleGrantsDefault(
   department: PermissionDepartment,
   action: PermissionAction,
 ): boolean {
-  if (user.roles.includes(department.code as AppRole)) return true;
-  if (user.departmentId !== department.id) return false;
-  if (user.roles.includes("department_head") || user.roles.includes("account_manager")) {
-    return true;
-  }
-  return user.roles.includes("general_staff") && action === "read";
+  const capability = action === "read" ? "view_department" : "edit_department";
+  return user.roles.some((role) => {
+    if (!roleAppliesTo(role, user, department)) return false;
+    // Anyone who may edit a department may also view it.
+    return roleCan(role, capability) || (action === "read" && roleCan(role, "edit_department"));
+  });
+}
+
+/** Department write access that also needs a role capability; a personal override still wins. */
+export async function canWithCapability(
+  user: AuthenticatedUser,
+  department: PermissionDepartment,
+  capability: Capability,
+  prisma: PrismaService,
+): Promise<boolean> {
+  if (isAdminOrCeo(user)) return true;
+  const override = await prisma.userPermissionOverride.findUnique({
+    where: {
+      userId_departmentId_action: { userId: user.id, departmentId: department.id, action: "write" },
+    },
+  });
+  if (override) return override.effect === "grant";
+  return roleGrantsDefault(user, department, "write") && userCan(user, capability, department);
 }

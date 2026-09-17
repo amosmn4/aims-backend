@@ -20,6 +20,9 @@ zones. All volumes are in cubic metres (units). "Loss" / non-revenue water (NRW)
 the gap between what a meter measured flowing in and what was accounted for downstream — it
 covers real leakage, unbilled/illegal use, and meter error, and the data given doesn't distinguish
 between those causes, so speak in terms of "likely" causes, not certainties.
+Meters are either active (in use) or inactive (no longer in use, e.g. retired or replaced).
+Inactive meters are excluded from active meter counts, but their past readings and sales still
+count in the months they happened; a sale or reading on an inactive meter is a data problem.
 Only use the figures you are given — never invent a number, zone, or meter not present in the
 data. Currency figures are in Kenyan Shillings (KES).`;
 

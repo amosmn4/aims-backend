@@ -38,6 +38,7 @@ export interface MergedActivity {
   summary: string;
   occurredAt: Date;
   createdByName: string | null;
+  parentId: string | null;
 }
 
 function creatorName(creator: CreatorRef, viewer: AuthenticatedUser): string | null {
@@ -124,74 +125,71 @@ export class EngagementsService {
       if (l) lead = l;
     }
 
-    const [leadActivities, requestActivities, tenderActivities, projectActivities] = await Promise.all([
-      lead
-        ? this.prisma.leadActivity.findMany({
-            where: { leadId: lead.id },
-            include: { creator: { select: userSelect } },
-          })
-        : Promise.resolve([]),
-      request
-        ? this.prisma.clientRequestActivity.findMany({
-            where: { requestId: request.id },
-            include: { creator: { select: userSelect } },
-          })
-        : Promise.resolve([]),
-      tender
-        ? this.prisma.tenderActivity.findMany({
-            where: { tenderId: tender.id },
-            include: { creator: { select: userSelect } },
-          })
-        : Promise.resolve([]),
-      projects.length > 0
-        ? this.prisma.projectActivity.findMany({
-            where: { projectId: { in: projects.map((p) => p.id) } },
-            include: { creator: { select: userSelect } },
-          })
-        : Promise.resolve([]),
-    ]);
+    const [leadActivities, requestActivities, tenderActivities, projectActivities] =
+      await Promise.all([
+        lead
+          ? this.prisma.leadActivity.findMany({
+              where: { leadId: lead.id },
+              include: { creator: { select: userSelect } },
+            })
+          : Promise.resolve([]),
+        request
+          ? this.prisma.clientRequestActivity.findMany({
+              where: { requestId: request.id },
+              include: { creator: { select: userSelect } },
+            })
+          : Promise.resolve([]),
+        tender
+          ? this.prisma.tenderActivity.findMany({
+              where: { tenderId: tender.id },
+              include: { creator: { select: userSelect } },
+            })
+          : Promise.resolve([]),
+        projects.length > 0
+          ? this.prisma.projectActivity.findMany({
+              where: { projectId: { in: projects.map((p) => p.id) } },
+              include: { creator: { select: userSelect } },
+            })
+          : Promise.resolve([]),
+      ]);
 
     const activities: MergedActivity[] = [
-      ...leadActivities.map(
-        (a): MergedActivity => ({
-          id: a.id,
-          source: "lead",
-          type: a.type,
-          summary: a.summary,
-          occurredAt: a.occurredAt,
-          createdByName: creatorName(a.creator, viewer),
-        }),
-      ),
-      ...requestActivities.map(
-        (a): MergedActivity => ({
-          id: a.id,
-          source: "request",
-          type: a.type,
-          summary: a.summary,
-          occurredAt: a.occurredAt,
-          createdByName: creatorName(a.creator, viewer),
-        }),
-      ),
-      ...tenderActivities.map(
-        (a): MergedActivity => ({
-          id: a.id,
-          source: "tender",
-          type: a.type,
-          summary: a.summary,
-          occurredAt: a.occurredAt,
-          createdByName: creatorName(a.creator, viewer),
-        }),
-      ),
-      ...projectActivities.map(
-        (a): MergedActivity => ({
-          id: a.id,
-          source: "project",
-          type: a.type,
-          summary: a.summary,
-          occurredAt: a.occurredAt,
-          createdByName: creatorName(a.creator, viewer),
-        }),
-      ),
+      ...leadActivities.map((a): MergedActivity => ({
+        id: a.id,
+        source: "lead",
+        type: a.type,
+        summary: a.summary,
+        occurredAt: a.occurredAt,
+        createdByName: creatorName(a.creator, viewer),
+        parentId: a.parentId,
+      })),
+      ...requestActivities.map((a): MergedActivity => ({
+        id: a.id,
+        source: "request",
+        type: a.type,
+        summary: a.summary,
+        occurredAt: a.occurredAt,
+        createdByName: creatorName(a.creator, viewer),
+        parentId: a.parentId,
+      })),
+      ...tenderActivities.map((a): MergedActivity => ({
+        id: a.id,
+        source: "tender",
+        type: a.type,
+        summary: a.summary,
+        occurredAt: a.occurredAt,
+        createdByName: creatorName(a.creator, viewer),
+        parentId: a.parentId,
+      })),
+      ...projectActivities.map((a): MergedActivity => ({
+        id: a.id,
+        source: "project",
+        type: a.type,
+        summary: a.summary,
+        occurredAt: a.occurredAt,
+        createdByName: creatorName(a.creator, viewer),
+        parentId: a.parentId,
+      })),
     ].sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
 
     return { chain: { lead, request, tender, contract, projects }, activities };

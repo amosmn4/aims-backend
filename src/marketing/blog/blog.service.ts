@@ -5,9 +5,9 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import type { BlogPost } from "@prisma/client";
-import sanitizeHtml from "sanitize-html";
 import { PrismaService } from "../../prisma/prisma.service";
 import { StorageService } from "../../storage/storage.service";
+import { sanitizeRichText } from "../../common/sanitize";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateBlogPostDto } from "./dto/create-blog-post.dto";
 import type { UpdateBlogPostDto } from "./dto/update-blog-post.dto";
@@ -21,50 +21,8 @@ const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_VIDEO_MIME_TYPES = new Set(["video/mp4", "video/webm"]);
 const MAX_VIDEO_SIZE_BYTES = 50 * 1024 * 1024;
 
-// The exact set of web-safe font-family names the toolbar's <Select> offers — kept here too so
-// the allowlist regex below can pin to precisely these strings, not arbitrary font names.
-export const BLOG_FONT_FAMILIES = ["Arial", "Georgia", "Verdana", "Times New Roman", "Courier New"];
-
-// Matches the editor's toolbar exactly (RichTextEditor on the frontend) — nothing the editor
-// can't already produce should ever need to survive this allowlist. `content` is served
-// verbatim to the public website (see findPublished/mapPublicSummary below), so this is the one
-// place that boundary is actually enforced — sanitizing here covers both the admin save path
-// and, transitively, everything the public feed ever returns. `style`/`class` are a materially
-// bigger attack surface than plain tags (arbitrary CSS can exfiltrate data via url() or fake UI
-// via position/overlay), so both are pinned to `allowedStyles`/`allowedClasses` regexes matching
-// only the exact value shapes the toolbar can produce — never a free-form style/class string.
-const FONT_FAMILY_PATTERN = new RegExp(
-  `^"?(${BLOG_FONT_FAMILIES.map((f) => f.replace(/ /g, "\\s")).join("|")})"?$`,
-  "i",
-);
-const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
-  allowedTags: ["p", "br", "strong", "em", "u", "s", "sub", "sup", "ul", "ol", "li", "a", "span"],
-  allowedAttributes: {
-    a: ["href", "target", "rel"],
-    span: ["style"],
-    p: ["style", "class"],
-  },
-  allowedClasses: { p: ["drop-cap"] },
-  allowedStyles: {
-    span: {
-      color: [/^#[0-9a-f]{6}$/i],
-      "font-family": [FONT_FAMILY_PATTERN],
-    },
-    p: {
-      "text-align": [/^(left|center|right|justify)$/],
-    },
-  },
-  allowedSchemes: ["http", "https", "mailto"],
-  transformTags: {
-    a: sanitizeHtml.simpleTransform("a", {
-      target: "_blank",
-      rel: "noopener noreferrer nofollow",
-    }),
-  },
-};
-
 function sanitizeContent(content: string | undefined): string | undefined {
-  return content === undefined ? undefined : sanitizeHtml(content, SANITIZE_OPTIONS);
+  return content === undefined ? undefined : sanitizeRichText(content);
 }
 
 function slugify(title: string): string {
@@ -109,7 +67,7 @@ function mapPublicSummary(post: BlogPost) {
 }
 
 function mapPublicDetail(post: BlogPost) {
-  return { ...mapPublicSummary(post), content: post.content };
+  return { ...mapPublicSummary(post), content: sanitizeRichText(post.content) };
 }
 
 @Injectable()

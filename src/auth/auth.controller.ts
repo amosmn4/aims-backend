@@ -3,17 +3,23 @@ import {
   Controller,
   Get,
   HttpCode,
+  Patch,
   Post,
   Req,
   Res,
   UnauthorizedException,
 } from "@nestjs/common";
+import { IsString } from "class-validator";
 import { ConfigService } from "@nestjs/config";
 import { Throttle } from "@nestjs/throttler";
 import type { CookieOptions, Request, Response } from "express";
 import { AuthService } from "./auth.service";
 import { LoginDto } from "./dto/login.dto";
 import { SetPasswordDto } from "./dto/set-password.dto";
+import { UpdateProfileDto } from "./dto/update-profile.dto";
+import { ChangePasswordDto } from "./dto/change-password.dto";
+import { ForgotPasswordDto } from "./dto/forgot-password.dto";
+import { UsersService } from "../users/users.service";
 import { Public } from "./decorators/public.decorator";
 import { CurrentUser } from "./decorators/current-user.decorator";
 import type { AuthenticatedUser } from "./types/authenticated-user";
@@ -21,12 +27,27 @@ import { parseTtlToMs } from "./ttl.util";
 
 const REFRESH_COOKIE = "aims_refresh_token";
 
+class ViewAsDto {
+  @IsString()
+  userId!: string;
+}
+
 @Controller("auth")
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly config: ConfigService,
+    private readonly users: UsersService,
   ) {}
+
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("forgot-password")
+  @HttpCode(200)
+  async forgotPassword(@Body() dto: ForgotPasswordDto) {
+    await this.users.requestPasswordReset(dto.email);
+    return { success: true };
+  }
 
   private refreshCookieOptions(): CookieOptions {
     return {
@@ -83,7 +104,56 @@ export class AuthController {
 
   @Get("me")
   me(@CurrentUser() user: AuthenticatedUser) {
-    return this.authService.getProfile(user.id);
+    return this.authService.getProfile(user);
+  }
+
+  @Patch("me")
+  updateProfile(@CurrentUser() user: AuthenticatedUser, @Body() dto: UpdateProfileDto) {
+    return this.authService.updateProfile(user, dto);
+  }
+
+  @Post("change-password")
+  @HttpCode(200)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  changePassword(@CurrentUser() user: AuthenticatedUser, @Body() dto: ChangePasswordDto) {
+    return this.authService.changePassword(user, dto);
+  }
+
+  @Get("view-as/targets")
+  viewAsTargets(@CurrentUser() user: AuthenticatedUser) {
+    return this.authService.viewAsTargets(user);
+  }
+
+  @Post("view-as")
+  @HttpCode(200)
+  async startViewAs(
+    @Body() dto: ViewAsDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { accessToken, refreshToken } = await this.authService.startViewAs(
+      user,
+      dto.userId,
+      req.cookies?.[REFRESH_COOKIE],
+    );
+    res.cookie(REFRESH_COOKIE, refreshToken, this.refreshCookieOptions());
+    return { accessToken };
+  }
+
+  @Post("view-as/exit")
+  @HttpCode(200)
+  async exitViewAs(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { accessToken, refreshToken } = await this.authService.exitViewAs(
+      user,
+      req.cookies?.[REFRESH_COOKIE],
+    );
+    res.cookie(REFRESH_COOKIE, refreshToken, this.refreshCookieOptions());
+    return { accessToken };
   }
 
   @Public()

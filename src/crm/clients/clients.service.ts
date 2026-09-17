@@ -1,30 +1,54 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
-import { viewerDepartmentCodes } from "../../common/department-scope";
+import { billingViewerCodes } from "../../common/department-scope";
+import { assertDepartmentAccess } from "../../common/assert-department-access";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateClientDto } from "./dto/create-client.dto";
 import type { UpdateClientDto } from "./dto/update-client.dto";
 import type { CreateContactDto } from "./dto/create-contact.dto";
 import type { UpdateContactDto } from "./dto/update-contact.dto";
 
+type ClientWithWork = {
+  contracts: { status: string; billingFrequency: string }[];
+  projects: { status: string; engagementType: string }[];
+} & Record<string, unknown>;
+
+/** Relationship (recurring / one-off) and lifecycle (active / past / prospect) from the client's work. */
+function clientState(contracts: ClientWithWork["contracts"], projects: ClientWithWork["projects"]) {
+  const liveContracts = contracts.filter((c) => c.status === "active" || c.status === "on_hold");
+  const liveProjects = projects.filter((p) => ["planning", "active", "on_hold"].includes(p.status));
+  const hasWork = contracts.length > 0 || projects.length > 0;
+  const lifecycle =
+    liveContracts.length || liveProjects.length ? "active" : hasWork ? "past" : "prospect";
+  const recurring =
+    contracts.some((c) => c.billingFrequency !== "one_off") ||
+    projects.some((p) => p.engagementType === "ongoing");
+  const relationship = !hasWork ? "none" : recurring ? "recurring" : "one_off";
+  return {
+    lifecycle,
+    relationship,
+    contractCount: contracts.length,
+    projectCount: projects.length,
+  };
+}
+
 @Injectable()
 export class ClientsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  // Client has no department column of its own — a client is "in scope" for a department-scoped
-  // viewer when it has at least one contract/tender/client request/project belonging to one of
-  // their departments. Operations/Tender additionally see every client tied only to an unrouted
-  // (department-less) client request, matching the same intake-ownership exception used for
-  // Client Requests themselves.
+  // A client is "in scope" for a department-scoped viewer when that department captured it, or it
+  // has a contract/tender/client request/project there. Operations/Tender see every client
+  // (intake ownership, same exception as Client Requests).
   private async scopeWhere(viewer: AuthenticatedUser) {
-    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
+    const deptCodes = await billingViewerCodes(viewer, this.prisma);
     const unrestricted =
       deptCodes === null || deptCodes.includes("operations") || deptCodes.includes("tender");
     return unrestricted
       ? undefined
       : {
           OR: [
+            { department: { code: { in: deptCodes! } } },
             { contracts: { some: { department: { code: { in: deptCodes! } } } } },
             { tenders: { some: { department: { code: { in: deptCodes! } } } } },
             { clientRequests: { some: { department: { code: { in: deptCodes! } } } } },
@@ -39,21 +63,41 @@ export class ClientsService {
     viewer: AuthenticatedUser,
   ) {
     const scope = await this.scopeWhere(viewer);
-    return maybePaginate(
+    const result = await maybePaginate(
       this.prisma.client,
       {
         where: {
           ...(filters.industry && { industry: filters.industry }),
           ...(filters.segment && { segment: filters.segment }),
-          ...(filters.q && {
-            OR: [{ name: { contains: filters.q } }, { code: { contains: filters.q } }],
-          }),
-          ...(scope && scope),
+          AND: [
+            filters.q
+              ? {
+                  OR: [
+                    { name: { contains: filters.q } },
+                    { code: { contains: filters.q } },
+                    { contactEmail: { contains: filters.q } },
+                    { contactPhone: { contains: filters.q } },
+                  ],
+                }
+              : {},
+            scope ?? {},
+          ],
         },
         orderBy: { name: "asc" },
+        include: {
+          department: { select: { id: true, name: true, code: true } },
+          contracts: { select: { status: true, billingFrequency: true } },
+          projects: { select: { status: true, engagementType: true } },
+        },
       },
       pagination,
     );
+    const rows = (Array.isArray(result) ? result : result.data) as unknown as ClientWithWork[];
+    const withState = rows.map(({ contracts, projects, ...c }) => ({
+      ...c,
+      ...clientState(contracts, projects),
+    }));
+    return Array.isArray(result) ? withState : { ...result, data: withState };
   }
 
   // Distinct industry/segment values across every client in the viewer's scope — independent of
@@ -81,7 +125,13 @@ export class ClientsService {
     };
   }
 
-  create(dto: CreateClientDto) {
+  async create(dto: CreateClientDto, user: AuthenticatedUser) {
+    if (dto.departmentId) {
+      const department = await this.prisma.department.findUniqueOrThrow({
+        where: { id: dto.departmentId },
+      });
+      await assertDepartmentAccess(department, user, this.prisma);
+    }
     return this.prisma.client.create({ data: dto });
   }
 

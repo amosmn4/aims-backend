@@ -10,7 +10,14 @@ export const LEAD_SOURCES = [
   "other",
 ] as const;
 
-export const LEAD_STAGES = ["new", "contacted", "qualified", "nurturing", "converted", "lost"] as const;
+export const LEAD_STAGES = [
+  "new",
+  "contacted",
+  "qualified",
+  "nurturing",
+  "converted",
+  "lost",
+] as const;
 
 export class CreateLeadDto {
   @IsString()

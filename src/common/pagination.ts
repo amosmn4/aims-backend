@@ -70,7 +70,8 @@ export async function maybePaginate<T>(
   }
 
   const page = query.page && query.page > 0 ? query.page : 1;
-  const pageSize = query.pageSize && query.pageSize > 0 ? Math.min(query.pageSize, 100) : DEFAULT_PAGE_SIZE;
+  const pageSize =
+    query.pageSize && query.pageSize > 0 ? Math.min(query.pageSize, 100) : DEFAULT_PAGE_SIZE;
 
   const [data, total] = await Promise.all([
     model.findMany({ ...args, skip: (page - 1) * pageSize, take: pageSize }),

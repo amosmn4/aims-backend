@@ -1,4 +1,4 @@
-import { IsDateString, IsIn, IsOptional, IsString } from "class-validator";
+import { IsDateString, IsIn, IsOptional, IsString, IsNumber, IsInt, Min } from "class-validator";
 
 export const INVENTORY_CATEGORIES = [
   "laptop",
@@ -72,4 +72,23 @@ export class CreateInventoryItemDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  purchaseCost?: number | null;
+
+  // Months over which the asset loses its value (e.g. 36 for a laptop).
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  usefulLifeMonths?: number | null;
+
+  @IsOptional()
+  @IsString()
+  departmentId?: string | null;
+
+  @IsOptional()
+  @IsString()
+  assignedUserId?: string | null;
 }

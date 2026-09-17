@@ -15,6 +15,14 @@ const MUTATING_METHODS = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 // mutation — excluded so a login attempt never ends up copied into audit_log.new_value.
 const SKIP_PREFIXES = ["/api/v1/auth"];
 const MAX_VALUE_LENGTH = 4000;
+const SECRET_KEYS = new Set([
+  "setupLink",
+  "token",
+  "password",
+  "passwordHash",
+  "accessToken",
+  "refreshToken",
+]);
 
 /**
  * Automatically records every mutating request (POST/PATCH/PUT/DELETE) made by an
@@ -46,7 +54,10 @@ export class AuditLogInterceptor implements NestInterceptor {
     const routePattern: string = request.route?.path ?? path;
     const entityType = this.deriveEntityType(context.getClass().name);
     const paramId: string | undefined =
-      request.params?.id ?? request.params?.activityId ?? request.params?.itemId ?? request.params?.bondId;
+      request.params?.id ??
+      request.params?.activityId ??
+      request.params?.itemId ??
+      request.params?.bondId;
 
     return next.handle().pipe(
       tap((responseBody) => {
@@ -83,7 +94,7 @@ export class AuditLogInterceptor implements NestInterceptor {
   private safeValue(value: unknown): Prisma.InputJsonValue | undefined {
     if (value == null || typeof value !== "object") return undefined;
     try {
-      const json = JSON.stringify(value);
+      const json = JSON.stringify(value, (key, v) => (SECRET_KEYS.has(key) ? "[redacted]" : v));
       if (json.length > MAX_VALUE_LENGTH) {
         return { truncated: true, preview: json.slice(0, MAX_VALUE_LENGTH) };
       }

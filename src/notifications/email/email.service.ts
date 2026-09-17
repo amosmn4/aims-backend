@@ -40,7 +40,10 @@ export class EmailService {
       await this.transporter.sendMail({ from: this.from, to, subject, html });
       return true;
     } catch (err) {
-      this.logger.error(`Failed to send email to ${to}`, err instanceof Error ? err.stack : undefined);
+      this.logger.error(
+        `Failed to send email to ${to}`,
+        err instanceof Error ? err.stack : undefined,
+      );
       return false;
     }
   }

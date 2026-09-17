@@ -33,11 +33,12 @@ export class ProjectsController {
     @Query("status") status?: ProjectStatus,
     @Query("clientId") clientId?: string,
     @Query("sharedWithMe") sharedWithMe?: string,
+    @Query("serviceLineId") serviceLineId?: string,
     @Query("page") page?: string,
     @Query("pageSize") pageSize?: string,
   ) {
     return this.projectsService.findAll(
-      { departmentId, status, clientId, sharedWithMe: sharedWithMe === "true" },
+      { departmentId, status, clientId, serviceLineId, sharedWithMe: sharedWithMe === "true" },
       parsePaginationQuery(page, pageSize),
       user,
     );

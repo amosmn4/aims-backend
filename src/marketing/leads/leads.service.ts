@@ -8,12 +8,14 @@ import type { CreateLeadDto } from "./dto/create-lead.dto";
 import type { UpdateLeadDto } from "./dto/update-lead.dto";
 import type { CreateLeadActivityDto } from "./dto/create-lead-activity.dto";
 import type { ConvertLeadToRequestDto } from "./dto/convert-lead-to-request.dto";
+import { ThreadsService } from "../../threads/threads.service";
 
 @Injectable()
 export class LeadsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly clientRequestsService: ClientRequestsService,
+    private readonly threads: ThreadsService,
   ) {}
 
   findAll(filters: { stage?: string } = {}, pagination: PaginationQueryDto = {}) {
@@ -59,16 +61,45 @@ export class LeadsService {
     }));
   }
 
-  createActivity(leadId: string, dto: CreateLeadActivityDto, user: AuthenticatedUser) {
-    return this.prisma.leadActivity.create({
+  async createActivity(leadId: string, dto: CreateLeadActivityDto, user: AuthenticatedUser) {
+    const lead = await this.prisma.lead.findUniqueOrThrow({ where: { id: leadId } });
+    const parent = dto.parentId
+      ? await this.prisma.leadActivity.findUnique({
+          where: { id: dto.parentId },
+          select: { id: true, parentId: true, leadId: true },
+        })
+      : null;
+    const parentId = dto.parentId ? this.threads.rootOf(parent, parent?.leadId === leadId) : null;
+    const activity = await this.prisma.leadActivity.create({
       data: {
         leadId,
+        parentId,
         type: dto.type,
         summary: dto.summary,
         occurredAt: dto.occurredAt ? new Date(dto.occurredAt) : undefined,
         createdBy: user.id,
       },
+      include: {
+        creator: {
+          select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+        },
+      },
     });
+    if (parentId) {
+      const thread = await this.prisma.leadActivity.findMany({
+        where: { OR: [{ id: parentId }, { parentId }] },
+        select: { createdBy: true },
+      });
+      await this.threads.notifyReply({
+        participantIds: thread.map((t) => t.createdBy),
+        actor: user,
+        where: `lead "${lead.name}"`,
+        body: dto.summary,
+        resourceType: "lead",
+        resourceId: leadId,
+      });
+    }
+    return { ...activity, creator: activity.creator ? maskUserRef(activity.creator, user) : null };
   }
 
   // Once a lead is sales-ready, it becomes a real ClientRequest and enters Tender's own

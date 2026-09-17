@@ -1,4 +1,12 @@
-import { IsArray, IsEmail, IsOptional, IsString } from "class-validator";
+import {
+  IsArray,
+  IsEmail,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  ValidateIf,
+} from "class-validator";
 import type { AppRole } from "@prisma/client";
 
 export class CreateUserDto {
@@ -19,4 +27,16 @@ export class CreateUserDto {
 
   @IsArray()
   roles!: AppRole[];
+
+  @IsOptional()
+  @ValidateIf((_, v) => v !== "" && v !== null)
+  @Matches(/^\+?[\d\s()-]{9,20}$/, {
+    message: "Enter a phone number like 0712 345 678 or +254 712 345 678",
+  })
+  phone?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  jobTitle?: string | null;
 }

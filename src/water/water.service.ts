@@ -3,6 +3,7 @@ import type { WaterMeterType, WaterVendingSystem } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { maybePaginate, type PaginationQueryDto } from "../common/pagination";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
+import { maskUserRef } from "../common/mask-user-ref";
 import type { CreateZoneDto } from "./dto/create-zone.dto";
 import type { UpdateZoneDto } from "./dto/update-zone.dto";
 import type { CreateCustomerDto } from "./dto/create-customer.dto";
@@ -12,6 +13,64 @@ import type { UpdateMeterDto } from "./dto/update-meter.dto";
 import type { CreateReadingDto } from "./dto/create-reading.dto";
 import type { UpdateReadingDto } from "./dto/update-reading.dto";
 import type { CreateUsageUploadDto } from "./dto/create-usage-upload.dto";
+import { WATER_METER_TYPES, WATER_VENDING_SYSTEMS } from "./dto/create-meter.dto";
+import { endOfDay } from "../common/date-range";
+
+// undefined = leave unchanged; null or blank = clear; otherwise the trimmed value.
+function nullableText(value: string | null | undefined): string | null | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function requiredText(value: string, label: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new BadRequestException(`${label} is required`);
+  return trimmed;
+}
+
+function searchTerm(q: string | undefined): string | undefined {
+  return q?.trim() || undefined;
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function joinWithAnd(items: string[]): string {
+  return items.length <= 1
+    ? items.join("")
+    : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+export function parseEnumParam<T extends string>(
+  value: string | undefined,
+  allowed: readonly T[],
+  label: string,
+): T | undefined {
+  if (!value) return undefined;
+  if (!allowed.includes(value as T)) throw new BadRequestException(`Unknown ${label}: ${value}`);
+  return value as T;
+}
+
+export const parseMeterTypeParam = (v?: string) =>
+  parseEnumParam(v, WATER_METER_TYPES, "meter type");
+export const parseVendingSystemParam = (v?: string) =>
+  parseEnumParam(v, WATER_VENDING_SYSTEMS, "vending system");
+export const parseMeterStatusParam = (v?: string) =>
+  parseEnumParam(v, ["active", "inactive"] as const, "meter status");
+
+type MeterStatusCounts = Record<WaterMeterType, { active: number; inactive: number }>;
+
+// A date-only upper bound ("2026-09-15") includes that whole day.
+function parseDateParam(value: string | undefined, label: string, endOfDay = false) {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) throw new BadRequestException(`${label} is not a valid date`);
+  if (endOfDay && /^\d{4}-\d{2}-\d{2}$/.test(raw)) return new Date(date.getTime() + 86_399_999);
+  return date;
+}
 
 function monthRange(month?: string): { start: Date; end: Date } {
   const now = new Date();
@@ -58,18 +117,33 @@ export class WaterService {
 
   /* ---------- Zones (self-nesting — a zone can sit inside another zone) ---------- */
 
-  listZones(pagination: PaginationQueryDto = {}) {
-    return maybePaginate(
-      this.prisma.waterZone,
-      {
-        include: {
-          parent: { select: { id: true, name: true } },
-          _count: { select: { children: true, meters: true, customers: true } },
+  async listZones(filters: { q?: string } = {}, pagination: PaginationQueryDto = {}) {
+    const q = searchTerm(filters.q);
+    const [result, activeByZone] = await Promise.all([
+      maybePaginate(
+        this.prisma.waterZone,
+        {
+          where: q ? { name: { contains: q } } : undefined,
+          include: {
+            parent: { select: { id: true, name: true } },
+            _count: { select: { children: true, meters: true, customers: true } },
+          },
+          orderBy: { name: "asc" },
         },
-        orderBy: { name: "asc" },
-      },
-      pagination,
-    );
+        pagination,
+      ),
+      this.prisma.waterMeter.groupBy({
+        by: ["zoneId"],
+        where: { isActive: true, zoneId: { not: null } },
+        _count: { _all: true },
+      }),
+    ]);
+    const active = new Map(activeByZone.map((r) => [r.zoneId, r._count._all]));
+    const withActive = (rows: { id: string }[]) =>
+      rows.map((z) => ({ ...z, activeMeterCount: active.get(z.id) ?? 0 }));
+    return Array.isArray(result)
+      ? withActive(result)
+      : { ...result, data: withActive(result.data as { id: string }[]) };
   }
 
   listAllZones() {
@@ -79,26 +153,58 @@ export class WaterService {
     });
   }
 
-  createZone(dto: CreateZoneDto) {
-    return this.prisma.waterZone.create({
-      data: { name: dto.name, parentZoneId: dto.parentZoneId },
-    });
+  async createZone(dto: CreateZoneDto) {
+    const name = requiredText(dto.name, "Zone name");
+    const parentZoneId = dto.parentZoneId || null;
+    if (parentZoneId) await this.assertZoneExists(parentZoneId, "Parent zone");
+    await this.assertZoneNameAvailable(name, parentZoneId);
+    return this.prisma.waterZone.create({ data: { name, parentZoneId } });
   }
 
   async updateZone(id: string, dto: UpdateZoneDto) {
-    await this.prisma.waterZone.findUniqueOrThrow({ where: { id } });
-    if (dto.parentZoneId) {
-      if (dto.parentZoneId === id) {
+    const zone = await this.prisma.waterZone.findUniqueOrThrow({ where: { id } });
+    const name = dto.name === undefined ? zone.name : requiredText(dto.name, "Zone name");
+    const parentZoneId =
+      dto.parentZoneId === undefined ? zone.parentZoneId : dto.parentZoneId || null;
+    if (parentZoneId && parentZoneId !== zone.parentZoneId) {
+      if (parentZoneId === id) {
         throw new BadRequestException("A zone can't be its own parent");
       }
-      if (await this.isDescendant(dto.parentZoneId, id)) {
+      await this.assertZoneExists(parentZoneId, "Parent zone");
+      if (await this.isDescendant(parentZoneId, id)) {
         throw new BadRequestException("A zone can't be moved inside one of its own sub-zones");
       }
     }
-    return this.prisma.waterZone.update({
-      where: { id },
-      data: { name: dto.name, parentZoneId: dto.parentZoneId },
+    if (name !== zone.name || parentZoneId !== zone.parentZoneId) {
+      await this.assertZoneNameAvailable(name, parentZoneId, id);
+    }
+    return this.prisma.waterZone.update({ where: { id }, data: { name, parentZoneId } });
+  }
+
+  private async assertZoneExists(zoneId: string, label = "Zone") {
+    const found = await this.prisma.waterZone.findUnique({
+      where: { id: zoneId },
+      select: { id: true },
     });
+    if (!found) throw new BadRequestException(`${label} not found — it may have been deleted.`);
+  }
+
+  private async assertZoneNameAvailable(
+    name: string,
+    parentZoneId: string | null,
+    exceptId?: string,
+  ) {
+    const clash = await this.prisma.waterZone.findFirst({
+      where: { name, parentZoneId, ...(exceptId && { NOT: { id: exceptId } }) },
+      select: { id: true },
+    });
+    if (clash) {
+      throw new BadRequestException(
+        parentZoneId
+          ? `A sub-zone named "${name}" already exists in that zone.`
+          : `A top-level zone named "${name}" already exists.`,
+      );
+    }
   }
 
   private async isDescendant(candidateId: string, ancestorId: string): Promise<boolean> {
@@ -120,12 +226,12 @@ export class WaterService {
       include: { _count: { select: { children: true, meters: true, customers: true } } },
     });
     const blockers: string[] = [];
-    if (zone._count.children > 0) blockers.push(`${zone._count.children} sub-zone(s)`);
-    if (zone._count.meters > 0) blockers.push(`${zone._count.meters} meter(s)`);
-    if (zone._count.customers > 0) blockers.push(`${zone._count.customers} customer(s)`);
+    if (zone._count.children > 0) blockers.push(plural(zone._count.children, "sub-zone"));
+    if (zone._count.meters > 0) blockers.push(plural(zone._count.meters, "meter"));
+    if (zone._count.customers > 0) blockers.push(plural(zone._count.customers, "customer"));
     if (blockers.length > 0) {
       throw new BadRequestException(
-        `Can't delete this zone — it still has ${blockers.join(" and ")} assigned to it.`,
+        `Can't delete zone "${zone.name}" — it still has ${joinWithAnd(blockers)}. Move or delete them first.`,
       );
     }
     return this.prisma.waterZone.delete({ where: { id } });
@@ -133,13 +239,24 @@ export class WaterService {
 
   /* ---------- Customers ---------- */
 
-  findAllCustomers(filters: { zoneId?: string; q?: string }, pagination: PaginationQueryDto = {}) {
+  async findAllCustomers(
+    filters: { zoneId?: string; q?: string },
+    pagination: PaginationQueryDto = {},
+  ) {
+    const q = searchTerm(filters.q);
+    const zoneIds = filters.zoneId ? await this.zoneAndDescendantIds(filters.zoneId) : undefined;
     return maybePaginate(
       this.prisma.waterCustomer,
       {
         where: {
-          ...(filters.zoneId && { zoneId: filters.zoneId }),
-          ...(filters.q && { name: { contains: filters.q } }),
+          ...(zoneIds && { zoneId: { in: zoneIds } }),
+          ...(q && {
+            OR: [
+              { name: { contains: q } },
+              { phone: { contains: q } },
+              { meters: { some: { meterNumber: { contains: q } } } },
+            ],
+          }),
         },
         include: { zone: true, meters: { select: { id: true, meterNumber: true } } },
         orderBy: { name: "asc" },
@@ -148,12 +265,14 @@ export class WaterService {
     );
   }
 
-  createCustomer(dto: CreateCustomerDto) {
+  async createCustomer(dto: CreateCustomerDto) {
+    const zoneId = dto.zoneId || null;
+    if (zoneId) await this.assertZoneExists(zoneId);
     return this.prisma.waterCustomer.create({
       data: {
-        name: dto.name,
-        zoneId: dto.zoneId,
-        phone: dto.phone,
+        name: requiredText(dto.name, "Customer name"),
+        zoneId,
+        phone: nullableText(dto.phone) ?? null,
         isActive: dto.isActive ?? true,
       },
     });
@@ -161,9 +280,20 @@ export class WaterService {
 
   async updateCustomer(id: string, dto: UpdateCustomerDto) {
     await this.prisma.waterCustomer.findUniqueOrThrow({ where: { id } });
-    return this.prisma.waterCustomer.update({ where: { id }, data: dto });
+    const zoneId = nullableText(dto.zoneId);
+    if (zoneId) await this.assertZoneExists(zoneId);
+    return this.prisma.waterCustomer.update({
+      where: { id },
+      data: {
+        ...(dto.name !== undefined && { name: requiredText(dto.name, "Customer name") }),
+        zoneId,
+        phone: nullableText(dto.phone),
+        isActive: dto.isActive,
+      },
+    });
   }
 
+  // Meters and usage records keep their data; the schema sets their customer link to null.
   async deleteCustomer(id: string) {
     await this.prisma.waterCustomer.findUniqueOrThrow({ where: { id } });
     return this.prisma.waterCustomer.delete({ where: { id } });
@@ -229,22 +359,36 @@ export class WaterService {
 
   /* ---------- Meters — the primary registration entry point ---------- */
 
-  findAllMeters(
+  async findAllMeters(
     filters: {
       meterType?: WaterMeterType;
       zoneId?: string;
       q?: string;
       vendingSystem?: WaterVendingSystem;
+      status?: "active" | "inactive";
     },
     pagination: PaginationQueryDto = {},
   ) {
+    const q = searchTerm(filters.q);
+    const meterZoneIds = filters.zoneId
+      ? await this.zoneAndDescendantIds(filters.zoneId)
+      : undefined;
     return maybePaginate(
       this.prisma.waterMeter,
       {
         where: {
+          ...(filters.status && { isActive: filters.status === "active" }),
           ...(filters.meterType && { meterType: filters.meterType }),
-          ...(filters.zoneId && { zoneId: filters.zoneId }),
-          ...(filters.q && { meterNumber: { contains: filters.q } }),
+          ...(meterZoneIds && { zoneId: { in: meterZoneIds } }),
+          ...(q && {
+            OR: [
+              { meterNumber: { contains: q } },
+              { name: { contains: q } },
+              { location: { contains: q } },
+              { plotNo: { contains: q } },
+              { customer: { name: { contains: q } } },
+            ],
+          }),
           ...(filters.vendingSystem && { vendingSystem: filters.vendingSystem }),
         },
         include: {
@@ -263,7 +407,7 @@ export class WaterService {
             take: 1,
             select: { readingDate: true },
           },
-          _count: { select: { usageRecords: true } },
+          _count: { select: { usageRecords: true, readings: true } },
         },
         orderBy: { meterNumber: "asc" },
       },
@@ -271,7 +415,7 @@ export class WaterService {
     );
   }
 
-  private async carryForwardCustomerId(replacesMeterId: string | undefined) {
+  private async carryForwardCustomerId(replacesMeterId: string | null | undefined) {
     if (!replacesMeterId) return undefined;
     const replaced = await this.prisma.waterMeter.findUnique({
       where: { id: replacesMeterId },
@@ -282,76 +426,150 @@ export class WaterService {
 
   async createMeter(dto: CreateMeterDto) {
     const meterType = dto.meterType ?? "household";
-    const customerId =
-      meterType === "household"
-        ? ((await this.resolveCustomerId(dto.customerId, dto.customerName, dto.zoneId)) ??
-          (await this.carryForwardCustomerId(dto.replacesMeterId)))
-        : undefined;
-    return this.prisma.waterMeter.create({
+    const isHousehold = meterType === "household";
+    const meterNumber = requiredText(dto.meterNumber, "Meter number");
+    const zoneId = dto.zoneId || null;
+    const replacesMeterId = dto.replacesMeterId || null;
+    await this.assertMeterNumberAvailable(meterNumber);
+    if (zoneId) await this.assertZoneExists(zoneId);
+    if (replacesMeterId) await this.assertReplaceable(replacesMeterId);
+    const customerId = isHousehold
+      ? ((await this.resolveCustomerId(dto.customerId, dto.customerName, zoneId)) ??
+        (await this.carryForwardCustomerId(replacesMeterId)))
+      : undefined;
+    const meter = await this.prisma.waterMeter.create({
       data: {
-        meterNumber: dto.meterNumber,
+        meterNumber,
         meterType,
-        name: meterType === "household" ? undefined : dto.name,
-        location: meterType === "household" ? undefined : dto.location,
+        name: isHousehold ? undefined : nullableText(dto.name),
+        location: isHousehold ? undefined : nullableText(dto.location),
         customerId,
-        plotNo: dto.plotNo,
+        plotNo: nullableText(dto.plotNo),
         installedAt: dto.installedAt ? new Date(dto.installedAt) : undefined,
-        zoneId: dto.zoneId,
+        zoneId,
         isActive: dto.isActive ?? true,
         vendingSystem: dto.vendingSystem,
-        replacesMeterId: dto.replacesMeterId,
+        replacesMeterId,
       },
     });
+    if (replacesMeterId) await this.retireMeter(replacesMeterId);
+    return meter;
   }
 
   async updateMeter(id: string, dto: UpdateMeterDto) {
     const existing = await this.prisma.waterMeter.findUniqueOrThrow({ where: { id } });
     const meterType = dto.meterType ?? existing.meterType;
-    const explicitCustomerId =
-      meterType === "household"
-        ? await this.resolveCustomerId(dto.customerId, dto.customerName, dto.zoneId)
-        : null;
+    const isHousehold = meterType === "household";
+    const typeChanged = meterType !== existing.meterType;
+
+    const meterNumber =
+      dto.meterNumber === undefined ? undefined : requiredText(dto.meterNumber, "Meter number");
+    if (meterNumber && meterNumber !== existing.meterNumber) {
+      await this.assertMeterNumberAvailable(meterNumber, id);
+    }
+    const zoneId = nullableText(dto.zoneId);
+    if (zoneId && zoneId !== existing.zoneId) await this.assertZoneExists(zoneId);
+    const replacesMeterId = nullableText(dto.replacesMeterId);
     const isNewReplacementLink =
-      dto.replacesMeterId !== undefined && dto.replacesMeterId !== existing.replacesMeterId;
-    const customerId =
-      explicitCustomerId ??
-      (isNewReplacementLink && !existing.customerId
-        ? await this.carryForwardCustomerId(dto.replacesMeterId)
-        : undefined);
-    return this.prisma.waterMeter.update({
+      replacesMeterId !== undefined && replacesMeterId !== existing.replacesMeterId;
+    if (replacesMeterId && isNewReplacementLink) await this.assertReplaceable(replacesMeterId, id);
+
+    // Main/bulk meters never carry a customer; household meters resolve or carry one forward.
+    let customerId: string | null | undefined;
+    if (!isHousehold) {
+      customerId = existing.customerId ? null : undefined;
+    } else if (dto.customerId === null) {
+      customerId = null;
+    } else {
+      customerId =
+        (await this.resolveCustomerId(
+          dto.customerId,
+          dto.customerName,
+          zoneId === undefined ? existing.zoneId : zoneId,
+        )) ??
+        (isNewReplacementLink && !existing.customerId
+          ? await this.carryForwardCustomerId(replacesMeterId)
+          : undefined);
+    }
+
+    const meter = await this.prisma.waterMeter.update({
       where: { id },
       data: {
-        meterNumber: dto.meterNumber,
+        meterNumber,
         meterType: dto.meterType,
-        ...(dto.name !== undefined && { name: dto.name }),
-        ...(dto.location !== undefined && { location: dto.location }),
-        ...(customerId !== undefined && { customerId }),
-        plotNo: dto.plotNo,
-        ...(dto.installedAt !== undefined && {
-          installedAt: dto.installedAt ? new Date(dto.installedAt) : null,
-        }),
-        zoneId: dto.zoneId,
+        name: isHousehold ? (typeChanged ? null : undefined) : nullableText(dto.name),
+        location: isHousehold ? (typeChanged ? null : undefined) : nullableText(dto.location),
+        customerId,
+        plotNo: !isHousehold && typeChanged ? null : nullableText(dto.plotNo),
+        installedAt:
+          dto.installedAt === undefined
+            ? undefined
+            : dto.installedAt
+              ? new Date(dto.installedAt)
+              : null,
+        zoneId,
         isActive: dto.isActive,
         vendingSystem: dto.vendingSystem,
-        ...(dto.replacesMeterId !== undefined && { replacesMeterId: dto.replacesMeterId }),
+        replacesMeterId,
       },
     });
+    if (replacesMeterId && isNewReplacementLink) await this.retireMeter(replacesMeterId);
+    return meter;
+  }
+
+  private retireMeter(id: string) {
+    return this.prisma.waterMeter.update({ where: { id }, data: { isActive: false } });
+  }
+
+  private async assertMeterNumberAvailable(meterNumber: string, exceptId?: string) {
+    const clash = await this.prisma.waterMeter.findUnique({
+      where: { meterNumber },
+      select: { id: true },
+    });
+    if (clash && clash.id !== exceptId) {
+      throw new BadRequestException(`Meter number "${meterNumber}" is already registered.`);
+    }
+  }
+
+  private async assertReplaceable(replacesMeterId: string, selfId?: string) {
+    if (replacesMeterId === selfId) throw new BadRequestException("A meter can't replace itself.");
+    const target = await this.prisma.waterMeter.findUnique({
+      where: { id: replacesMeterId },
+      select: { meterNumber: true, replacedByMeter: { select: { id: true, meterNumber: true } } },
+    });
+    if (!target) throw new BadRequestException("The meter being replaced was not found.");
+    if (target.replacedByMeter && target.replacedByMeter.id !== selfId) {
+      throw new BadRequestException(
+        `Meter ${target.meterNumber} is already marked as replaced by ${target.replacedByMeter.meterNumber}.`,
+      );
+    }
   }
 
   // Prefers an explicit customerId, else finds-or-creates by name, else leaves unset.
   private async resolveCustomerId(
-    customerId: string | undefined,
+    customerId: string | null | undefined,
     customerName: string | undefined,
-    zoneId: string | undefined,
+    zoneId: string | null | undefined,
   ): Promise<string | undefined> {
-    if (customerId) return customerId;
+    if (customerId) {
+      const found = await this.prisma.waterCustomer.findUnique({
+        where: { id: customerId },
+        select: { id: true },
+      });
+      if (!found) throw new BadRequestException("Customer not found — it may have been deleted.");
+      return customerId;
+    }
     if (customerName?.trim()) {
-      const customer = await this.findOrCreateCustomerByName(customerName.trim(), zoneId);
+      const customer = await this.findOrCreateCustomerByName(
+        customerName.trim(),
+        zoneId ?? undefined,
+      );
       return customer.id;
     }
     return undefined;
   }
 
+  // Readings and usage records cascade with the meter (schema onDelete: Cascade).
   async deleteMeter(id: string) {
     await this.prisma.waterMeter.findUniqueOrThrow({ where: { id } });
     return this.prisma.waterMeter.delete({ where: { id } });
@@ -453,24 +671,53 @@ export class WaterService {
 
   /* ---------- Meter readings (main / bulk) ---------- */
 
-  listReadings(
-    filters: { meterId?: string; from?: string; to?: string },
+  async listReadings(
+    filters: {
+      meterId?: string;
+      meterType?: WaterMeterType;
+      zoneId?: string;
+      q?: string;
+      from?: string;
+      to?: string;
+    },
     pagination: PaginationQueryDto = {},
   ) {
+    const from = parseDateParam(filters.from, "From date");
+    const to = parseDateParam(filters.to, "To date", true);
+    const q = searchTerm(filters.q);
+    const zoneIds = filters.zoneId ? await this.zoneAndDescendantIds(filters.zoneId) : undefined;
+    const meterWhere = {
+      ...(filters.meterType && { meterType: filters.meterType }),
+      ...(zoneIds && { zoneId: { in: zoneIds } }),
+      ...(q && {
+        OR: [
+          { meterNumber: { contains: q } },
+          { name: { contains: q } },
+          { location: { contains: q } },
+        ],
+      }),
+    };
     return maybePaginate(
       this.prisma.waterMeterReading,
       {
         where: {
           ...(filters.meterId && { meterId: filters.meterId }),
-          ...((filters.from || filters.to) && {
-            readingDate: {
-              ...(filters.from && { gte: new Date(filters.from) }),
-              ...(filters.to && { lte: new Date(filters.to) }),
-            },
+          ...(Object.keys(meterWhere).length > 0 && { meter: meterWhere }),
+          ...((from || to) && {
+            readingDate: { ...(from && { gte: from }), ...(to && { lte: to }) },
           }),
         },
         include: {
-          meter: { select: { id: true, meterNumber: true, meterType: true, zoneId: true } },
+          meter: {
+            select: {
+              id: true,
+              meterNumber: true,
+              meterType: true,
+              name: true,
+              zoneId: true,
+              zone: { select: { id: true, name: true } },
+            },
+          },
         },
         orderBy: { readingDate: "desc" },
       },
@@ -478,27 +725,48 @@ export class WaterService {
     );
   }
 
-  createReading(dto: CreateReadingDto, user: AuthenticatedUser) {
+  // Dial readings belong to main and bulk meters only.
+  private async assertReadingMeter(meterId: string) {
+    const meter = await this.prisma.waterMeter.findUnique({
+      where: { id: meterId },
+      select: { meterType: true, meterNumber: true, isActive: true },
+    });
+    if (!meter) throw new BadRequestException("Meter not found — it may have been deleted.");
+    if (meter.meterType === "household") {
+      throw new BadRequestException(
+        `Meter ${meter.meterNumber} is a household meter — readings are only logged for main and bulk meters.`,
+      );
+    }
+    if (!meter.isActive) {
+      throw new BadRequestException(
+        `Meter ${meter.meterNumber} is inactive (not in use). Switch it back to Active to record readings.`,
+      );
+    }
+  }
+
+  async createReading(dto: CreateReadingDto, user: AuthenticatedUser) {
+    await this.assertReadingMeter(dto.meterId);
     return this.prisma.waterMeterReading.create({
       data: {
         meterId: dto.meterId,
         readingDate: new Date(dto.readingDate),
         value: dto.value,
-        notes: dto.notes,
+        notes: nullableText(dto.notes),
         createdBy: user.id,
       },
     });
   }
 
   async updateReading(id: string, dto: UpdateReadingDto) {
-    await this.prisma.waterMeterReading.findUniqueOrThrow({ where: { id } });
+    const existing = await this.prisma.waterMeterReading.findUniqueOrThrow({ where: { id } });
+    if (dto.meterId && dto.meterId !== existing.meterId) await this.assertReadingMeter(dto.meterId);
     return this.prisma.waterMeterReading.update({
       where: { id },
       data: {
         meterId: dto.meterId,
         readingDate: dto.readingDate ? new Date(dto.readingDate) : undefined,
         value: dto.value,
-        notes: dto.notes,
+        notes: nullableText(dto.notes),
       },
     });
   }
@@ -510,18 +778,70 @@ export class WaterService {
 
   /* ---------- Usage uploads & records ---------- */
 
-  listUploads(pagination: PaginationQueryDto = {}) {
-    return maybePaginate(
+  // `month` (YYYY-MM) matches uploads holding records dated that month, or uploaded that month.
+  async listUploads(
+    viewer: AuthenticatedUser,
+    filters: { q?: string; month?: string } = {},
+    pagination: PaginationQueryDto = {},
+  ) {
+    const q = searchTerm(filters.q);
+    const month = filters.month?.trim();
+    if (month && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      throw new BadRequestException("Month must look like YYYY-MM");
+    }
+    const range = month ? monthRange(month) : undefined;
+    const result = await maybePaginate(
       this.prisma.waterUsageUpload,
       {
+        where: {
+          ...(q && { fileName: { contains: q } }),
+          ...(range && {
+            OR: [
+              { records: { some: { recordedAt: { gte: range.start, lt: range.end } } } },
+              { createdAt: { gte: range.start, lt: range.end } },
+            ],
+          }),
+        },
         include: {
-          uploader: { select: { id: true, fullName: true, email: true } },
+          uploader: {
+            select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
+          },
           _count: { select: { records: true } },
         },
         orderBy: { createdAt: "desc" },
       },
       pagination,
     );
+
+    const rows = Array.isArray(result) ? result : result.data;
+    const periods =
+      rows.length > 0
+        ? await this.prisma.waterUsageRecord.groupBy({
+            by: ["uploadId"],
+            where: { uploadId: { in: rows.map((r) => r.id) } },
+            _min: { recordedAt: true },
+            _max: { recordedAt: true },
+          })
+        : [];
+    const periodByUpload = new Map(periods.map((p) => [p.uploadId, p]));
+    type UploaderRef = Parameters<typeof maskUserRef>[0] | null;
+    const withPeriod = (rows as ((typeof rows)[number] & { uploader: UploaderRef })[]).map((r) => ({
+      ...r,
+      uploader: r.uploader ? maskUserRef(r.uploader, viewer) : null,
+      periodStart: periodByUpload.get(r.id)?._min.recordedAt ?? null,
+      periodEnd: periodByUpload.get(r.id)?._max.recordedAt ?? null,
+    }));
+    return Array.isArray(result) ? withPeriod : { ...result, data: withPeriod };
+  }
+
+  // Removes the upload and the usage records it imported; auto-registered meters/customers stay.
+  async deleteUpload(id: string) {
+    await this.prisma.waterUsageUpload.findUniqueOrThrow({ where: { id } });
+    const [records] = await this.prisma.$transaction([
+      this.prisma.waterUsageRecord.deleteMany({ where: { uploadId: id } }),
+      this.prisma.waterUsageUpload.delete({ where: { id } }),
+    ]);
+    return { id, recordsDeleted: records.count };
   }
 
   async createUpload(dto: CreateUsageUploadDto, user: AuthenticatedUser) {
@@ -531,8 +851,13 @@ export class WaterService {
 
     let imported = 0;
     let duplicates = 0;
+    const inactiveMeters = new Set<string>();
     for (const row of dto.rows) {
-      const meter = await this.findOrCreateMeterWithCustomer(row.meterNumber, row.customerName);
+      const meter = await this.findOrCreateMeterWithCustomer(
+        row.meterNumber,
+        row.customerName,
+        dto.vendingSystem,
+      );
       const recordedAt = new Date(row.recordedAt);
 
       const duplicate = await this.prisma.waterUsageRecord.findFirst({
@@ -561,6 +886,7 @@ export class WaterService {
           uploadId: upload.id,
         },
       });
+      if (!meter.isActive) inactiveMeters.add(meter.meterNumber);
       imported++;
     }
 
@@ -574,16 +900,26 @@ export class WaterService {
         include: { _count: { select: { records: true } } },
       })),
       duplicatesSkipped: duplicates,
+      inactiveMeterNumbers: [...inactiveMeters],
     };
   }
 
-  private async findOrCreateMeterWithCustomer(meterNumber: string, customerName: string) {
+  // mPaya payer names vary per payment, so mPaya meters get no customer record from uploads.
+  private async findOrCreateMeterWithCustomer(
+    meterNumber: string,
+    customerName: string,
+    vendingSystem: "amsol" | "mpaya" = "amsol",
+  ) {
     const existing = await this.prisma.waterMeter.findUnique({ where: { meterNumber } });
     if (existing) return existing;
-
+    if (vendingSystem === "mpaya") {
+      return this.prisma.waterMeter.create({
+        data: { meterNumber, meterType: "household", vendingSystem },
+      });
+    }
     const customer = await this.findOrCreateCustomerByName(customerName);
     return this.prisma.waterMeter.create({
-      data: { meterNumber, meterType: "household", customerId: customer.id },
+      data: { meterNumber, meterType: "household", vendingSystem, customerId: customer.id },
     });
   }
 
@@ -679,12 +1015,27 @@ export class WaterService {
   }
 
   private async mainMeterUsage(name: string, start: Date, end: Date): Promise<number> {
-    const meter = await this.prisma.waterMeter.findFirst({
+    const meters = await this.prisma.waterMeter.findMany({
       where: { meterType: "main", name },
       select: { id: true },
     });
-    if (!meter) return 0;
-    return this.meterUsageInPeriod(meter.id, start, end);
+    const usages = await Promise.all(meters.map((m) => this.meterUsageInPeriod(m.id, start, end)));
+    return usages.reduce((sum, v) => sum + v, 0);
+  }
+
+  private async meterStatusCounts(zoneIds?: string[]): Promise<MeterStatusCounts> {
+    const rows = await this.prisma.waterMeter.groupBy({
+      by: ["meterType", "isActive"],
+      where: zoneIds ? { zoneId: { in: zoneIds } } : undefined,
+      _count: { _all: true },
+    });
+    const counts: MeterStatusCounts = {
+      main: { active: 0, inactive: 0 },
+      bulk: { active: 0, inactive: 0 },
+      household: { active: 0, inactive: 0 },
+    };
+    for (const r of rows) counts[r.meterType][r.isActive ? "active" : "inactive"] = r._count._all;
+    return counts;
   }
 
   private async zoneLossBreakdown(start: Date, end: Date) {
@@ -761,7 +1112,7 @@ export class WaterService {
 
     const [
       activeHouseholds,
-      activeMeters,
+      meterStatus,
       hhAgg,
       hhPrevAgg,
       boreholeToTankTotal,
@@ -772,9 +1123,7 @@ export class WaterService {
       this.prisma.waterCustomer.count({
         where: { isActive: true, ...(zoneIds && { zoneId: { in: zoneIds } }) },
       }),
-      this.prisma.waterMeter.count({
-        where: { isActive: true, ...(zoneIds && { zoneId: { in: zoneIds } }) },
-      }),
+      this.meterStatusCounts(zoneIds),
       this.prisma.waterUsageRecord.aggregate({
         where: { recordedAt: { gte: start, lt: end }, ...hhWhere },
         _sum: { unitsSold: true, amountPaid: true },
@@ -789,6 +1138,9 @@ export class WaterService {
       this.zoneLossBreakdown(start, end),
     ]);
 
+    const statusTotals = Object.values(meterStatus);
+    const activeMeters = statusTotals.reduce((sum, c) => sum + c.active, 0);
+    const inactiveMeters = statusTotals.reduce((sum, c) => sum + c.inactive, 0);
     const unitsSold = Number(hhAgg._sum.unitsSold ?? 0);
     const unitsSoldPrev = Number(hhPrevAgg._sum.unitsSold ?? 0);
     const revenue = Number(hhAgg._sum.amountPaid ?? 0);
@@ -818,6 +1170,8 @@ export class WaterService {
       month: filters.month ?? shiftMonth(undefined, 0),
       activeHouseholds,
       activeMeters,
+      inactiveMeters,
+      meterStatus,
       unitsSold,
       unitsSoldChangePct: unitsChangePct,
       revenue,
@@ -932,6 +1286,11 @@ export class WaterService {
         `Metered household consumption ${dashboard.unitsSoldChangePct >= 0 ? "grew" : "fell"} ${Math.abs(dashboard.unitsSoldChangePct).toFixed(1)}% month-on-month.`,
       );
     }
+    if (dashboard.inactiveMeters > 0) {
+      insights.push(
+        `${dashboard.inactiveMeters} meter${dashboard.inactiveMeters === 1 ? " is" : "s are"} inactive (not in use) and ${dashboard.activeMeters} active. Inactive meters are left out of active counts; their past readings and sales still count in the months they happened.`,
+      );
+    }
     if (prevDashboard.nrwOverallPct !== null && dashboard.nrwOverallPct !== null) {
       const delta = dashboard.nrwOverallPct - prevDashboard.nrwOverallPct;
       if (Math.abs(delta) >= 1) {
@@ -971,7 +1330,10 @@ export class WaterService {
             select: { value: true },
           }),
           this.prisma.waterMeterReading.findMany({
-            where: { meterId: m.id, readingDate: { gte: filters.dateFrom, lte: filters.dateTo } },
+            where: {
+              meterId: m.id,
+              readingDate: { gte: filters.dateFrom, lte: endOfDay(filters.dateTo) },
+            },
             orderBy: { readingDate: "asc" },
             select: { readingDate: true, value: true },
           }),
@@ -1015,7 +1377,7 @@ export class WaterService {
         ...((filters.dateFrom || filters.dateTo) && {
           readingDate: {
             ...(filters.dateFrom && { gte: filters.dateFrom }),
-            ...(filters.dateTo && { lte: filters.dateTo }),
+            ...(filters.dateTo && { lte: endOfDay(filters.dateTo) }),
           },
         }),
       },

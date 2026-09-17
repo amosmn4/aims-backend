@@ -1,8 +1,11 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put } from "@nestjs/common";
 import { ItSystemsService } from "./it-systems.service";
+import { RecordUptimeDto } from "./dto/uptime.dto";
 import { CreateItSystemDto } from "./dto/create-it-system.dto";
 import { UpdateItSystemDto } from "./dto/update-it-system.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
+import { CurrentUser } from "../../auth/decorators/current-user.decorator";
+import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 
 @Controller("it-systems")
 export class ItSystemsController {
@@ -36,5 +39,27 @@ export class ItSystemsController {
   @Roles("it")
   remove(@Param("id") id: string) {
     return this.itSystemsService.remove(id);
+  }
+
+  @Get(":id/uptime")
+  @Roles()
+  listUptime(@Param("id") id: string) {
+    return this.itSystemsService.listUptime(id);
+  }
+
+  @Put(":id/uptime")
+  @Roles("it")
+  recordUptime(
+    @Param("id") id: string,
+    @Body() dto: RecordUptimeDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.itSystemsService.recordUptime(id, dto, user.id);
+  }
+
+  @Delete("uptime/:recordId")
+  @Roles("it")
+  removeUptime(@Param("recordId") recordId: string) {
+    return this.itSystemsService.removeUptime(recordId);
   }
 }

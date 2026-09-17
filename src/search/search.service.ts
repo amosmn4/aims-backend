@@ -70,6 +70,7 @@ async function clientScope(
   if (unrestricted) return {};
   return {
     OR: [
+      { department: { code: { in: deptCodes! } } },
       { contracts: { some: { department: { code: { in: deptCodes! } } } } },
       { tenders: { some: { department: { code: { in: deptCodes! } } } } },
       { clientRequests: { some: { department: { code: { in: deptCodes! } } } } },
@@ -133,12 +134,20 @@ export class SearchService {
       documents,
     ] = await Promise.all([
       this.prisma.lead.findMany({
-        where: { name: { contains: query } },
+        where: { OR: [{ name: { contains: query } }, { company: { contains: query } }] },
         take: TAKE_PER_TYPE,
         select: { id: true, name: true, company: true },
       }),
       this.prisma.clientRequest.findMany({
-        where: { title: { contains: query }, ...reqScope },
+        where: {
+          OR: [
+            { title: { contains: query } },
+            { referenceNumber: { contains: query } },
+            { prospectClientName: { contains: query } },
+            { client: { name: { contains: query } } },
+          ],
+          ...reqScope,
+        },
         take: TAKE_PER_TYPE,
         select: {
           id: true,
@@ -148,14 +157,27 @@ export class SearchService {
         },
       }),
       this.prisma.tender.findMany({
-        where: { title: { contains: query }, ...tndScope },
+        where: {
+          OR: [
+            { title: { contains: query } },
+            { referenceNumber: { contains: query } },
+            { prospectClientName: { contains: query } },
+            { client: { name: { contains: query } } },
+          ],
+          ...tndScope,
+        },
         take: TAKE_PER_TYPE,
         select: { id: true, title: true, referenceNumber: true },
       }),
       this.prisma.project.findMany({
-        where: { name: { contains: query }, ...projScope },
+        where: {
+          AND: [
+            { OR: [{ name: { contains: query } }, { client: { name: { contains: query } } }] },
+            projScope,
+          ],
+        },
         take: TAKE_PER_TYPE,
-        select: { id: true, name: true },
+        select: { id: true, name: true, client: { select: { name: true } } },
       }),
       this.prisma.contract.findMany({
         where: {
@@ -166,7 +188,18 @@ export class SearchService {
         select: { id: true, title: true, contractNumber: true },
       }),
       this.prisma.client.findMany({
-        where: { name: { contains: query }, ...cliScope },
+        where: {
+          AND: [
+            {
+              OR: [
+                { name: { contains: query } },
+                { code: { contains: query } },
+                { contactEmail: { contains: query } },
+              ],
+            },
+            cliScope ?? {},
+          ],
+        },
         take: TAKE_PER_TYPE,
         select: { id: true, name: true },
       }),
@@ -192,7 +225,12 @@ export class SearchService {
       }),
       canSeeFinance(viewer)
         ? this.prisma.invoice.findMany({
-            where: { invoiceNumber: { contains: query } },
+            where: {
+              OR: [
+                { invoiceNumber: { contains: query } },
+                { client: { name: { contains: query } } },
+              ],
+            },
             take: TAKE_PER_TYPE,
             select: { id: true, invoiceNumber: true, client: { select: { name: true } } },
           })
@@ -228,7 +266,7 @@ export class SearchService {
         type: "project",
         id: p.id,
         title: p.name,
-        subtitle: "Project",
+        subtitle: p.client?.name ? `Project · ${p.client.name}` : "Project",
         to: `/projects/${p.id}`,
       })),
       ...contracts.map((c): SearchResult => ({
@@ -243,7 +281,7 @@ export class SearchService {
         id: c.id,
         title: c.name,
         subtitle: "Client",
-        to: "/clients",
+        to: `/clients?q=${encodeURIComponent(c.name)}`,
       })),
       ...posts.map((p): SearchResult => ({
         type: "blog_post",
@@ -278,7 +316,7 @@ export class SearchService {
         id: i.id,
         title: i.invoiceNumber,
         subtitle: i.client?.name ?? "Invoice",
-        to: "/finance/invoices",
+        to: `/finance/invoices?q=${encodeURIComponent(i.invoiceNumber)}`,
       })),
       ...documents.map((d): SearchResult => ({
         type: "document",

@@ -4,6 +4,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import type { CreateReminderDto } from "./dto/create-reminder.dto";
 import type { UpdateNotificationPreferencesDto } from "./dto/update-notification-preferences.dto";
+import { NotificationChannelsService } from "./channels/notification-channels.service";
 
 const DEFAULT_PREFERENCES = {
   taskUpdates: true,
@@ -31,7 +32,7 @@ export interface SweepNotification {
 type NotificationCategory =
   "taskUpdates" | "projectUpdates" | "financeAlerts" | "tenderAlerts" | "remindersMeetings";
 
-const CATEGORY_BY_TYPE: Record<NotificationType, NotificationCategory> = {
+const CATEGORY_BY_TYPE: Record<NotificationType, NotificationCategory | null> = {
   task_due: "taskUpdates",
   task_assigned: "taskUpdates",
   task_comment: "taskUpdates",
@@ -44,11 +45,20 @@ const CATEGORY_BY_TYPE: Record<NotificationType, NotificationCategory> = {
   tender_deadline: "tenderAlerts",
   meeting: "remindersMeetings",
   reminder: "remindersMeetings",
+  report_submitted: null,
+  report_reviewed: null,
+  report_comment: null,
+  report_due: null,
+  comment_reply: "taskUpdates",
+  ticket_update: "taskUpdates",
 };
 
 @Injectable()
 export class NotificationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly channels: NotificationChannelsService,
+  ) {}
 
   findForUser(userId: string) {
     return this.prisma.notification.findMany({
@@ -112,14 +122,20 @@ export class NotificationsService {
   // back to false, so a notification the user already dismissed stays dismissed even though
   // the underlying condition (e.g. a contract still nearing expiry) is still true.
   async upsertSwept(n: SweepNotification) {
-    const data: Prisma.NotificationUpdateInput = {
-      title: n.title,
-      body: n.body,
-      severity: n.severity,
-    };
-    await this.prisma.notification.upsert({
-      where: { userId_dedupeKey: { userId: n.userId, dedupeKey: n.dedupeKey } },
-      create: {
+    if (!(await this.wants(n.userId, n.type))) return;
+    const where = { userId_dedupeKey: { userId: n.userId, dedupeKey: n.dedupeKey } };
+    const existing = await this.prisma.notification.findUnique({ where, select: { id: true } });
+    if (existing) {
+      const data: Prisma.NotificationUpdateInput = {
+        title: n.title,
+        body: n.body,
+        severity: n.severity,
+      };
+      await this.prisma.notification.update({ where, data });
+      return;
+    }
+    await this.prisma.notification.create({
+      data: {
         userId: n.userId,
         type: n.type,
         severity: n.severity,
@@ -129,8 +145,16 @@ export class NotificationsService {
         resourceId: n.resourceId,
         dedupeKey: n.dedupeKey,
       },
-      update: data,
     });
+    void this.channels.deliver(n.userId, n.type, n.title, n.body);
+  }
+
+  /** No preference row means every category is on; only an explicit false turns one off. */
+  private async wants(userId: string, type: NotificationType) {
+    const category = CATEGORY_BY_TYPE[type];
+    if (!category) return true;
+    const pref = await this.prisma.notificationPreference.findUnique({ where: { userId } });
+    return !pref || pref[category] !== false;
   }
 
   // Sweep-generated notifications become moot once their condition resolves (task completed,
@@ -156,12 +180,7 @@ export class NotificationsService {
     resourceId?: string;
     createdBy?: string;
   }) {
-    const category = CATEGORY_BY_TYPE[params.type];
-    const pref = await this.prisma.notificationPreference.findUnique({
-      where: { userId: params.userId },
-    });
-    // No row yet = every category defaults to on — only an explicit `false` skips.
-    if (pref && pref[category] === false) return;
+    if (!(await this.wants(params.userId, params.type))) return;
 
     await this.prisma.notification.create({
       data: {
@@ -175,6 +194,7 @@ export class NotificationsService {
         createdBy: params.createdBy,
       },
     });
+    void this.channels.deliver(params.userId, params.type, params.title, params.body);
   }
 
   // No row yet = every category defaults on, matching `notify()`'s own fallback — a user who's

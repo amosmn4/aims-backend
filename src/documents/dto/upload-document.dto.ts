@@ -4,9 +4,11 @@ const RESOURCE_TYPES = [
   "project",
   "task",
   "finance_report",
+  "department_report",
   "tender",
   "client_request",
   "tender_document_library",
+  "department",
 ] as const;
 
 export class UploadDocumentDto {

@@ -11,11 +11,20 @@ export class OfficesService {
     return this.prisma.office.findMany({ orderBy: { name: "asc" } });
   }
 
-  create(dto: CreateOfficeDto) {
-    return this.prisma.office.create({ data: dto });
+  async create(dto: CreateOfficeDto) {
+    const office = await this.prisma.office.create({ data: dto });
+    if (dto.isHq)
+      await this.prisma.office.updateMany({
+        where: { id: { not: office.id } },
+        data: { isHq: false },
+      });
+    return office;
   }
 
-  update(id: string, dto: UpdateOfficeDto) {
-    return this.prisma.office.update({ where: { id }, data: dto });
+  async update(id: string, dto: UpdateOfficeDto) {
+    const office = await this.prisma.office.update({ where: { id }, data: dto });
+    if (dto.isHq)
+      await this.prisma.office.updateMany({ where: { id: { not: id } }, data: { isHq: false } });
+    return office;
   }
 }

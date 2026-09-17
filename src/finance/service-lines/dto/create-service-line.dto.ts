@@ -1,4 +1,4 @@
-import { IsBoolean, IsInt, IsOptional, IsString } from "class-validator";
+import { IsBoolean, IsInt, IsOptional, IsString, IsNumber, Min } from "class-validator";
 
 export class CreateServiceLineDto {
   @IsString()
@@ -17,4 +17,10 @@ export class CreateServiceLineDto {
   @IsOptional()
   @IsInt()
   sortOrder?: number;
+
+  // Monthly revenue target in the company currency; null clears it.
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  monthlyTarget?: number | null;
 }

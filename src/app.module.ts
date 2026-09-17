@@ -37,8 +37,13 @@ import { HrmsLicensesModule } from "./it/hrms-licenses/hrms-licenses.module";
 import { InventoryModule } from "./it/inventory/inventory.module";
 import { CampaignsModule } from "./marketing/campaigns/campaigns.module";
 import { CalendarModule } from "./calendar/calendar.module";
+import { ThreadsModule } from "./threads/threads.module";
+import { MyWorkModule } from "./my-work/my-work.module";
 import { WaterModule } from "./water/water.module";
 import { PermissionsModule } from "./permissions/permissions.module";
+import { ReportsModule } from "./reports/reports.module";
+import { ExpensesModule } from "./finance/expenses/expenses.module";
+import { CompanySettingsModule } from "./company-settings/company-settings.module";
 
 @Module({
   imports: [
@@ -79,7 +84,12 @@ import { PermissionsModule } from "./permissions/permissions.module";
     InventoryModule,
     CampaignsModule,
     CalendarModule,
+    ThreadsModule,
+    MyWorkModule,
     WaterModule,
+    ReportsModule,
+    ExpensesModule,
+    CompanySettingsModule,
     PermissionsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],

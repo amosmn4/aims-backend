@@ -2,6 +2,8 @@ import type { AppRole } from "@prisma/client";
 import type { PrismaService } from "../prisma/prisma.service";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import { isAdminOrCeo } from "./is-admin-or-ceo";
+import { roleGrantsDefault } from "./permission-resolution";
+import { userCan } from "./capabilities";
 
 const DEPARTMENT_ROLES: AppRole[] = ["finance", "hr", "it", "marketing", "tender", "operations"];
 
@@ -39,12 +41,13 @@ export async function viewerDepartmentCodes(
     .filter((dept) => {
       const override = overrideByDept.get(dept.id);
       if (override) return override === "grant";
-      if (viewer.roles.includes(dept.code as AppRole)) return true;
-      if (viewer.departmentId !== dept.id) return false;
-      if (viewer.roles.includes("department_head") || viewer.roles.includes("account_manager")) {
-        return true;
-      }
-      return viewer.roles.includes("general_staff");
+      return roleGrantsDefault(viewer, dept, "read");
     })
     .map((dept) => dept.code);
+}
+
+/** Finance bills every department's work, so people who raise invoices see all clients and contracts. */
+export async function billingViewerCodes(viewer: AuthenticatedUser, prisma: PrismaService) {
+  if (userCan(viewer, "raise_invoices")) return null;
+  return viewerDepartmentCodes(viewer, prisma);
 }

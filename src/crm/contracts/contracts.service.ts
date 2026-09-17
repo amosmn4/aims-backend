@@ -3,7 +3,7 @@ import type { ContractStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { StorageService } from "../../storage/storage.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
-import { viewerDepartmentCodes } from "../../common/department-scope";
+import { billingViewerCodes } from "../../common/department-scope";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateContractDto } from "./dto/create-contract.dto";
@@ -17,6 +17,8 @@ const KEY_PREFIX = "contracts";
 function serializeDocument<T extends { sizeBytes: bigint }>(doc: T) {
   return { ...doc, sizeBytes: Number(doc.sizeBytes) };
 }
+
+const EMPTY_MONEY = { invoicedTotal: 0, paidTotal: 0, outstandingTotal: 0, invoiceCount: 0 };
 
 @Injectable()
 export class ContractsService {
@@ -34,8 +36,8 @@ export class ContractsService {
     pagination: PaginationQueryDto = {},
     viewer: AuthenticatedUser,
   ) {
-    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
-    return maybePaginate(
+    const deptCodes = await billingViewerCodes(viewer, this.prisma);
+    const result = await maybePaginate(
       this.prisma.contract,
       {
         where: {
@@ -55,6 +57,30 @@ export class ContractsService {
       },
       pagination,
     );
+    const rows = (Array.isArray(result) ? result : result.data) as { id: string }[];
+    const money = await this.contractMoney(rows.map((r) => r.id));
+    const withMoney = rows.map((r) => ({ ...r, ...(money.get(r.id) ?? EMPTY_MONEY) }));
+    return Array.isArray(result) ? withMoney : { ...result, data: withMoney };
+  }
+
+  /** Invoiced (excluding void), paid and outstanding per contract. */
+  private async contractMoney(ids: string[]) {
+    const map = new Map<string, typeof EMPTY_MONEY>();
+    if (ids.length === 0) return map;
+    const invoices = await this.prisma.invoice.findMany({
+      where: { contractId: { in: ids }, NOT: { status: "void" } },
+      select: { contractId: true, total: true, payments: { select: { amount: true } } },
+    });
+    for (const inv of invoices) {
+      const row = map.get(inv.contractId!) ?? { ...EMPTY_MONEY };
+      const paid = inv.payments.reduce((s, p) => s + Number(p.amount), 0);
+      row.invoicedTotal += Number(inv.total);
+      row.paidTotal += paid;
+      row.outstandingTotal += Math.max(0, Number(inv.total) - paid);
+      row.invoiceCount += 1;
+      map.set(inv.contractId!, row);
+    }
+    return map;
   }
 
   // Aggregate totals across every contract matching the filters — independent of pagination —
@@ -64,7 +90,7 @@ export class ContractsService {
     filters: { departmentId?: string; clientId?: string; status?: ContractStatus; q?: string },
     viewer: AuthenticatedUser,
   ) {
-    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
+    const deptCodes = await billingViewerCodes(viewer, this.prisma);
     const where = {
       ...(filters.departmentId && { departmentId: filters.departmentId }),
       ...(filters.clientId && { clientId: filters.clientId }),
@@ -109,17 +135,18 @@ export class ContractsService {
         _count: { select: { invoices: true } },
       },
     });
-    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
+    const deptCodes = await billingViewerCodes(viewer, this.prisma);
     if (deptCodes && (!contract.department || !deptCodes.includes(contract.department.code))) {
       throw new NotFoundException("Contract not found");
     }
-    return { ...contract, documents: contract.documents.map(serializeDocument) };
+    const money = (await this.contractMoney([contract.id])).get(contract.id) ?? EMPTY_MONEY;
+    return { ...contract, ...money, documents: contract.documents.map(serializeDocument) };
   }
 
   private async assertContractDeptAccess(departmentId: string | null, user: AuthenticatedUser) {
     if (!departmentId) {
       if (user.roles.includes("system_admin") || user.roles.includes("ceo")) return;
-      throw new ForbiddenException("Only the CEO or System Administrator can manage this contract");
+      throw new ForbiddenException("Only the CEO can manage this contract");
     }
     const department = await this.prisma.department.findUniqueOrThrow({
       where: { id: departmentId },

@@ -144,17 +144,17 @@ export class ClientRequestsController {
   }
 
   @Delete(":id")
-  @Roles("system_admin")
-  remove(@Param("id") id: string) {
-    return this.requestsService.remove(id);
+  @Roles()
+  remove(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.requestsService.remove(id, user);
   }
 
   /* ---------- Access grants (share this request outside its own department) ---------- */
 
   @Get(":id/access-grants")
   @Roles()
-  listAccessGrants(@Param("id") id: string) {
-    return this.requestsService.listAccessGrants(id);
+  listAccessGrants(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.requestsService.listAccessGrants(id, user);
   }
 
   @Post(":id/access-grants")
@@ -178,7 +178,7 @@ export class ClientRequestsController {
   }
 
   @Post(":id/convert-to-project")
-  @Roles(...DEPT_WRITE_ROLES)
+  @Roles()
   convertToProject(
     @Param("id") id: string,
     @Body() dto: ConvertToProjectDto,
@@ -188,7 +188,7 @@ export class ClientRequestsController {
   }
 
   @Post(":id/convert-to-contract")
-  @Roles(...DEPT_WRITE_ROLES)
+  @Roles()
   convertToContract(
     @Param("id") id: string,
     @Body() dto: ConvertToContractDto,

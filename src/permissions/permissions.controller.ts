@@ -1,5 +1,7 @@
 import { Body, Controller, Get, Put, Query } from "@nestjs/common";
 import { PermissionsService } from "./permissions.service";
+import { RoleCapabilitiesService } from "./role-capabilities.service";
+import { SetRoleCapabilityDto } from "./dto/set-role-capability.dto";
 import { SetOverrideDto } from "./dto/set-override.dto";
 import { Roles } from "../auth/decorators/roles.decorator";
 import { CurrentUser } from "../auth/decorators/current-user.decorator";
@@ -10,7 +12,20 @@ import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 @Controller("permissions")
 @Roles()
 export class PermissionsController {
-  constructor(private readonly permissions: PermissionsService) {}
+  constructor(
+    private readonly permissions: PermissionsService,
+    private readonly roleCapabilities: RoleCapabilitiesService,
+  ) {}
+
+  @Get("roles")
+  listRoles() {
+    return this.roleCapabilities.list();
+  }
+
+  @Put("roles")
+  setRoleCapability(@Body() dto: SetRoleCapabilityDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.roleCapabilities.set(dto, user);
+  }
 
   @Get("capabilities")
   listCapabilities(

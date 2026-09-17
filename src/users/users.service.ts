@@ -1,9 +1,4 @@
-import {
-  ForbiddenException,
-  Injectable,
-  NotFoundException,
-  BadRequestException,
-} from "@nestjs/common";
+import { Injectable, NotFoundException, BadRequestException } from "@nestjs/common";
 import * as crypto from "crypto";
 import type { User } from "@prisma/client";
 import { ConfigService } from "@nestjs/config";
@@ -27,12 +22,6 @@ export class UsersService {
     private readonly config: ConfigService,
   ) {}
 
-  // System admin accounts are invisible in the Users & Roles admin UI, full stop — never shown
-  // in the list, never offered as a "grant role" option, not even to another system admin. The
-  // role is seeded/self-managed outside this screen; keeping it off the list entirely (rather
-  // than just hidden from non-admins) keeps the day-to-day admin UI free of the one account with
-  // unrestricted access. findAllLite() below enforces the same rule for the lightweight picker
-  // endpoint.
   async findAll(viewer: AuthenticatedUser, pagination: PaginationQueryDto = {}) {
     const result = await maybePaginate(
       this.prisma.user,
@@ -59,15 +48,15 @@ export class UsersService {
   }
 
   async create(dto: CreateUserDto, viewer: AuthenticatedUser) {
-    if (dto.roles.includes("system_admin") && !isSystemAdmin(viewer)) {
-      throw new ForbiddenException("Only a system administrator can grant the system_admin role");
-    }
+    this.assertAssignableRoles(dto.roles, viewer);
 
     const user = await this.prisma.user.create({
       data: {
         email: dto.email.toLowerCase(),
         passwordHash: null,
         fullName: dto.fullName,
+        phone: dto.phone?.trim() || null,
+        jobTitle: dto.jobTitle?.trim() || null,
         departmentId: dto.departmentId,
         officeId: dto.officeId,
         roles: { create: dto.roles.map((role) => ({ role })) },
@@ -98,6 +87,15 @@ export class UsersService {
     const user = await this.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundException("User not found");
     return this.issueSetupTokenAndEmail(user, "reset");
+  }
+
+  /** Emails a reset (or a first-time setup) link. Says nothing about whether the email exists. */
+  async requestPasswordReset(email: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { email: email.trim().toLowerCase() },
+    });
+    if (!user || !user.isActive) return;
+    await this.issueSetupTokenAndEmail(user, user.passwordHash === null ? "invite" : "reset");
   }
 
   async remove(id: string, viewer: AuthenticatedUser) {
@@ -157,11 +155,14 @@ export class UsersService {
 
   async update(id: string, dto: UpdateUserDto, viewer: AuthenticatedUser) {
     await this.assertTargetVisible(id, viewer);
-    if (dto.roles?.includes("system_admin") && !isSystemAdmin(viewer)) {
-      throw new ForbiddenException("Only a system administrator can grant the system_admin role");
-    }
+    if (dto.roles) this.assertAssignableRoles(dto.roles, viewer);
 
-    const { roles, ...profile } = dto;
+    const { roles, phone, jobTitle, ...fields } = dto;
+    const profile = {
+      ...fields,
+      ...(phone !== undefined && { phone: phone?.trim() || null }),
+      ...(jobTitle !== undefined && { jobTitle: jobTitle?.trim() || null }),
+    };
 
     if (roles) {
       await this.prisma.userRole.deleteMany({ where: { userId: id } });
@@ -177,8 +178,12 @@ export class UsersService {
     return rest;
   }
 
-  // A 404 (not 403) here — a system admin's record must appear not to exist at all to a
-  // non-admin caller, matching "never exposed" rather than merely "access denied".
+  private assertAssignableRoles(roles: string[], viewer: AuthenticatedUser) {
+    if (roles.includes("system_admin") && !isSystemAdmin(viewer)) {
+      throw new BadRequestException("One of the selected roles isn't valid");
+    }
+  }
+
   private async assertTargetVisible(id: string, viewer: AuthenticatedUser) {
     if (isSystemAdmin(viewer)) return;
     const target = await this.prisma.user.findUnique({ where: { id }, include: { roles: true } });
