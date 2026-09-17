@@ -19,5 +19,8 @@ build
 
 uploads/
 
-# Real customer data — never goes into git history. See prisma/seed-water.ts / README.md.
+# Real customer data — never goes into git history. Copy it to the server by hand; see README.md.
 meters csv.csv
+prisma/seed-data/
+payments_*.xlsx
+accounts_*.xlsx

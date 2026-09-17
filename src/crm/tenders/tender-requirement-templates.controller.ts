@@ -8,8 +8,6 @@ import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 
-const WRITE_ROLES = ["finance", "hr", "it", "marketing", "tender"] as const;
-
 @Controller("tender-requirement-templates")
 export class TenderRequirementTemplatesController {
   constructor(private readonly templatesService: TenderRequirementTemplatesService) {}
@@ -27,38 +25,50 @@ export class TenderRequirementTemplatesController {
   }
 
   @Post()
-  @Roles(...WRITE_ROLES)
+  @Roles()
   create(@Body() dto: CreateRequirementTemplateDto, @CurrentUser() user: AuthenticatedUser) {
-    return this.templatesService.create(dto, user.id);
+    return this.templatesService.create(dto, user);
   }
 
   @Patch(":id")
-  @Roles(...WRITE_ROLES)
-  update(@Param("id") id: string, @Body() dto: UpdateRequirementTemplateDto) {
-    return this.templatesService.update(id, dto);
+  @Roles()
+  update(
+    @Param("id") id: string,
+    @Body() dto: UpdateRequirementTemplateDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.templatesService.update(id, dto, user);
   }
 
   @Delete(":id")
-  @Roles(...WRITE_ROLES)
-  remove(@Param("id") id: string) {
-    return this.templatesService.remove(id);
+  @Roles()
+  remove(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.templatesService.remove(id, user);
   }
 
   @Post(":id/items")
-  @Roles(...WRITE_ROLES)
-  addItem(@Param("id") id: string, @Body() dto: CreateTemplateItemDto) {
-    return this.templatesService.addItem(id, dto);
+  @Roles()
+  addItem(
+    @Param("id") id: string,
+    @Body() dto: CreateTemplateItemDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.templatesService.addItem(id, dto, user);
   }
 
   @Patch("items/:itemId")
-  @Roles(...WRITE_ROLES)
-  updateItem(@Param("itemId") itemId: string, @Body() dto: UpdateTemplateItemDto) {
-    return this.templatesService.updateItem(itemId, dto);
+  @Roles()
+  updateItem(
+    @Param("itemId") itemId: string,
+    @Body() dto: UpdateTemplateItemDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.templatesService.updateItem(itemId, dto, user);
   }
 
   @Delete("items/:itemId")
-  @Roles(...WRITE_ROLES)
-  removeItem(@Param("itemId") itemId: string) {
-    return this.templatesService.removeItem(itemId);
+  @Roles()
+  removeItem(@Param("itemId") itemId: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.templatesService.removeItem(itemId, user);
   }
 }

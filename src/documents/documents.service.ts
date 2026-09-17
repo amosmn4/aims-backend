@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
+import { can } from "../common/permission-resolution";
 import type {
   Document,
   DocumentAccessGrant,
@@ -14,6 +15,8 @@ import { PrismaService } from "../prisma/prisma.service";
 import { StorageService } from "../storage/storage.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { assertDepartmentAccess } from "../common/assert-department-access";
+import { assertModuleWrite } from "../common/module-access";
+import { hasResourceGrant } from "../common/has-resource-grant";
 import { viewerDepartmentCodes } from "../common/department-scope";
 import type { Paginated } from "../common/pagination";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
@@ -102,7 +105,7 @@ export class DocumentsService {
         where: { id: resourceId },
         include: { department: true },
       });
-      assertDepartmentAccess(project.department, user);
+      await assertDepartmentAccess(project.department, user, this.prisma);
       return;
     }
 
@@ -112,24 +115,57 @@ export class DocumentsService {
         include: { project: { include: { department: true } } },
       });
       if (task.assigneeId === user.id) return;
-      assertDepartmentAccess(task.project.department, user);
+      await assertDepartmentAccess(task.project.department, user, this.prisma);
       return;
     }
 
     if (resourceType === "tender") {
-      const tender = await this.prisma.tender.findUniqueOrThrow({
-        where: { id: resourceId },
-        include: { department: true },
-      });
-      assertDepartmentAccess(tender.department, user);
+      await this.prisma.tender.findUniqueOrThrow({ where: { id: resourceId } });
+      if (await hasResourceGrant("tender", resourceId, user, "write", this.prisma)) return;
+      await assertModuleWrite(
+        "tender",
+        user,
+        this.prisma,
+        "Only the Tender team can manage tender documents",
+      );
       return;
     }
 
     // A shared, unattached catalog (see the schema's DocumentResourceType comment) — managing
     // it is Tender's call, since it exists to serve the bidding process, plus admin/CEO.
     if (resourceType === "tender_document_library") {
-      if (isAdminOrCeo(user) || user.roles.includes("tender")) return;
-      throw new ForbiddenException("Only Tender can manage the mandatory documents library");
+      await assertModuleWrite(
+        "tender",
+        user,
+        this.prisma,
+        "Only the Tender team can manage the mandatory documents library",
+      );
+      return;
+    }
+
+    if (resourceType === "department") {
+      const department = await this.prisma.department.findUniqueOrThrow({
+        where: { id: resourceId },
+      });
+      if (isAdminOrCeo(user)) return;
+      if (!(await can(user, department, "write", this.prisma))) {
+        throw new ForbiddenException(
+          `Only people who can edit ${department.name} can add to its library`,
+        );
+      }
+      return;
+    }
+
+    if (resourceType === "department_report") {
+      const report = await this.prisma.departmentReport.findUniqueOrThrow({
+        where: { id: resourceId },
+        include: { department: true },
+      });
+      if (isAdminOrCeo(user)) return;
+      if (!(await can(user, report.department, "write", this.prisma))) {
+        throw new ForbiddenException("Only people in this department can manage its report files");
+      }
+      return;
     }
 
     if (resourceType === "client_request") {
@@ -137,12 +173,17 @@ export class DocumentsService {
         where: { id: resourceId },
         include: { department: true },
       });
-      // Unrouted requests have no department yet — they belong to Tender's intake.
+      // Unrouted requests belong to Operations, which owns intake.
       if (!request.department) {
-        if (isAdminOrCeo(user) || user.roles.includes("tender")) return;
-        throw new ForbiddenException("Only Tender can manage an unrouted request's documents");
+        await assertModuleWrite(
+          "operations",
+          user,
+          this.prisma,
+          "Only Operations can manage an unrouted request's documents",
+        );
+        return;
       }
-      assertDepartmentAccess(request.department, user);
+      await assertDepartmentAccess(request.department, user, this.prisma);
       return;
     }
 
@@ -151,6 +192,17 @@ export class DocumentsService {
     if (!user.roles.includes("finance") && !isAdminOrCeo(user)) {
       throw new ForbiddenException("Only Finance staff can manage finance report documents");
     }
+  }
+
+  private departmentCodes = new Map<string, string>();
+  private departmentCodesAt = 0;
+
+  /** Department id → code, refreshed every few minutes; departments rarely change. */
+  private async loadDepartmentCodes() {
+    if (Date.now() - this.departmentCodesAt < 5 * 60_000) return;
+    const rows = await this.prisma.department.findMany({ select: { id: true, code: true } });
+    this.departmentCodes = new Map(rows.map((d) => [d.id, d.code]));
+    this.departmentCodesAt = Date.now();
   }
 
   /** Zero grants = visible to everyone; otherwise a match on the grant set is required. */
@@ -163,8 +215,13 @@ export class DocumentsService {
     if (doc.accessGrants.length === 0) return true;
     return doc.accessGrants.some((g) => {
       if (g.accessType === "everyone") return true;
-      if (g.accessType === "department")
-        return !!user.departmentId && g.departmentId === user.departmentId;
+      // A department grant reaches its home staff and anyone holding that department's role.
+      if (g.accessType === "department") {
+        if (!g.departmentId) return false;
+        if (user.departmentId === g.departmentId) return true;
+        const code = this.departmentCodes.get(g.departmentId);
+        return !!code && user.roles.some((r) => r === code);
+      }
       if (g.accessType === "user") return g.userId === user.id;
       return false;
     });
@@ -188,24 +245,28 @@ export class DocumentsService {
     },
     user: AuthenticatedUser,
   ): Promise<LibraryEntry[] | Paginated<LibraryEntry>> {
-    const documents = await this.prisma.document.findMany({
-      where: {
-        ...(filters.resourceType &&
-          filters.resourceType !== "contract" && {
-            resourceType: filters.resourceType as DocumentResourceType,
-          }),
-        ...(filters.resourceId && { resourceId: filters.resourceId }),
-        ...(filters.mine && { createdBy: user.id }),
-        ...(filters.q && {
-          OR: [
-            { title: { contains: filters.q } },
-            { latestVersion: { fileName: { contains: filters.q } } },
-          ],
-        }),
-      },
-      include: { latestVersion: true, accessGrants: true },
-      orderBy: { createdAt: "desc" },
-    });
+    await this.loadDepartmentCodes();
+    const documents =
+      filters.resourceType === "contract"
+        ? []
+        : await this.prisma.document.findMany({
+            where: {
+              ...(filters.resourceType &&
+                filters.resourceType !== "contract" && {
+                  resourceType: filters.resourceType as DocumentResourceType,
+                }),
+              ...(filters.resourceId && { resourceId: filters.resourceId }),
+              ...(filters.mine && { createdBy: user.id }),
+              ...(filters.q && {
+                OR: [
+                  { title: { contains: filters.q } },
+                  { latestVersion: { fileName: { contains: filters.q } } },
+                ],
+              }),
+            },
+            include: { latestVersion: true, accessGrants: true },
+            orderBy: { createdAt: "desc" },
+          });
 
     let entries: LibraryEntry[] = documents
       .filter((doc) => this.canView(doc, user))
@@ -230,7 +291,11 @@ export class DocumentsService {
     // narrowing to one department on purpose — the *enforced* scope below is separate and
     // always applies to a department-scoped viewer regardless of what filters were passed.
     if (filters.departmentId) {
-      const [projectIds, taskProjectIds] = await Promise.all([
+      const department = await this.prisma.department.findUnique({
+        where: { id: filters.departmentId },
+        select: { code: true },
+      });
+      const [projectIds, taskProjectIds, tenderIds, requestIds, reportIds] = await Promise.all([
         this.prisma.project.findMany({
           where: { departmentId: filters.departmentId },
           select: { id: true },
@@ -239,16 +304,32 @@ export class DocumentsService {
           where: { project: { departmentId: filters.departmentId } },
           select: { id: true },
         }),
+        this.prisma.tender.findMany({
+          where: { departmentId: filters.departmentId },
+          select: { id: true },
+        }),
+        this.prisma.clientRequest.findMany({
+          where: { departmentId: filters.departmentId },
+          select: { id: true },
+        }),
+        this.prisma.departmentReport.findMany({
+          where: { departmentId: filters.departmentId },
+          select: { id: true },
+        }),
       ]);
-      const allowedIds = new Set([
-        ...projectIds.map((p) => p.id),
-        ...taskProjectIds.map((t) => t.id),
-      ]);
-      entries = entries.filter((doc) =>
-        doc.resourceType !== "project" && doc.resourceType !== "task"
-          ? true
-          : allowedIds.has(doc.resourceId),
-      );
+      const inDepartment: Record<string, Set<string>> = {
+        project: new Set(projectIds.map((p) => p.id)),
+        task: new Set(taskProjectIds.map((t) => t.id)),
+        tender: new Set(tenderIds.map((t) => t.id)),
+        client_request: new Set(requestIds.map((r) => r.id)),
+        department_report: new Set(reportIds.map((r) => r.id)),
+        department: new Set([filters.departmentId]),
+      };
+      entries = entries.filter((doc) => {
+        if (doc.resourceType === "finance_report") return department?.code === "finance";
+        if (doc.resourceType === "tender_document_library") return department?.code === "tender";
+        return inDepartment[doc.resourceType]?.has(doc.resourceId) ?? true;
+      });
     }
 
     // Backend-enforced default scope: "mine" and "sharedWithMe" are already narrow (own uploads,
@@ -260,11 +341,11 @@ export class DocumentsService {
     // themselves; finance_report documents are Finance-only, since that resource type carries
     // no department at all.
     if (!filters.mine && !filters.sharedWithMe) {
-      const deptCodes = viewerDepartmentCodes(user);
+      const deptCodes = await viewerDepartmentCodes(user, this.prisma);
       if (deptCodes !== null) {
         const seesTenderPipeline = deptCodes.includes("tender");
         const seesIntakeQueue = seesTenderPipeline || deptCodes.includes("operations");
-        const [projects, tasks, tenders, requests] = await Promise.all([
+        const [projects, tasks, tenders, requests, deptReports, libraries] = await Promise.all([
           this.prisma.project.findMany({
             where: { department: { code: { in: deptCodes } } },
             select: { id: true },
@@ -281,12 +362,22 @@ export class DocumentsService {
             where: seesIntakeQueue ? {} : { department: { code: { in: deptCodes } } },
             select: { id: true },
           }),
+          this.prisma.departmentReport.findMany({
+            where: { department: { code: { in: deptCodes } } },
+            select: { id: true },
+          }),
+          this.prisma.department.findMany({
+            where: { code: { in: deptCodes } },
+            select: { id: true },
+          }),
         ]);
         const allowedByType: Record<string, Set<string>> = {
           project: new Set(projects.map((p) => p.id)),
           task: new Set(tasks.map((t) => t.id)),
           tender: new Set(tenders.map((t) => t.id)),
           client_request: new Set(requests.map((r) => r.id)),
+          department_report: new Set(deptReports.map((r) => r.id)),
+          department: new Set(libraries.map((d) => d.id)),
         };
         entries = entries.filter((doc) => {
           if (doc.resourceType === "finance_report") return deptCodes.includes("finance");
@@ -301,13 +392,15 @@ export class DocumentsService {
     const includeContracts =
       !filters.resourceId && (!filters.resourceType || filters.resourceType === "contract");
     if (includeContracts && !filters.tag) {
-      const deptCodes = filters.mine ? null : viewerDepartmentCodes(user);
+      const deptCodes = filters.mine ? null : await viewerDepartmentCodes(user, this.prisma);
       const contractDocs = await this.prisma.contractDocument.findMany({
         where: {
           ...(filters.mine && { uploadedBy: user.id }),
           ...(filters.q && { fileName: { contains: filters.q } }),
-          ...(filters.departmentId && { contract: { departmentId: filters.departmentId } }),
-          ...(deptCodes && { contract: { department: { code: { in: deptCodes } } } }),
+          contract: {
+            ...(filters.departmentId && { departmentId: filters.departmentId }),
+            ...(deptCodes && { department: { code: { in: deptCodes } } }),
+          },
         },
         orderBy: { createdAt: "desc" },
       });
@@ -357,6 +450,7 @@ export class DocumentsService {
       where: { id },
       include: { latestVersion: true, accessGrants: true },
     });
+    await this.loadDepartmentCodes();
     if (!this.canView(doc, user)) {
       throw new ForbiddenException("You do not have access to this document");
     }
@@ -578,6 +672,7 @@ export class DocumentsService {
       where: { id: documentId },
       include: { accessGrants: true },
     });
+    await this.loadDepartmentCodes();
     if (!this.canView(doc, user)) {
       throw new ForbiddenException("You do not have access to this document");
     }
@@ -597,6 +692,7 @@ export class DocumentsService {
       where: { id: documentId },
       include: { accessGrants: true },
     });
+    await this.loadDepartmentCodes();
     if (!this.canView(doc, user)) {
       throw new ForbiddenException("You do not have access to this document");
     }

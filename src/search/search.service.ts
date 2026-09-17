@@ -26,14 +26,20 @@ function canSeeFinance(viewer: AuthenticatedUser): boolean {
 // ClientsService.scopeWhere, ClientRequestsService.requestDeptFilter respectively. Duplicated
 // deliberately per the approved fix — not delegated to each service's own findAll() — so keep
 // these four in sync if any of those four ever change their own scoping rule.
-function tenderScope(viewer: AuthenticatedUser): Prisma.TenderWhereInput {
-  const deptCodes = viewerDepartmentCodes(viewer);
+async function tenderScope(
+  viewer: AuthenticatedUser,
+  prisma: PrismaService,
+): Promise<Prisma.TenderWhereInput> {
+  const deptCodes = await viewerDepartmentCodes(viewer, prisma);
   if (deptCodes === null || deptCodes.includes("tender")) return {};
   return { department: { code: { in: deptCodes } } };
 }
 
-function projectScope(viewer: AuthenticatedUser): Prisma.ProjectWhereInput {
-  const deptCodes = viewerDepartmentCodes(viewer);
+async function projectScope(
+  viewer: AuthenticatedUser,
+  prisma: PrismaService,
+): Promise<Prisma.ProjectWhereInput> {
+  const deptCodes = await viewerDepartmentCodes(viewer, prisma);
   if (deptCodes === null) return {};
   return {
     department: { code: { in: deptCodes } },
@@ -45,19 +51,26 @@ function projectScope(viewer: AuthenticatedUser): Prisma.ProjectWhereInput {
   };
 }
 
-function contractScope(viewer: AuthenticatedUser): Prisma.ContractWhereInput {
-  const deptCodes = viewerDepartmentCodes(viewer);
+async function contractScope(
+  viewer: AuthenticatedUser,
+  prisma: PrismaService,
+): Promise<Prisma.ContractWhereInput> {
+  const deptCodes = await viewerDepartmentCodes(viewer, prisma);
   if (deptCodes === null) return {};
   return { department: { code: { in: deptCodes } } };
 }
 
-function clientScope(viewer: AuthenticatedUser): Prisma.ClientWhereInput {
-  const deptCodes = viewerDepartmentCodes(viewer);
+async function clientScope(
+  viewer: AuthenticatedUser,
+  prisma: PrismaService,
+): Promise<Prisma.ClientWhereInput> {
+  const deptCodes = await viewerDepartmentCodes(viewer, prisma);
   const unrestricted =
     deptCodes === null || deptCodes.includes("operations") || deptCodes.includes("tender");
   if (unrestricted) return {};
   return {
     OR: [
+      { department: { code: { in: deptCodes! } } },
       { contracts: { some: { department: { code: { in: deptCodes! } } } } },
       { tenders: { some: { department: { code: { in: deptCodes! } } } } },
       { clientRequests: { some: { department: { code: { in: deptCodes! } } } } },
@@ -66,8 +79,11 @@ function clientScope(viewer: AuthenticatedUser): Prisma.ClientWhereInput {
   };
 }
 
-function clientRequestScope(viewer: AuthenticatedUser): Prisma.ClientRequestWhereInput {
-  const deptCodes = viewerDepartmentCodes(viewer);
+async function clientRequestScope(
+  viewer: AuthenticatedUser,
+  prisma: PrismaService,
+): Promise<Prisma.ClientRequestWhereInput> {
+  const deptCodes = await viewerDepartmentCodes(viewer, prisma);
   if (deptCodes === null || deptCodes.includes("operations") || deptCodes.includes("tender")) {
     return {};
   }
@@ -95,6 +111,14 @@ export class SearchService {
     const query = q?.trim() ?? "";
     if (query.length < MIN_QUERY_LENGTH) return [];
 
+    const [reqScope, tndScope, projScope, ctrScope, cliScope] = await Promise.all([
+      clientRequestScope(viewer, this.prisma),
+      tenderScope(viewer, this.prisma),
+      projectScope(viewer, this.prisma),
+      contractScope(viewer, this.prisma),
+      clientScope(viewer, this.prisma),
+    ]);
+
     const [
       leads,
       requests,
@@ -110,12 +134,20 @@ export class SearchService {
       documents,
     ] = await Promise.all([
       this.prisma.lead.findMany({
-        where: { name: { contains: query } },
+        where: { OR: [{ name: { contains: query } }, { company: { contains: query } }] },
         take: TAKE_PER_TYPE,
         select: { id: true, name: true, company: true },
       }),
       this.prisma.clientRequest.findMany({
-        where: { title: { contains: query }, ...clientRequestScope(viewer) },
+        where: {
+          OR: [
+            { title: { contains: query } },
+            { referenceNumber: { contains: query } },
+            { prospectClientName: { contains: query } },
+            { client: { name: { contains: query } } },
+          ],
+          ...reqScope,
+        },
         take: TAKE_PER_TYPE,
         select: {
           id: true,
@@ -125,25 +157,49 @@ export class SearchService {
         },
       }),
       this.prisma.tender.findMany({
-        where: { title: { contains: query }, ...tenderScope(viewer) },
+        where: {
+          OR: [
+            { title: { contains: query } },
+            { referenceNumber: { contains: query } },
+            { prospectClientName: { contains: query } },
+            { client: { name: { contains: query } } },
+          ],
+          ...tndScope,
+        },
         take: TAKE_PER_TYPE,
         select: { id: true, title: true, referenceNumber: true },
       }),
       this.prisma.project.findMany({
-        where: { name: { contains: query }, ...projectScope(viewer) },
+        where: {
+          AND: [
+            { OR: [{ name: { contains: query } }, { client: { name: { contains: query } } }] },
+            projScope,
+          ],
+        },
         take: TAKE_PER_TYPE,
-        select: { id: true, name: true },
+        select: { id: true, name: true, client: { select: { name: true } } },
       }),
       this.prisma.contract.findMany({
         where: {
           OR: [{ title: { contains: query } }, { contractNumber: { contains: query } }],
-          ...contractScope(viewer),
+          ...ctrScope,
         },
         take: TAKE_PER_TYPE,
         select: { id: true, title: true, contractNumber: true },
       }),
       this.prisma.client.findMany({
-        where: { name: { contains: query }, ...clientScope(viewer) },
+        where: {
+          AND: [
+            {
+              OR: [
+                { name: { contains: query } },
+                { code: { contains: query } },
+                { contactEmail: { contains: query } },
+              ],
+            },
+            cliScope ?? {},
+          ],
+        },
         take: TAKE_PER_TYPE,
         select: { id: true, name: true },
       }),
@@ -169,7 +225,12 @@ export class SearchService {
       }),
       canSeeFinance(viewer)
         ? this.prisma.invoice.findMany({
-            where: { invoiceNumber: { contains: query } },
+            where: {
+              OR: [
+                { invoiceNumber: { contains: query } },
+                { client: { name: { contains: query } } },
+              ],
+            },
             take: TAKE_PER_TYPE,
             select: { id: true, invoiceNumber: true, client: { select: { name: true } } },
           })
@@ -205,7 +266,7 @@ export class SearchService {
         type: "project",
         id: p.id,
         title: p.name,
-        subtitle: "Project",
+        subtitle: p.client?.name ? `Project · ${p.client.name}` : "Project",
         to: `/projects/${p.id}`,
       })),
       ...contracts.map((c): SearchResult => ({
@@ -220,7 +281,7 @@ export class SearchService {
         id: c.id,
         title: c.name,
         subtitle: "Client",
-        to: "/clients",
+        to: `/clients?q=${encodeURIComponent(c.name)}`,
       })),
       ...posts.map((p): SearchResult => ({
         type: "blog_post",
@@ -255,7 +316,7 @@ export class SearchService {
         id: i.id,
         title: i.invoiceNumber,
         subtitle: i.client?.name ?? "Invoice",
-        to: "/finance/invoices",
+        to: `/finance/invoices?q=${encodeURIComponent(i.invoiceNumber)}`,
       })),
       ...documents.map((d): SearchResult => ({
         type: "document",

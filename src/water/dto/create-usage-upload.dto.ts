@@ -8,6 +8,8 @@ import {
   IsString,
   Min,
   ValidateNested,
+  IsIn,
+  IsOptional,
 } from "class-validator";
 
 // Parsed client-side (CSV/Excel via the same `xlsx` library the Finance upload page already
@@ -35,6 +37,11 @@ export class UsageUploadRowInput {
 export class CreateUsageUploadDto {
   @IsString()
   fileName!: string;
+
+  // Which platform the file came from; new meters get this vending system.
+  @IsOptional()
+  @IsIn(["amsol", "mpaya"])
+  vendingSystem?: "amsol" | "mpaya";
 
   @IsArray()
   @ArrayMinSize(1)

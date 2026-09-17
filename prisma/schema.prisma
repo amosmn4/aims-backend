@@ -62,6 +62,7 @@ enum DebtorFollowUpType {
   reminder_sent
   promise_to_pay
   escalated
+  note
 }
 
 enum ProjectStatus {
@@ -91,6 +92,7 @@ enum DocumentResourceType {
   project
   task
   finance_report
+  department_report
   tender
   client_request
   // A single, company-wide catalog of documents that are the same across every tender (e.g.
@@ -99,6 +101,8 @@ enum DocumentResourceType {
   // instead of being re-uploaded per tender. Not attached to any real resource, so every row
   // of this type shares one fixed sentinel resourceId ("global") rather than pointing at one.
   tender_document_library
+  // A department's own library: policies, templates and files not tied to one record.
+  department
 }
 
 // Matches the AMSOL Pipeline prototype's tender board exactly: identified -> applying
@@ -238,25 +242,31 @@ enum InventoryCondition {
 }
 
 model InventoryItem {
-  id             String             @id @default(uuid()) @db.Char(36)
-  assetTag       String             @unique @map("asset_tag")
-  deviceName     String             @map("device_name")
-  description    String?            @db.Text
-  category       InventoryCategory
-  status         InventoryStatus    @default(in_use)
-  condition      InventoryCondition @default(good)
-  brand          String?
-  model          String?
-  serialNumber   String?            @map("serial_number")
-  assignedTo     String?            @map("assigned_to")
-  officeId       String?            @map("office_id") @db.Char(36)
-  purchaseDate   DateTime?          @map("purchase_date")
-  warrantyExpiry DateTime?          @map("warranty_expiry")
-  notes          String?            @db.Text
-  createdAt      DateTime           @default(now()) @map("created_at")
-  updatedAt      DateTime           @updatedAt @map("updated_at")
+  id               String             @id @default(uuid()) @db.Char(36)
+  assetTag         String             @unique @map("asset_tag")
+  deviceName       String             @map("device_name")
+  description      String?            @db.Text
+  category         InventoryCategory
+  status           InventoryStatus    @default(in_use)
+  condition        InventoryCondition @default(good)
+  brand            String?
+  model            String?
+  serialNumber     String?            @map("serial_number")
+  assignedTo       String?            @map("assigned_to")
+  officeId         String?            @map("office_id") @db.Char(36)
+  purchaseDate     DateTime?          @map("purchase_date")
+  warrantyExpiry   DateTime?          @map("warranty_expiry")
+  notes            String?            @db.Text
+  createdAt        DateTime           @default(now()) @map("created_at")
+  updatedAt        DateTime           @updatedAt @map("updated_at")
+  purchaseCost     Decimal?           @map("purchase_cost") @db.Decimal(14, 2)
+  usefulLifeMonths Int?               @map("useful_life_months")
+  departmentId     String?            @map("department_id") @db.Char(36)
+  assignedUserId   String?            @map("assigned_user_id") @db.Char(36)
 
-  office Office? @relation(fields: [officeId], references: [id], onDelete: SetNull)
+  office       Office?     @relation(fields: [officeId], references: [id], onDelete: SetNull)
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  assignedUser User?       @relation("InventoryAssignedUser", fields: [assignedUserId], references: [id], onDelete: SetNull)
 
   @@index([officeId])
   @@map("inventory_items")
@@ -282,63 +292,87 @@ model Department {
   tenders              Tender[]
   clientRequests       ClientRequest[]
   serviceLines         ServiceLine[]
+  permissionOverrides  UserPermissionOverride[]
+  resourceAccessGrants ResourceAccessGrant[]
+  clients              Client[]
+  departmentReports    DepartmentReport[]
+  expenses             Expense[]
+  calendarEvents       CalendarEvent[]
+  inventoryItems       InventoryItem[]
 
   @@map("departments")
 }
 
 model User {
-  id           String   @id @default(uuid()) @db.Char(36)
-  email        String   @unique
-  passwordHash String?  @map("password_hash")
-  fullName     String?  @map("full_name")
+  id           String    @id @default(uuid()) @db.Char(36)
+  email        String    @unique
+  passwordHash String?   @map("password_hash")
+  fullName     String?   @map("full_name")
   phone        String?
-  jobTitle     String?  @map("job_title")
-  avatarUrl    String?  @map("avatar_url")
-  departmentId String?  @map("department_id") @db.Char(36)
-  officeId     String?  @map("office_id") @db.Char(36)
-  isActive     Boolean  @default(true) @map("is_active")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  jobTitle     String?   @map("job_title")
+  avatarUrl    String?   @map("avatar_url")
+  departmentId String?   @map("department_id") @db.Char(36)
+  officeId     String?   @map("office_id") @db.Char(36)
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  lastLoginAt  DateTime? @map("last_login_at")
+  lastActiveAt DateTime? @map("last_active_at")
 
   department Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   office     Office?     @relation(fields: [officeId], references: [id], onDelete: SetNull)
   roles      UserRole[]
 
-  accountManagedClients     Client[]                @relation("ClientAccountManager")
-  accountManagedContracts   Contract[]              @relation("ContractAccountManager")
-  createdContracts          Contract[]              @relation("ContractCreatedBy")
-  createdFinanceReports     FinanceReport[]         @relation("FinanceReportCreatedBy")
-  reviewedFinanceReports    FinanceReport[]         @relation("FinanceReportReviewedBy")
-  financeReportComments     FinanceReportComment[]
-  uploadedContractDocs      ContractDocument[]
-  auditLogEntries           AuditLog[]
-  taskComments              TaskComment[]
-  documents                 Document[]              @relation("DocumentCreatedBy")
-  uploadedDocumentVersions  DocumentVersion[]       @relation("DocumentVersionUploadedBy")
-  documentAccessGrants      DocumentAccessGrant[]   @relation("DocumentAccessGrantUser")
-  accountManagedTenders     Tender[]                @relation("TenderAccountManager")
-  createdTenders            Tender[]                @relation("TenderCreatedBy")
-  tenderResourceAssignments TenderResource[]        @relation("TenderResourceUser")
-  tenderTimeEntries         TenderTimeEntry[]       @relation("TenderTimeEntryUser")
-  assignedClientRequests    ClientRequest[]         @relation("ClientRequestAssignee")
-  createdClientRequests     ClientRequest[]         @relation("ClientRequestCreatedBy")
-  clientRequestActivities   ClientRequestActivity[] @relation("ClientRequestActivityCreatedBy")
-  notifications             Notification[]          @relation("NotificationRecipient")
-  createdNotifications      Notification[]          @relation("NotificationCreatedBy")
-  projectActivities         ProjectActivity[]       @relation("ProjectActivityCreatedBy")
-  tenderActivities          TenderActivity[]        @relation("TenderActivityCreatedBy")
-  projectTeamMemberships    ProjectTeamMember[]
-  leadActivities            LeadActivity[]          @relation("LeadActivityCreatedBy")
-  blogPosts                 BlogPost[]              @relation("BlogPostCreatedBy")
-  ticketsRequested          Ticket[]                @relation("TicketRequester")
-  ticketsAssigned           Ticket[]                @relation("TicketAssignee")
-  ticketsCreated            Ticket[]                @relation("TicketCreatedBy")
-  campaignsCreated          Campaign[]              @relation("CampaignCreatedBy")
-  passwordSetupTokens       PasswordSetupToken[]
-  waterUsageUploads         WaterUsageUpload[]      @relation("WaterUsageUploadCreatedBy")
-  waterMeterReadings        WaterMeterReading[]     @relation("WaterMeterReadingCreatedBy")
-  timelineExtensions        TimelineExtension[]     @relation("TimelineExtensionCreatedBy")
-  notificationPreference    NotificationPreference?
+  accountManagedClients      Client[]                        @relation("ClientAccountManager")
+  accountManagedContracts    Contract[]                      @relation("ContractAccountManager")
+  createdContracts           Contract[]                      @relation("ContractCreatedBy")
+  createdFinanceReports      FinanceReport[]                 @relation("FinanceReportCreatedBy")
+  reviewedFinanceReports     FinanceReport[]                 @relation("FinanceReportReviewedBy")
+  financeReportComments      FinanceReportComment[]
+  createdDepartmentReports   DepartmentReport[]              @relation("DepartmentReportCreatedBy")
+  reviewedDepartmentReports  DepartmentReport[]              @relation("DepartmentReportReviewedBy")
+  departmentReportMessages   DepartmentReportMessage[]
+  reportEmailSubscriptions   ReportEmailSubscription[]
+  createdExpenses            Expense[]                       @relation("ExpenseCreatedBy")
+  calendarEvents             CalendarEvent[]                 @relation("CalendarEventCreatedBy")
+  notificationChannels       NotificationChannelPreference[]
+  assignedInventory          InventoryItem[]                 @relation("InventoryAssignedUser")
+  uploadedContractDocs       ContractDocument[]
+  auditLogEntries            AuditLog[]
+  taskComments               TaskComment[]
+  ticketComments             TicketComment[]                 @relation("TicketCommentAuthor")
+  documents                  Document[]                      @relation("DocumentCreatedBy")
+  uploadedDocumentVersions   DocumentVersion[]               @relation("DocumentVersionUploadedBy")
+  documentAccessGrants       DocumentAccessGrant[]           @relation("DocumentAccessGrantUser")
+  accountManagedTenders      Tender[]                        @relation("TenderAccountManager")
+  createdTenders             Tender[]                        @relation("TenderCreatedBy")
+  tenderResourceAssignments  TenderResource[]                @relation("TenderResourceUser")
+  tenderTimeEntries          TenderTimeEntry[]               @relation("TenderTimeEntryUser")
+  assignedClientRequests     ClientRequest[]                 @relation("ClientRequestAssignee")
+  createdClientRequests      ClientRequest[]                 @relation("ClientRequestCreatedBy")
+  clientRequestActivities    ClientRequestActivity[]         @relation("ClientRequestActivityCreatedBy")
+  notifications              Notification[]                  @relation("NotificationRecipient")
+  createdNotifications       Notification[]                  @relation("NotificationCreatedBy")
+  projectActivities          ProjectActivity[]               @relation("ProjectActivityCreatedBy")
+  tenderActivities           TenderActivity[]                @relation("TenderActivityCreatedBy")
+  projectTeamMemberships     ProjectTeamMember[]
+  leadActivities             LeadActivity[]                  @relation("LeadActivityCreatedBy")
+  blogPosts                  BlogPost[]                      @relation("BlogPostCreatedBy")
+  ticketsRequested           Ticket[]                        @relation("TicketRequester")
+  ticketsAssigned            Ticket[]                        @relation("TicketAssignee")
+  ticketsCreated             Ticket[]                        @relation("TicketCreatedBy")
+  campaignsCreated           Campaign[]                      @relation("CampaignCreatedBy")
+  passwordSetupTokens        PasswordSetupToken[]
+  waterUsageUploads          WaterUsageUpload[]              @relation("WaterUsageUploadCreatedBy")
+  waterMeterReadings         WaterMeterReading[]             @relation("WaterMeterReadingCreatedBy")
+  waterAiInsightsGenerated   WaterAiInsight[]                @relation("WaterAiInsightGeneratedBy")
+  waterAiChatMessages        WaterAiChatMessage[]            @relation("WaterAiChatMessageUser")
+  permissionOverrides        UserPermissionOverride[]        @relation("PermissionOverrideUser")
+  permissionOverridesGranted UserPermissionOverride[]        @relation("PermissionOverrideCreatedBy")
+  resourceAccessGrants       ResourceAccessGrant[]           @relation("ResourceAccessGrantUser")
+  resourceAccessGrantsGiven  ResourceAccessGrant[]           @relation("ResourceAccessGrantCreatedBy")
+  timelineExtensions         TimelineExtension[]             @relation("TimelineExtensionCreatedBy")
+  notificationPreference     NotificationPreference?
 
   @@map("users")
 }
@@ -401,10 +435,13 @@ model Client {
   industry         String?
   segment          String?
   accountManagerId String?  @map("account_manager_id") @db.Char(36)
+  // Department that captured the client; keeps it visible there before any contract/project exists.
+  departmentId     String?  @map("department_id") @db.Char(36)
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
   accountManager           User?                     @relation("ClientAccountManager", fields: [accountManagerId], references: [id], onDelete: SetNull)
+  department               Department?               @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   contacts                 ClientContact[]
   contracts                Contract[]
   invoices                 Invoice[]
@@ -414,6 +451,7 @@ model Client {
   clientRequests           ClientRequest[]
   hrmsLicense              HrmsLicense?
 
+  @@index([departmentId])
   @@map("clients")
 }
 
@@ -435,55 +473,64 @@ model ClientContact {
 }
 
 model ServiceLine {
-  id           String   @id @default(uuid()) @db.Char(36)
-  code         String   @unique
-  name         String
-  departmentId String   @map("department_id") @db.Char(36)
-  isRecurring  Boolean  @default(false) @map("is_recurring")
-  isActive     Boolean  @default(true) @map("is_active")
-  sortOrder    Int      @default(0) @map("sort_order")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  id            String   @id @default(uuid()) @db.Char(36)
+  code          String   @unique
+  name          String
+  departmentId  String   @map("department_id") @db.Char(36)
+  isRecurring   Boolean  @default(false) @map("is_recurring")
+  isActive      Boolean  @default(true) @map("is_active")
+  sortOrder     Int      @default(0) @map("sort_order")
+  // Monthly revenue target; the dashboard target line is the sum of these.
+  monthlyTarget Decimal? @map("monthly_target") @db.Decimal(14, 2)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
 
   department     Department      @relation(fields: [departmentId], references: [id])
   invoices       Invoice[]
+  expenses       Expense[]
   contracts      Contract[]
   tenders        Tender[]
   clientRequests ClientRequest[]
+  projects       Project[]
 
   @@index([departmentId])
   @@map("service_lines")
 }
 
 model Invoice {
-  invoiceNumber String   @unique @map("invoice_number")
-  id            String   @id @default(uuid()) @db.Char(36)
-  clientId      String   @map("client_id") @db.Char(36)
-  serviceLineId String?  @map("service_line_id") @db.Char(36)
-  contractId    String?  @map("contract_id") @db.Char(36)
-  issueDate     DateTime @map("issue_date") @db.Date
-  dueDate       DateTime @map("due_date") @db.Date
-  currencyCode  String   @default("KES") @map("currency_code")
-  subtotal      Decimal  @db.Decimal(14, 2)
-  tax           Decimal  @default(0) @db.Decimal(14, 2)
-  total         Decimal  @db.Decimal(14, 2)
-  directCost    Decimal  @default(0) @map("direct_cost") @db.Decimal(14, 2)
-  status        String   @default("draft")
-  isRecurring   Boolean  @default(false) @map("is_recurring")
-  notes         String?  @db.Text
-  createdBy     String?  @map("created_by") @db.Char(36)
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  invoiceNumber String    @unique @map("invoice_number")
+  id            String    @id @default(uuid()) @db.Char(36)
+  clientId      String    @map("client_id") @db.Char(36)
+  serviceLineId String?   @map("service_line_id") @db.Char(36)
+  contractId    String?   @map("contract_id") @db.Char(36)
+  projectId     String?   @map("project_id") @db.Char(36)
+  issueDate     DateTime  @map("issue_date") @db.Date
+  dueDate       DateTime  @map("due_date") @db.Date
+  currencyCode  String    @default("KES") @map("currency_code")
+  subtotal      Decimal   @db.Decimal(14, 2)
+  tax           Decimal   @default(0) @db.Decimal(14, 2)
+  total         Decimal   @db.Decimal(14, 2)
+  directCost    Decimal   @default(0) @map("direct_cost") @db.Decimal(14, 2)
+  status        String    @default("draft")
+  isRecurring   Boolean   @default(false) @map("is_recurring")
+  notes         String?   @db.Text
+  voidedAt      DateTime? @map("voided_at")
+  voidReason    String?   @map("void_reason") @db.Text
+  createdBy     String?   @map("created_by") @db.Char(36)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
 
   client      Client           @relation(fields: [clientId], references: [id], onDelete: Restrict)
   serviceLine ServiceLine?     @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
   contract    Contract?        @relation(fields: [contractId], references: [id], onDelete: SetNull)
+  project     Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
   payments    InvoicePayment[]
   followUps   DebtorFollowUp[]
 
   @@index([clientId])
   @@index([serviceLineId])
   @@index([contractId])
+  @@index([projectId])
   @@index([issueDate])
   // Backs the Debtors screen's overdue/outstanding filter (status + dueDate together).
   @@index([status, dueDate])
@@ -546,17 +593,122 @@ model FinanceReport {
 }
 
 model FinanceReportComment {
-  id        String   @id @default(uuid()) @db.Char(36)
-  reportId  String   @map("report_id") @db.Char(36)
-  authorId  String   @map("author_id") @db.Char(36)
-  body      String   @db.Text
-  createdAt DateTime @default(now()) @map("created_at")
+  id        String            @id @default(uuid()) @db.Char(36)
+  reportId  String            @map("report_id") @db.Char(36)
+  authorId  String            @map("author_id") @db.Char(36)
+  kind      ReportMessageKind @default(comment)
+  parentId  String?           @map("parent_id") @db.Char(36)
+  body      String            @db.Text
+  createdAt DateTime          @default(now()) @map("created_at")
+  updatedAt DateTime          @updatedAt @map("updated_at")
+
+  report  FinanceReport          @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  author  User                   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent  FinanceReportComment?  @relation("FinanceReportCommentReplies", fields: [parentId], references: [id], onDelete: SetNull)
+  replies FinanceReportComment[] @relation("FinanceReportCommentReplies")
+
+  @@index([parentId])
+  @@map("finance_report_comments")
+}
+
+enum ReportMessageKind {
+  comment
+  submitted
+  resubmitted
+  changes_requested
+  approved
+}
+
+enum DepartmentReportStatus {
+  draft
+  submitted
+  changes_requested
+  approved
+}
+
+enum ReportPeriodType {
+  monthly
+  quarterly
+  annual
+  other
+}
+
+// A report a department submits to the CEO; the conversation lives in DepartmentReportMessage.
+model DepartmentReport {
+  id           String                 @id @default(uuid()) @db.Char(36)
+  departmentId String                 @map("department_id") @db.Char(36)
+  title        String
+  periodType   ReportPeriodType       @default(monthly) @map("period_type")
+  periodStart  DateTime               @map("period_start") @db.Date
+  periodEnd    DateTime               @map("period_end") @db.Date
+  summary      String?                @db.Text
+  figures      Json
+  status       DepartmentReportStatus @default(draft)
+  submittedBy  String?                @map("submitted_by") @db.Char(36)
+  submittedAt  DateTime?              @map("submitted_at")
+  reviewedBy   String?                @map("reviewed_by") @db.Char(36)
+  reviewedAt   DateTime?              @map("reviewed_at")
+  createdBy    String                 @map("created_by") @db.Char(36)
+  createdAt    DateTime               @default(now()) @map("created_at")
+  updatedAt    DateTime               @updatedAt @map("updated_at")
+
+  department Department                @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  creator    User                      @relation("DepartmentReportCreatedBy", fields: [createdBy], references: [id], onDelete: Cascade)
+  reviewer   User?                     @relation("DepartmentReportReviewedBy", fields: [reviewedBy], references: [id], onDelete: SetNull)
+  messages   DepartmentReportMessage[]
+
+  @@index([departmentId, status])
+  @@index([periodEnd])
+  @@map("department_reports")
+}
+
+model DepartmentReportMessage {
+  id        String            @id @default(uuid()) @db.Char(36)
+  reportId  String            @map("report_id") @db.Char(36)
+  authorId  String            @map("author_id") @db.Char(36)
+  kind      ReportMessageKind @default(comment)
+  parentId  String?           @map("parent_id") @db.Char(36)
+  body      String            @db.Text
+  createdAt DateTime          @default(now()) @map("created_at")
+
+  report  DepartmentReport          @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  author  User                      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent  DepartmentReportMessage?  @relation("DepartmentReportMessageReplies", fields: [parentId], references: [id], onDelete: SetNull)
+  replies DepartmentReportMessage[] @relation("DepartmentReportMessageReplies")
+
+  @@index([reportId, createdAt])
+  @@map("department_report_messages")
+}
+
+// Which scheduled report emails a person receives (report_submitted, board_pack, pipeline_weekly, debtors, water_monthly).
+model ReportEmailSubscription {
+  userId    String   @map("user_id") @db.Char(36)
+  reportKey String   @map("report_key") @db.VarChar(40)
+  enabled   Boolean  @default(true)
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  report FinanceReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
-  author User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@map("finance_report_comments")
+  @@id([userId, reportKey])
+  @@map("report_email_subscriptions")
+}
+
+// Company-wide settings; a single row with id "company".
+model CompanySettings {
+  id                      String   @id @default("company") @db.VarChar(20)
+  companyName             String   @default("Africa Management Solutions Ltd") @map("company_name")
+  logoDataUrl             String?  @map("logo_data_url") @db.MediumText
+  currencyCode            String   @default("KES") @map("currency_code") @db.VarChar(3)
+  financialYearStartMonth Int      @default(1) @map("financial_year_start_month")
+  timeZone                String   @default("Africa/Nairobi") @map("time_zone")
+  reportDueDay            Int      @default(5) @map("report_due_day")
+  // Who staff should contact about access, invites and passwords.
+  supportContactName      String?  @map("support_contact_name")
+  supportContactEmail     String?  @map("support_contact_email")
+  updatedBy               String?  @map("updated_by") @db.Char(36)
+  updatedAt               DateTime @updatedAt @map("updated_at")
+
+  @@map("company_settings")
 }
 
 model Contract {
@@ -675,10 +827,16 @@ model DebtorFollowUp {
   promisedDate DateTime?          @map("promised_date") @db.Date
   notes        String?            @db.Text
   createdBy    String?            @map("created_by") @db.Char(36)
+  // Set when this entry replies to another one on the same record.
+  parentId     String?            @map("parent_id") @db.Char(36)
   createdAt    DateTime           @default(now()) @map("created_at")
 
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 
+  parent  DebtorFollowUp?  @relation("DebtorFollowUpReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies DebtorFollowUp[] @relation("DebtorFollowUpReplies")
+
+  @@index([parentId])
   @@index([invoiceId])
   @@map("debtor_follow_ups")
 }
@@ -687,45 +845,50 @@ model DebtorFollowUp {
 // an internal project may have neither). Financials aren't duplicated here: a project's
 // budget/actual/margin are read live from Budget/Invoice via contractId.
 model Project {
-  id              String                @id @default(uuid()) @db.Char(36)
-  name            String
-  description     String?               @db.Text
-  clientId        String?               @map("client_id") @db.Char(36)
-  contractId      String?               @map("contract_id") @db.Char(36)
-  clientRequestId String?               @unique @map("client_request_id") @db.Char(36)
-  tenderId        String?               @unique @map("tender_id") @db.Char(36)
-  departmentId    String                @map("department_id") @db.Char(36)
-  status          ProjectStatus         @default(planning)
-  deliveryStage   ProjectDeliveryStage  @default(onboarding) @map("delivery_stage")
+  id                     String                @id @default(uuid()) @db.Char(36)
+  name                   String
+  description            String?               @db.Text
+  clientId               String?               @map("client_id") @db.Char(36)
+  contractId             String?               @map("contract_id") @db.Char(36)
+  clientRequestId        String?               @unique @map("client_request_id") @db.Char(36)
+  tenderId               String?               @unique @map("tender_id") @db.Char(36)
+  departmentId           String                @map("department_id") @db.Char(36)
+  // Which service line this work delivers (e.g. HR Recruitment); drives department dashboards.
+  serviceLineId          String?               @map("service_line_id") @db.Char(36)
+  status                 ProjectStatus         @default(planning)
+  deliveryStage          ProjectDeliveryStage  @default(onboarding) @map("delivery_stage")
   // "department" (default): everyone in the owning department sees this project, today's
   // behavior. "restricted": only the creator and explicit ProjectTeamMember rows (userId set)
   // see it, regardless of department — for work one person or a named few own, not the whole
   // team (e.g. one water-system owner, an HR project shared with only two colleagues).
-  visibility      ProjectVisibility     @default(department)
+  visibility             ProjectVisibility     @default(department)
   // "one_off" (default): a bounded delivery with a natural end. "ongoing": retainer/maintenance
   // work with no natural end (e.g. HR running a client's HR function day to day, IT maintaining a
   // system) — excluded from the "project overdue" notification sweep, since it has no deadline to
   // be overdue against.
-  engagementType  ProjectEngagementType @default(one_off) @map("engagement_type")
+  engagementType         ProjectEngagementType @default(one_off) @map("engagement_type")
   // Project Workspace fields (Overview/EVM) — methodology and health are free-form/manager-set;
   // budget is the execution budget (cost side) used for Planned/Earned Value, distinct from the
   // Invoice/InvoicePayment totals already tracked (that's revenue, this is cost).
-  methodology     String?
+  methodology            String?
   // Only set/shown when methodology === "system_development" — see enum SdlcStage.
-  sdlcStage       SdlcStage?            @map("sdlc_stage")
-  health          ProjectHealth         @default(green)
-  budget          Decimal?              @db.Decimal(14, 2)
-  startDate       DateTime?             @map("start_date") @db.Date
-  endDate         DateTime?             @map("end_date") @db.Date
-  createdBy       String?               @map("created_by") @db.Char(36)
-  createdAt       DateTime              @default(now()) @map("created_at")
-  updatedAt       DateTime              @updatedAt @map("updated_at")
+  sdlcStage              SdlcStage?            @map("sdlc_stage")
+  health                 ProjectHealth         @default(green)
+  budget                 Decimal?              @db.Decimal(14, 2)
+  startDate              DateTime?             @map("start_date") @db.Date
+  endDate                DateTime?             @map("end_date") @db.Date
+  createdBy              String?               @map("created_by") @db.Char(36)
+  createdAt              DateTime              @default(now()) @map("created_at")
+  updatedAt              DateTime              @updatedAt @map("updated_at")
+  deliveryStageChangedAt DateTime              @default(now()) @map("delivery_stage_changed_at")
+  completedAt            DateTime?             @map("completed_at")
 
-  client            Client?             @relation(fields: [clientId], references: [id], onDelete: SetNull)
-  contract          Contract?           @relation(fields: [contractId], references: [id], onDelete: SetNull)
-  clientRequest     ClientRequest?      @relation(fields: [clientRequestId], references: [id], onDelete: SetNull)
-  tender            Tender?             @relation(fields: [tenderId], references: [id], onDelete: SetNull)
-  department        Department          @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  client            Client?                @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  contract          Contract?              @relation(fields: [contractId], references: [id], onDelete: SetNull)
+  clientRequest     ClientRequest?         @relation(fields: [clientRequestId], references: [id], onDelete: SetNull)
+  tender            Tender?                @relation(fields: [tenderId], references: [id], onDelete: SetNull)
+  department        Department             @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  serviceLine       ServiceLine?           @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
   tasks             Task[]
   milestones        Milestone[]
   activities        ProjectActivity[]
@@ -734,10 +897,14 @@ model Project {
   raci              ProjectRaciEntry[]
   raidEntries       ProjectRaidEntry[]
   recruitmentFunnel RecruitmentFunnel?
+  invoices          Invoice[]
+  expenses          Expense[]
+  placements        RecruitmentPlacement[]
 
   @@index([departmentId])
   @@index([clientId])
   @@index([contractId])
+  @@index([serviceLineId])
   @@index([deliveryStage])
   @@map("projects")
 }
@@ -890,11 +1057,17 @@ model ProjectActivity {
   summary    String                    @db.Text
   occurredAt DateTime                  @default(now()) @map("occurred_at")
   createdBy  String?                   @map("created_by") @db.Char(36)
+  // Set when this entry replies to another one on the same record.
+  parentId   String?                   @map("parent_id") @db.Char(36)
   createdAt  DateTime                  @default(now()) @map("created_at")
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   creator User?   @relation("ProjectActivityCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
 
+  parent  ProjectActivity?  @relation("ProjectActivityReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies ProjectActivity[] @relation("ProjectActivityReplies")
+
+  @@index([parentId])
   @@index([projectId])
   @@map("project_activities")
 }
@@ -1032,12 +1205,18 @@ model TaskComment {
   taskId    String   @map("task_id") @db.Char(36)
   authorId  String   @map("author_id") @db.Char(36)
   body      String   @db.Text
+  // Set when this entry replies to another one on the same record.
+  parentId  String?  @map("parent_id") @db.Char(36)
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   task   Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
   author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
 
+  parent  TaskComment?  @relation("TaskCommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies TaskComment[] @relation("TaskCommentReplies")
+
+  @@index([parentId])
   @@index([taskId])
   @@map("task_comments")
 }
@@ -1147,6 +1326,8 @@ model Tender {
   createdBy          String?      @map("created_by") @db.Char(36)
   createdAt          DateTime     @default(now()) @map("created_at")
   updatedAt          DateTime     @updatedAt @map("updated_at")
+  stageChangedAt     DateTime     @default(now()) @map("stage_changed_at")
+  wonReason          String?      @map("won_reason") @db.Text
 
   client         Client?             @relation(fields: [clientId], references: [id], onDelete: SetNull)
   department     Department          @relation(fields: [departmentId], references: [id], onDelete: Restrict)
@@ -1326,11 +1507,17 @@ model TenderActivity {
   summary    String                    @db.Text
   occurredAt DateTime                  @default(now()) @map("occurred_at")
   createdBy  String?                   @map("created_by") @db.Char(36)
+  // Set when this entry replies to another one on the same record.
+  parentId   String?                   @map("parent_id") @db.Char(36)
   createdAt  DateTime                  @default(now()) @map("created_at")
 
   tender  Tender @relation(fields: [tenderId], references: [id], onDelete: Cascade)
   creator User?  @relation("TenderActivityCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
 
+  parent  TenderActivity?  @relation("TenderActivityReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies TenderActivity[] @relation("TenderActivityReplies")
+
+  @@index([parentId])
   @@index([tenderId])
   @@map("tender_activities")
 }
@@ -1371,6 +1558,7 @@ model ClientRequest {
   createdBy          String?                      @map("created_by") @db.Char(36)
   createdAt          DateTime                     @default(now()) @map("created_at")
   updatedAt          DateTime                     @updatedAt @map("updated_at")
+  stageChangedAt     DateTime                     @default(now()) @map("stage_changed_at")
 
   client            Client?                 @relation(fields: [clientId], references: [id], onDelete: SetNull)
   serviceLine       ServiceLine?            @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
@@ -1397,11 +1585,17 @@ model ClientRequestActivity {
   summary    String                    @db.Text
   occurredAt DateTime                  @default(now()) @map("occurred_at")
   createdBy  String?                   @map("created_by") @db.Char(36)
+  // Set when this entry replies to another one on the same record.
+  parentId   String?                   @map("parent_id") @db.Char(36)
   createdAt  DateTime                  @default(now()) @map("created_at")
 
   request ClientRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
   creator User?         @relation("ClientRequestActivityCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
 
+  parent  ClientRequestActivity?  @relation("ClientRequestActivityReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies ClientRequestActivity[] @relation("ClientRequestActivityReplies")
+
+  @@index([parentId])
   @@index([requestId])
   @@map("client_request_activities")
 }
@@ -1495,11 +1689,17 @@ model LeadActivity {
   summary    String           @db.Text
   occurredAt DateTime         @default(now()) @map("occurred_at")
   createdBy  String?          @map("created_by") @db.Char(36)
+  // Set when this entry replies to another one on the same record.
+  parentId   String?          @map("parent_id") @db.Char(36)
   createdAt  DateTime         @default(now()) @map("created_at")
 
   lead    Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
   creator User? @relation("LeadActivityCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
 
+  parent  LeadActivity?  @relation("LeadActivityReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies LeadActivity[] @relation("LeadActivityReplies")
+
+  @@index([parentId])
   @@index([leadId])
   @@map("lead_activities")
 }
@@ -1569,7 +1769,8 @@ model ItSystem {
   createdAt DateTime       @default(now()) @map("created_at")
   updatedAt DateTime       @updatedAt @map("updated_at")
 
-  tickets Ticket[]
+  tickets       Ticket[]
+  uptimeRecords SystemUptimeRecord[]
 
   @@map("it_systems")
 }
@@ -1612,14 +1813,36 @@ model Ticket {
   createdBy   String?        @map("created_by") @db.Char(36)
   createdAt   DateTime       @default(now()) @map("created_at")
   updatedAt   DateTime       @updatedAt @map("updated_at")
+  closedAt    DateTime?      @map("closed_at")
 
-  system    ItSystem? @relation(fields: [systemId], references: [id], onDelete: SetNull)
-  requester User?     @relation("TicketRequester", fields: [requesterId], references: [id], onDelete: SetNull)
-  assignee  User?     @relation("TicketAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
-  creator   User?     @relation("TicketCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  system    ItSystem?       @relation(fields: [systemId], references: [id], onDelete: SetNull)
+  requester User?           @relation("TicketRequester", fields: [requesterId], references: [id], onDelete: SetNull)
+  assignee  User?           @relation("TicketAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  creator   User?           @relation("TicketCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  comments  TicketComment[]
 
   @@index([status])
   @@map("tickets")
+}
+
+// A message on an IT ticket; parentId makes it a reply to another message.
+model TicketComment {
+  id        String   @id @default(uuid()) @db.Char(36)
+  ticketId  String   @map("ticket_id") @db.Char(36)
+  authorId  String   @map("author_id") @db.Char(36)
+  body      String   @db.Text
+  parentId  String?  @map("parent_id") @db.Char(36)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  ticket  Ticket          @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author  User            @relation("TicketCommentAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  parent  TicketComment?  @relation("TicketCommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies TicketComment[] @relation("TicketCommentReplies")
+
+  @@index([ticketId])
+  @@index([parentId])
+  @@map("ticket_comments")
 }
 
 enum HrmsLicenseTier {
@@ -1638,15 +1861,16 @@ enum HrmsLicenseStatus {
 // The external companies AMSOL licenses its HRMS product to — distinct from Ticket/ItSystem,
 // and distinct from the generic Client record (a client can exist without an HRMS license).
 model HrmsLicense {
-  id          String            @id @default(uuid()) @db.Char(36)
-  clientId    String            @unique @map("client_id") @db.Char(36)
-  tier        HrmsLicenseTier   @default(starter)
-  status      HrmsLicenseStatus @default(trial)
-  activeUsers Int               @default(0) @map("active_users")
-  renewalDate DateTime?         @map("renewal_date") @db.Date
-  notes       String?           @db.Text
-  createdAt   DateTime          @default(now()) @map("created_at")
-  updatedAt   DateTime          @updatedAt @map("updated_at")
+  id            String            @id @default(uuid()) @db.Char(36)
+  clientId      String            @unique @map("client_id") @db.Char(36)
+  tier          HrmsLicenseTier   @default(starter)
+  status        HrmsLicenseStatus @default(trial)
+  activeUsers   Int               @default(0) @map("active_users")
+  renewalDate   DateTime?         @map("renewal_date") @db.Date
+  notes         String?           @db.Text
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+  licensedSeats Int?              @map("licensed_seats")
 
   client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
@@ -1683,6 +1907,12 @@ enum NotificationType {
   document_shared
   task_comment
   client_request_assigned
+  report_submitted
+  report_reviewed
+  report_comment
+  report_due
+  comment_reply
+  ticket_update
 }
 
 enum NotificationSeverity {
@@ -1742,9 +1972,8 @@ model NotificationPreference {
 /**
  * ================= Water Project =================
  */
-// A self-contained module: borehole/main meter -> zone bulk meters -> household meters ->
-// customers, with dated usage/payment records (seeded from a CSV export, or uploaded later) and
-// separate dial readings for main/bulk meters used to compute distribution loss (NRW).
+// Self-contained module: main meter -> zone bulk meters -> household meters -> customers.
+// Dial readings compute distribution loss (NRW).
 
 enum WaterMeterType {
   main
@@ -1763,10 +1992,7 @@ enum WaterUsageSource {
   manual
 }
 
-// Zones nest arbitrarily deep (a zone can sit inside another zone) rather than a fixed two-tier
-// zone/sub-zone split — Meters and Customers forms still present it as "Zone" then "Sub-zone"
-// (top-level pick, then one of its children), but that's just two levels of the same tree walked
-// from the frontend; the data model itself doesn't cap the depth.
+// Zones nest arbitrarily deep. Forms present it as "Zone" then "Sub-zone" but the model has no depth cap.
 model WaterZone {
   id           String   @id @default(uuid()) @db.Char(36)
   name         String
@@ -1800,19 +2026,13 @@ model WaterCustomer {
   @@map("water_customers")
 }
 
-// Meters are the module's primary entry point — registering one captures who it's assigned to,
-// where (plot number, zone) and when it was installed, rather than requiring a customer to be
-// created as a separate step first (see WaterService.createMeter's find-or-create-by-name).
+// Meters are the module's primary entry point — registering one finds-or-creates its customer.
 model WaterMeter {
   id              String             @id @default(uuid()) @db.Char(36)
   meterNumber     String             @unique @map("meter_number")
   meterType       WaterMeterType     @default(household) @map("meter_type")
-  // Household meters are identified by their customer; main/bulk meters have no customer and are
-  // identified by a friendly name + physical location instead (e.g. "Borehole Main Meter" /
-  // "Borehole pump house"). A bulk meter's `zoneId` is the zone it reconciles — since zones nest
-  // arbitrarily, that single assignment already covers every sub-zone beneath it (a bulk meter
-  // "having multiple sub-zones" falls straight out of the existing zone tree, no separate
-  // many-to-many needed — see WaterService's zoneAndDescendantIds).
+  // Household meters are identified by customer; main/bulk meters use name + location.
+  // A bulk meter's `zoneId` covers every sub-zone via the zone tree.
   name            String?
   location        String?
   customerId      String?            @map("customer_id") @db.Char(36)
@@ -1820,14 +2040,9 @@ model WaterMeter {
   installedAt     DateTime?          @map("installed_at")
   zoneId          String?            @map("zone_id") @db.Char(36)
   isActive        Boolean            @default(true) @map("is_active")
-  // Which vending platform this meter is read/topped-up through — distinct customer bases and
-  // account-number formats per system, not a billing/technical detail. Defaults to `amsol` so
-  // every meter already in AIMS is correctly tagged with no code changes.
+  // Which vending platform reads/tops up this meter. Defaults to `amsol` for existing meters.
   vendingSystem   WaterVendingSystem @default(amsol) @map("vending_system")
-  // Set when this meter physically replaced another (e.g. a faulty unit swapped out) — an audit
-  // trail only. The actual vending-history continuity comes from both meters sharing the same
-  // `customerId`, not from this field; see WaterMeter model comment in the plan for the full
-  // reasoning. Self-relation, so both directions are queryable from either meter.
+  // Set when this meter physically replaced another — audit trail only, not vending-history data.
   replacesMeterId String?            @unique @map("replaces_meter_id") @db.Char(36)
   createdAt       DateTime           @default(now()) @map("created_at")
   updatedAt       DateTime           @updatedAt @map("updated_at")
@@ -1846,9 +2061,7 @@ model WaterMeter {
   @@map("water_meters")
 }
 
-// One row per confirmed CSV/Excel upload — dated snapshots, so usage records stay traceable to
-// the batch (and file) they arrived in, matching maybePaginate's "opt-in envelope" pattern used
-// everywhere else: a plain list of uploads, each with a rollup of its own records.
+// One row per confirmed CSV/Excel upload, so usage records stay traceable to their batch.
 model WaterUsageUpload {
   id          String   @id @default(uuid()) @db.Char(36)
   fileName    String   @map("file_name")
@@ -1862,10 +2075,7 @@ model WaterUsageUpload {
   @@map("water_usage_uploads")
 }
 
-// A single purchase/consumption transaction against a household meter — units sold + amount
-// paid, dated by `recordedAt` (the actual purchase date, not when it was entered into AIMS).
-// `customerName` is kept verbatim from the source row even when `customerId` resolves, since a
-// meter can change hands and the historical record should still say who actually paid.
+// A purchase/consumption transaction. `customerName` stays verbatim since a meter can change hands.
 model WaterUsageRecord {
   id           String           @id @default(uuid()) @db.Char(36)
   meterId      String           @map("meter_id") @db.Char(36)
@@ -1887,9 +2097,7 @@ model WaterUsageRecord {
   @@map("water_usage_records")
 }
 
-// A dial reading for a main or bulk meter — distinct from WaterUsageRecord (no customer/payment
-// involved). Consecutive readings for the same meter are compared to derive period consumption
-// for the loss ladder / NRW calculations, same semantics as the reference dashboard.
+// A dial reading for a main/bulk meter. Consecutive readings derive period usage for NRW.
 model WaterMeterReading {
   id          String   @id @default(uuid()) @db.Char(36)
   meterId     String   @map("meter_id") @db.Char(36)
@@ -1904,4 +2112,260 @@ model WaterMeterReading {
 
   @@index([meterId, readingDate])
   @@map("water_meter_readings")
+}
+
+enum WaterAiChatRole {
+  user
+  assistant
+}
+
+// One row per "Generate insights" click, not auto-refreshed. Bounds AI cost per month.
+model WaterAiInsight {
+  id          String   @id @default(uuid()) @db.Char(36)
+  month       String   @db.VarChar(7) // "YYYY-MM"
+  summary     String   @db.Text
+  anomalies   Json
+  reasons     Json
+  provider    String // "openai" | "gemini" — whichever provider actually served this generation
+  generatedBy String?  @map("generated_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  generator User? @relation("WaterAiInsightGeneratedBy", fields: [generatedBy], references: [id], onDelete: SetNull)
+
+  @@index([month, createdAt])
+  @@map("water_ai_insights")
+}
+
+// Per-user chat transcript for the water AI assistant — each viewer gets their own conversation.
+model WaterAiChatMessage {
+  id        String          @id @default(uuid()) @db.Char(36)
+  userId    String          @map("user_id") @db.Char(36)
+  role      WaterAiChatRole
+  content   String          @db.Text
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  user User @relation("WaterAiChatMessageUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("water_ai_chat_messages")
+}
+
+/**
+ * ================= Permissions expansion =================
+ */
+
+enum PermissionAction {
+  read
+  write
+}
+
+enum PermissionEffect {
+  grant
+  deny
+}
+
+// A per-user exception to their role's default read/write on one department, e.g. a finance-role
+// user denied write (read-only), or a non-finance user granted read. Absence = pure role default.
+model UserPermissionOverride {
+  id           String           @id @default(uuid()) @db.Char(36)
+  userId       String           @map("user_id") @db.Char(36)
+  departmentId String           @map("department_id") @db.Char(36)
+  action       PermissionAction
+  effect       PermissionEffect
+  createdBy    String?          @map("created_by") @db.Char(36)
+  createdAt    DateTime         @default(now()) @map("created_at")
+
+  user       User       @relation("PermissionOverrideUser", fields: [userId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  creator    User?      @relation("PermissionOverrideCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@unique([userId, departmentId, action])
+  @@map("user_permission_overrides")
+}
+
+enum ResourceAccessLevel {
+  read
+  write
+}
+
+// Shares one specific record (a tender, a client request) with a user or department outside its
+// own owning department — layers on top of department access, doesn't replace it.
+model ResourceAccessGrant {
+  id           String              @id @default(uuid()) @db.Char(36)
+  resourceType String              @map("resource_type")
+  resourceId   String              @map("resource_id") @db.Char(36)
+  departmentId String?             @map("department_id") @db.Char(36)
+  userId       String?             @map("user_id") @db.Char(36)
+  level        ResourceAccessLevel @default(read)
+  createdBy    String?             @map("created_by") @db.Char(36)
+  createdAt    DateTime            @default(now()) @map("created_at")
+
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  user       User?       @relation("ResourceAccessGrantUser", fields: [userId], references: [id], onDelete: Cascade)
+  creator    User?       @relation("ResourceAccessGrantCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([resourceType, resourceId])
+  @@map("resource_access_grants")
+}
+
+enum ExpenseStatus {
+  unpaid
+  paid
+}
+
+enum ExpenseCategory {
+  salaries
+  rent
+  utilities
+  software
+  travel
+  marketing
+  subcontractors
+  equipment
+  professional_fees
+  taxes
+  other
+}
+
+// Money the company spends or owes suppliers; feeds margin and payables.
+model Expense {
+  id            String          @id @default(uuid()) @db.Char(36)
+  expenseDate   DateTime        @map("expense_date") @db.Date
+  dueDate       DateTime?       @map("due_date") @db.Date
+  supplier      String?
+  description   String
+  category      ExpenseCategory
+  amount        Decimal         @db.Decimal(14, 2)
+  currencyCode  String          @default("KES") @map("currency_code") @db.VarChar(3)
+  departmentId  String?         @map("department_id") @db.Char(36)
+  serviceLineId String?         @map("service_line_id") @db.Char(36)
+  projectId     String?         @map("project_id") @db.Char(36)
+  status        ExpenseStatus   @default(unpaid)
+  paidOn        DateTime?       @map("paid_on") @db.Date
+  reference     String?
+  createdBy     String?         @map("created_by") @db.Char(36)
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+
+  department  Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  serviceLine ServiceLine? @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
+  project     Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  creator     User?        @relation("ExpenseCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([expenseDate])
+  @@index([status, dueDate])
+  @@index([serviceLineId])
+  @@index([departmentId])
+  @@map("expenses")
+}
+
+enum StageEntityType {
+  client_request
+  tender
+  project
+}
+
+// Every stage move on a request, tender or project, for time-in-stage and period figures.
+model StageChange {
+  id         String          @id @default(uuid()) @db.Char(36)
+  entityType StageEntityType @map("entity_type")
+  entityId   String          @map("entity_id") @db.Char(36)
+  fromStage  String?         @map("from_stage")
+  toStage    String          @map("to_stage")
+  changedBy  String?         @map("changed_by") @db.Char(36)
+  changedAt  DateTime        @default(now()) @map("changed_at")
+
+  @@index([entityType, entityId, changedAt])
+  @@index([entityType, toStage, changedAt])
+  @@map("stage_changes")
+}
+
+// Monthly uptime recorded for an IT system such as the HRMS.
+model SystemUptimeRecord {
+  id            String   @id @default(uuid()) @db.Char(36)
+  systemId      String   @map("system_id") @db.Char(36)
+  month         DateTime @db.Date
+  uptimePercent Decimal  @map("uptime_percent") @db.Decimal(5, 2)
+  notes         String?  @db.Text
+  createdBy     String?  @map("created_by") @db.Char(36)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  system ItSystem @relation(fields: [systemId], references: [id], onDelete: Cascade)
+
+  @@unique([systemId, month])
+  @@map("system_uptime_records")
+}
+
+// A person placed through a recruitment project, with the date they were placed.
+model RecruitmentPlacement {
+  id            String   @id @default(uuid()) @db.Char(36)
+  projectId     String   @map("project_id") @db.Char(36)
+  candidateName String   @map("candidate_name")
+  position      String?
+  placedAt      DateTime @map("placed_at") @db.Date
+  notes         String?  @db.Text
+  createdBy     String?  @map("created_by") @db.Char(36)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, placedAt])
+  @@map("recruitment_placements")
+}
+
+enum CalendarEventVisibility {
+  everyone
+  department
+  private
+}
+
+// An event someone adds to the calendar, alongside the deadlines AIMS already knows about.
+model CalendarEvent {
+  id           String                  @id @default(uuid()) @db.Char(36)
+  title        String
+  description  String?                 @db.Text
+  location     String?
+  startsAt     DateTime                @map("starts_at")
+  endsAt       DateTime?               @map("ends_at")
+  allDay       Boolean                 @default(true) @map("all_day")
+  departmentId String?                 @map("department_id") @db.Char(36)
+  visibility   CalendarEventVisibility @default(everyone)
+  createdBy    String                  @map("created_by") @db.Char(36)
+  createdAt    DateTime                @default(now()) @map("created_at")
+  updatedAt    DateTime                @updatedAt @map("updated_at")
+
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  creator    User        @relation("CalendarEventCreatedBy", fields: [createdBy], references: [id], onDelete: Cascade)
+
+  @@index([startsAt])
+  @@index([departmentId])
+  @@map("calendar_events")
+}
+
+// Extra delivery channels per person and alert type; the in-app bell is always on.
+model NotificationChannelPreference {
+  userId    String   @map("user_id") @db.Char(36)
+  eventKey  String   @map("event_key") @db.VarChar(40)
+  email     Boolean  @default(false)
+  sms       Boolean  @default(false)
+  whatsapp  Boolean  @default(false)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, eventKey])
+  @@map("notification_channel_preferences")
+}
+
+// What each role may do; missing rows fall back to the built-in defaults.
+model RoleCapability {
+  role       AppRole
+  capability String   @db.VarChar(60)
+  allowed    Boolean
+  updatedBy  String?  @map("updated_by") @db.Char(36)
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@id([role, capability])
+  @@map("role_capabilities")
 }

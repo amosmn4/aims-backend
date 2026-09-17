@@ -1,11 +1,22 @@
-import { IsBoolean, IsDateString, IsNumber, IsOptional, IsString, Min } from "class-validator";
+import {
+  IsBoolean,
+  IsDateString,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Min,
+  IsIn,
+  MinLength,
+} from "class-validator";
 
 export class CreateInvoiceDto {
   @IsString()
+  @MinLength(1)
   invoiceNumber!: string;
 
+  @IsOptional()
   @IsString()
-  clientId!: string;
+  clientId?: string;
 
   @IsOptional()
   @IsString()
@@ -14,6 +25,10 @@ export class CreateInvoiceDto {
   @IsOptional()
   @IsString()
   contractId?: string;
+
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 
   @IsDateString()
   issueDate!: string;
@@ -40,8 +55,8 @@ export class CreateInvoiceDto {
   directCost?: number;
 
   @IsOptional()
-  @IsString()
-  status?: string;
+  @IsIn(["draft", "sent"])
+  status?: "draft" | "sent";
 
   @IsOptional()
   @IsBoolean()

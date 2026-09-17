@@ -31,7 +31,9 @@ export class GoogleAnalyticsService {
       this.client = new BetaAnalyticsDataClient({ credentials });
       this.propertyId = propertyId;
     } catch {
-      this.logger.error("GA4_SERVICE_ACCOUNT_KEY_JSON is not valid JSON — Website Analytics will stay disconnected");
+      this.logger.error(
+        "GA4_SERVICE_ACCOUNT_KEY_JSON is not valid JSON — Website Analytics will stay disconnected",
+      );
     }
   }
 

@@ -13,6 +13,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "ts-node prisma/seed.ts",
     "reset:demo-data": "ts-node prisma/reset-demo-data.ts",
+    "water:seed": "ts-node prisma/seed-water.ts",
+    "water:clear-seed": "ts-node prisma/clear-water-seed.ts",
     "seed:water": "ts-node prisma/seed-water.ts",
     "test": "jest"
   },

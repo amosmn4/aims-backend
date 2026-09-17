@@ -41,6 +41,11 @@ export class CreateProjectDto {
   @IsString()
   departmentId!: string;
 
+  // Must be one of the project department's own service lines.
+  @IsOptional()
+  @IsString()
+  serviceLineId?: string;
+
   @IsOptional()
   @IsIn(PROJECT_STATUSES)
   status?: (typeof PROJECT_STATUSES)[number];

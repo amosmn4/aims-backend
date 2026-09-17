@@ -17,13 +17,13 @@ import { UpdateTenderPricingItemDto } from "./dto/update-tender-pricing-item.dto
 import { CreateTenderRequirementDto } from "./dto/create-tender-requirement.dto";
 import { UpdateTenderRequirementDto } from "./dto/update-tender-requirement.dto";
 import { SaveAsTemplateDto } from "./dto/save-as-template.dto";
+import { CreateAccessGrantDto } from "../../common/dto/create-access-grant.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import { parsePaginationQuery } from "../../common/pagination";
 
-const WRITE_ROLES = ["finance", "hr", "it", "marketing", "tender"] as const;
-
+// Writes are open at the route and enforced in TendersService (Tender module or explicit share).
 @Controller("tenders")
 export class TendersController {
   constructor(private readonly tendersService: TendersService) {}
@@ -104,13 +104,15 @@ export class TendersController {
   }
 
   @Post()
-  @Roles(...WRITE_ROLES)
+  @Roles()
   create(@Body() dto: CreateTenderDto, @CurrentUser() user: AuthenticatedUser) {
     return this.tendersService.create(dto, user);
   }
 
+  // Open outer gate (any authenticated user) — the real check is inside update(), which also
+  // honors an explicit access grant on this specific tender, not just a department-code role.
   @Patch(":id")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   update(
     @Param("id") id: string,
     @Body() dto: UpdateTenderDto,
@@ -120,7 +122,7 @@ export class TendersController {
   }
 
   @Patch(":id/stage")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   updateStage(
     @Param("id") id: string,
     @Body() dto: UpdateTenderStageDto,
@@ -129,14 +131,42 @@ export class TendersController {
     return this.tendersService.updateStage(id, dto, user);
   }
 
+  /* ---------- Access grants (share this tender outside its own department) ---------- */
+
+  @Get(":id/access-grants")
+  @Roles()
+  listAccessGrants(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.tendersService.listAccessGrants(id, user);
+  }
+
+  @Post(":id/access-grants")
+  @Roles()
+  createAccessGrant(
+    @Param("id") id: string,
+    @Body() dto: CreateAccessGrantDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.tendersService.createAccessGrant(id, dto, user);
+  }
+
+  @Delete(":id/access-grants/:grantId")
+  @Roles()
+  deleteAccessGrant(
+    @Param("id") id: string,
+    @Param("grantId") grantId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.tendersService.deleteAccessGrant(id, grantId, user);
+  }
+
   @Delete(":id")
-  @Roles("system_admin")
-  remove(@Param("id") id: string) {
-    return this.tendersService.remove(id);
+  @Roles()
+  remove(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.tendersService.remove(id, user);
   }
 
   @Post(":id/convert-to-contract")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   convertToContract(
     @Param("id") id: string,
     @Body() dto: ConvertToContractDto,
@@ -146,7 +176,7 @@ export class TendersController {
   }
 
   @Post(":id/convert-to-project")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   convertToProject(
     @Param("id") id: string,
     @Body() dto: ConvertTenderToProjectDto,
@@ -162,7 +192,7 @@ export class TendersController {
   }
 
   @Post(":id/resources")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   createResource(
     @Param("id") id: string,
     @Body() dto: CreateTenderResourceDto,
@@ -172,7 +202,7 @@ export class TendersController {
   }
 
   @Patch("resources/:resourceId")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   updateResource(
     @Param("resourceId") resourceId: string,
     @Body() dto: UpdateTenderResourceDto,
@@ -182,7 +212,7 @@ export class TendersController {
   }
 
   @Delete("resources/:resourceId")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   deleteResource(@Param("resourceId") resourceId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.tendersService.deleteResource(resourceId, user);
   }
@@ -224,7 +254,7 @@ export class TendersController {
   }
 
   @Post(":id/bonds")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   createBond(
     @Param("id") id: string,
     @Body() dto: CreateTenderBondDto,
@@ -234,7 +264,7 @@ export class TendersController {
   }
 
   @Patch("bonds/:bondId")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   updateBond(
     @Param("bondId") bondId: string,
     @Body() dto: UpdateTenderBondDto,
@@ -244,7 +274,7 @@ export class TendersController {
   }
 
   @Delete("bonds/:bondId")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   deleteBond(@Param("bondId") bondId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.tendersService.deleteBond(bondId, user);
   }
@@ -258,7 +288,7 @@ export class TendersController {
   }
 
   @Post(":id/pricing-items")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   createPricingItem(
     @Param("id") id: string,
     @Body() dto: CreateTenderPricingItemDto,
@@ -268,7 +298,7 @@ export class TendersController {
   }
 
   @Patch("pricing-items/:itemId")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   updatePricingItem(
     @Param("itemId") itemId: string,
     @Body() dto: UpdateTenderPricingItemDto,
@@ -278,7 +308,7 @@ export class TendersController {
   }
 
   @Delete("pricing-items/:itemId")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   deletePricingItem(@Param("itemId") itemId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.tendersService.deletePricingItem(itemId, user);
   }
@@ -298,7 +328,7 @@ export class TendersController {
   }
 
   @Post(":id/requirements")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   createRequirement(
     @Param("id") id: string,
     @Body() dto: CreateTenderRequirementDto,
@@ -308,7 +338,7 @@ export class TendersController {
   }
 
   @Patch("requirements/:reqId")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   updateRequirement(
     @Param("reqId") reqId: string,
     @Body() dto: UpdateTenderRequirementDto,
@@ -318,13 +348,13 @@ export class TendersController {
   }
 
   @Delete("requirements/:reqId")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   deleteRequirement(@Param("reqId") reqId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.tendersService.deleteRequirement(reqId, user);
   }
 
   @Post(":id/requirements/apply-template/:templateId")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   applyRequirementTemplate(
     @Param("id") id: string,
     @Param("templateId") templateId: string,
@@ -338,7 +368,7 @@ export class TendersController {
   // document set and creates/updates a matching, already-"obtained" requirement — so the tender
   // person never has to re-upload a document that's the same on every bid.
   @Post(":id/requirements/apply-library-document/:libraryDocumentId")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   applyLibraryDocument(
     @Param("id") id: string,
     @Param("libraryDocumentId") libraryDocumentId: string,
@@ -348,7 +378,7 @@ export class TendersController {
   }
 
   @Post(":id/requirements/save-as-template")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   saveRequirementsAsTemplate(
     @Param("id") id: string,
     @Body() dto: SaveAsTemplateDto,
@@ -364,7 +394,7 @@ export class TendersController {
   }
 
   @Post(":id/activities")
-  @Roles(...WRITE_ROLES)
+  @Roles()
   createActivity(
     @Param("id") id: string,
     @Body() dto: CreateTenderActivityDto,

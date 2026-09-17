@@ -30,10 +30,19 @@ export class FinanceUploadsService {
           ? await this.prisma.serviceLine.findUnique({ where: { code: row.serviceLineCode } })
           : null;
 
+        const contract = row.contractNumber
+          ? await this.prisma.contract.findUnique({ where: { contractNumber: row.contractNumber } })
+          : null;
+        if (row.contractNumber && !contract)
+          throw new Error(`Contract ${row.contractNumber} not found`);
+        if (row.serviceLineCode && !serviceLine)
+          throw new Error(`Service line code ${row.serviceLineCode} not found`);
+
         const total = row.subtotal + row.tax;
         const shared = {
           clientId: client.id,
-          serviceLineId: serviceLine?.id,
+          serviceLineId: serviceLine?.id ?? contract?.serviceLineId ?? undefined,
+          contractId: contract?.id,
           issueDate: new Date(row.issueDate),
           dueDate: new Date(row.dueDate),
           currencyCode: row.currencyCode || "KES",
@@ -45,14 +54,47 @@ export class FinanceUploadsService {
           isRecurring: row.isRecurring || serviceLine?.isRecurring || false,
           notes: row.notes,
         };
-        await this.prisma.invoice.upsert({
+        const invoice = await this.prisma.invoice.upsert({
           where: { invoiceNumber: row.invoiceNumber },
           create: { invoiceNumber: row.invoiceNumber, createdBy: userId, ...shared },
           update: shared,
         });
+        let paymentNote = "";
+        if (row.amountPaid && row.amountPaid > 0) {
+          const paidOn = new Date(row.paidOn || row.issueDate);
+          if (Number.isNaN(paidOn.getTime())) throw new Error("Paid on date is not a valid date");
+          const exists = await this.prisma.invoicePayment.findFirst({
+            where: { invoiceId: invoice.id, amount: row.amountPaid, paidOn },
+          });
+          if (!exists) {
+            await this.prisma.invoicePayment.create({
+              data: {
+                invoiceId: invoice.id,
+                amount: row.amountPaid,
+                paidOn,
+                reference: row.paymentReference,
+                method: "import",
+              },
+            });
+            paymentNote = " with payment";
+          }
+          const paid = await this.prisma.invoicePayment.aggregate({
+            where: { invoiceId: invoice.id },
+            _sum: { amount: true },
+          });
+          const paidTotal = Number(paid._sum.amount ?? 0);
+          await this.prisma.invoice.update({
+            where: { id: invoice.id },
+            data: { status: paidTotal >= total - 0.01 ? "paid" : "partial" },
+          });
+        }
 
         successCount++;
-        results.push({ row: i + 2, status: "success", message: `Imported ${row.invoiceNumber}` });
+        results.push({
+          row: i + 2,
+          status: "success",
+          message: `Imported ${row.invoiceNumber}${paymentNote}`,
+        });
       } catch (err) {
         errorCount++;
         results.push({

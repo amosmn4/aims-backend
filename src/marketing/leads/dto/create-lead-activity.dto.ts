@@ -1,4 +1,4 @@
-import { IsIn, IsOptional, IsString } from "class-validator";
+import { IsIn, IsOptional, IsString, IsUUID } from "class-validator";
 
 const ACTIVITY_TYPES = ["call", "email", "meeting", "note"] as const;
 
@@ -13,4 +13,8 @@ export class CreateLeadActivityDto {
   @IsOptional()
   @IsString()
   occurredAt?: string;
+
+  @IsOptional()
+  @IsUUID()
+  parentId?: string;
 }

@@ -1,6 +1,11 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from "@nestjs/common";
-import type { WaterMeterType, WaterVendingSystem } from "@prisma/client";
-import { WaterService } from "./water.service";
+import type { WaterMeterType } from "@prisma/client";
+import {
+  WaterService,
+  parseMeterStatusParam,
+  parseMeterTypeParam,
+  parseVendingSystemParam,
+} from "./water.service";
 import { CreateZoneDto } from "./dto/create-zone.dto";
 import { UpdateZoneDto } from "./dto/update-zone.dto";
 import { CreateCustomerDto } from "./dto/create-customer.dto";
@@ -15,9 +20,6 @@ import { CurrentUser } from "../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import { parsePaginationQuery } from "../common/pagination";
 
-// A standalone top-level module, not tied to any of the six core departments. Access is granted
-// per user via the "water" role (assigned individually in Admin > Users & Roles), on top of the
-// system_admin/ceo bypass every @Roles() check already gets.
 @Controller("water")
 @Roles("water")
 export class WaterController {
@@ -26,8 +28,12 @@ export class WaterController {
   /* ---------- Zones (self-nesting) ---------- */
 
   @Get("zones")
-  listZones(@Query("page") page?: string, @Query("pageSize") pageSize?: string) {
-    return this.waterService.listZones(parsePaginationQuery(page, pageSize));
+  listZones(
+    @Query("q") q?: string,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
+  ) {
+    return this.waterService.listZones({ q }, parsePaginationQuery(page, pageSize));
   }
 
   @Get("zones/all")
@@ -86,15 +92,22 @@ export class WaterController {
 
   @Get("meters")
   findAllMeters(
-    @Query("meterType") meterType?: WaterMeterType,
+    @Query("meterType") meterType?: string,
     @Query("zoneId") zoneId?: string,
     @Query("q") q?: string,
-    @Query("vendingSystem") vendingSystem?: WaterVendingSystem,
+    @Query("vendingSystem") vendingSystem?: string,
+    @Query("status") status?: string,
     @Query("page") page?: string,
     @Query("pageSize") pageSize?: string,
   ) {
     return this.waterService.findAllMeters(
-      { meterType, zoneId, q, vendingSystem },
+      {
+        meterType: parseMeterTypeParam(meterType),
+        zoneId,
+        q,
+        vendingSystem: parseVendingSystemParam(vendingSystem),
+        status: parseMeterStatusParam(status),
+      },
       parsePaginationQuery(page, pageSize),
     );
   }
@@ -124,13 +137,16 @@ export class WaterController {
   @Get("readings")
   listReadings(
     @Query("meterId") meterId?: string,
+    @Query("meterType") meterType?: string,
+    @Query("zoneId") zoneId?: string,
+    @Query("q") q?: string,
     @Query("from") from?: string,
     @Query("to") to?: string,
     @Query("page") page?: string,
     @Query("pageSize") pageSize?: string,
   ) {
     return this.waterService.listReadings(
-      { meterId, from, to },
+      { meterId, meterType: parseMeterTypeParam(meterType), zoneId, q, from, to },
       parsePaginationQuery(page, pageSize),
     );
   }
@@ -153,13 +169,25 @@ export class WaterController {
   /* ---------- Usage uploads & records ---------- */
 
   @Get("usage-uploads")
-  listUploads(@Query("page") page?: string, @Query("pageSize") pageSize?: string) {
-    return this.waterService.listUploads(parsePaginationQuery(page, pageSize));
+  listUploads(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("q") q?: string,
+    @Query("month") month?: string,
+    @Query("page") page?: string,
+    @Query("pageSize") pageSize?: string,
+  ) {
+    return this.waterService.listUploads(user, { q, month }, parsePaginationQuery(page, pageSize));
   }
 
   @Post("usage-uploads")
   createUpload(@Body() dto: CreateUsageUploadDto, @CurrentUser() user: AuthenticatedUser) {
     return this.waterService.createUpload(dto, user);
+  }
+
+  // Deletes the upload together with the usage records it imported.
+  @Delete("usage-uploads/:id")
+  deleteUpload(@Param("id") id: string) {
+    return this.waterService.deleteUpload(id);
   }
 
   @Get("usage-records")
@@ -203,8 +231,7 @@ export class WaterController {
     return this.waterService.reportSummary({ month });
   }
 
-  // Daily/weekly/monthly comparison series for main/bulk meter readings, over an explicit date
-  // range — the period-filterable chart data behind the Reports page's comparison views.
+  // Reading comparison series for the Reports page's period-filterable charts.
   @Get("readings/series")
   readingSeries(
     @Query("meterType") meterType: WaterMeterType,
@@ -222,8 +249,7 @@ export class WaterController {
     });
   }
 
-  // The literal reading log with each row's own computed delta — the "daily main meter readings"
-  // table.
+  // The reading log with each row's own computed delta.
   @Get("readings/with-delta")
   readingsWithDelta(
     @Query("meterId") meterId?: string,

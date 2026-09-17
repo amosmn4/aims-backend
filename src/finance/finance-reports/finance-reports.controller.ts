@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, Param, Patch, Post } from "@nestjs/commo
 import { FinanceReportsService } from "./finance-reports.service";
 import { CreateFinanceReportDto } from "./dto/create-finance-report.dto";
 import { UpdateReportStatusDto } from "./dto/update-report-status.dto";
+import { UpdateFinanceReportDto } from "./dto/update-finance-report.dto";
 import { CreateCommentDto } from "./dto/create-comment.dto";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
@@ -27,6 +28,15 @@ export class FinanceReportsController {
     return this.financeReportsService.create(dto, user.id);
   }
 
+  @Patch(":id")
+  update(
+    @Param("id") id: string,
+    @Body() dto: UpdateFinanceReportDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.financeReportsService.update(id, dto, user);
+  }
+
   @Patch(":id/status")
   updateStatus(
     @Param("id") id: string,
@@ -37,13 +47,13 @@ export class FinanceReportsController {
   }
 
   @Delete(":id")
-  remove(@Param("id") id: string) {
-    return this.financeReportsService.remove(id);
+  remove(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.financeReportsService.remove(id, user);
   }
 
   @Get(":id/comments")
-  findComments(@Param("id") id: string) {
-    return this.financeReportsService.findComments(id);
+  findComments(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.financeReportsService.findComments(id, user);
   }
 
   @Post(":id/comments")
@@ -52,6 +62,6 @@ export class FinanceReportsController {
     @Body() dto: CreateCommentDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.financeReportsService.addComment(id, dto.body, user.id);
+    return this.financeReportsService.addComment(id, dto.body, user, dto.parentId);
   }
 }

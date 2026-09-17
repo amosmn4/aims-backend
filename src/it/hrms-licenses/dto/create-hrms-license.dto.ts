@@ -20,6 +20,12 @@ export class CreateHrmsLicenseDto {
   @Min(0)
   activeUsers?: number;
 
+  // Seats the client pays for; active users may be fewer.
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  licensedSeats?: number | null;
+
   @IsOptional()
   @IsString()
   renewalDate?: string;

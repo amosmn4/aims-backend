@@ -1,4 +1,5 @@
 import { IsArray, IsOptional, IsString } from "class-validator";
+import { AllowHtml } from "../../../common/sanitize";
 
 export class CreateBlogPostDto {
   @IsString()
@@ -8,6 +9,8 @@ export class CreateBlogPostDto {
   @IsString()
   excerpt?: string;
 
+  // Rich text: sanitized against the editor allowlist in BlogService, not stripped.
+  @AllowHtml()
   @IsOptional()
   @IsString()
   content?: string;

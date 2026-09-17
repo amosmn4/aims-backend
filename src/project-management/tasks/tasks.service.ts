@@ -13,10 +13,12 @@ import type { CreateTaskDto } from "./dto/create-task.dto";
 import type { UpdateTaskDto } from "./dto/update-task.dto";
 import type { CreateCommentDto } from "./dto/create-comment.dto";
 import type { UpdateCommentDto } from "./dto/update-comment.dto";
+import { ThreadsService } from "../../threads/threads.service";
 
 @Injectable()
 export class TasksService {
   constructor(
+    private readonly threads: ThreadsService,
     private readonly prisma: PrismaService,
     private readonly documentsService: DocumentsService,
     private readonly timelineExtensionsService: TimelineExtensionsService,
@@ -30,7 +32,7 @@ export class TasksService {
   // filtering for your own assigned tasks ("My Tasks") is itself a safe, self-limiting signal, so
   // it's allowed to surface tasks outside your department the same way Project's `sharedWithMe`
   // does for project-level access.
-  findAll(
+  async findAll(
     filters: {
       projectId?: string;
       departmentId?: string;
@@ -40,7 +42,7 @@ export class TasksService {
     pagination: PaginationQueryDto = {},
     viewer: AuthenticatedUser,
   ) {
-    const deptCodes = viewerDepartmentCodes(viewer);
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     const isOwnAssigneeFilter = !!filters.assigneeId && filters.assigneeId === viewer.id;
     const projectWhere: Record<string, unknown> = {};
     if (filters.departmentId) projectWhere.departmentId = filters.departmentId;
@@ -85,7 +87,7 @@ export class TasksService {
         dependsOn: { include: { dependsOn: { select: { id: true, title: true, status: true } } } },
       },
     });
-    const deptCodes = viewerDepartmentCodes(viewer);
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     const needsMembershipCheck =
       !!deptCodes &&
       (!deptCodes.includes(task.project.department.code) ||
@@ -132,7 +134,7 @@ export class TasksService {
       include: { project: { include: { department: true } } },
     });
     if (task.assigneeId === user.id) return task;
-    assertDepartmentAccess(task.project.department, user);
+    await assertDepartmentAccess(task.project.department, user, this.prisma);
     return task;
   }
 
@@ -141,7 +143,7 @@ export class TasksService {
       where: { id: dto.projectId },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
 
     const task = await this.prisma.task.create({
       data: {
@@ -235,15 +237,35 @@ export class TasksService {
 
   async createComment(taskId: string, dto: CreateCommentDto, user: AuthenticatedUser) {
     const task = await this.assertTaskAccess(taskId, user);
+    const parent = dto.parentId
+      ? await this.prisma.taskComment.findUnique({
+          where: { id: dto.parentId },
+          select: { id: true, parentId: true, taskId: true },
+        })
+      : null;
+    const parentId = dto.parentId ? this.threads.rootOf(parent, parent?.taskId === taskId) : null;
     const comment = await this.prisma.taskComment.create({
-      data: { taskId, authorId: user.id, body: dto.body },
+      data: { taskId, authorId: user.id, body: dto.body, parentId },
       include: {
         author: {
           select: { id: true, fullName: true, email: true, roles: { select: { role: true } } },
         },
       },
     });
-    if (task.assigneeId && task.assigneeId !== user.id) {
+    if (parentId) {
+      const thread = await this.prisma.taskComment.findMany({
+        where: { OR: [{ id: parentId }, { parentId }] },
+        select: { authorId: true },
+      });
+      await this.threads.notifyReply({
+        participantIds: thread.map((t) => t.authorId),
+        actor: user,
+        where: `task "${task.title}"`,
+        body: dto.body,
+        resourceType: "task",
+        resourceId: taskId,
+      });
+    } else if (task.assigneeId && task.assigneeId !== user.id) {
       await this.notificationsService.notify({
         userId: task.assigneeId,
         type: "task_comment",

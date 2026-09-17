@@ -48,6 +48,22 @@ export class ImportInvoiceRowDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  @IsOptional()
+  @IsString()
+  contractNumber?: string;
+
+  @IsOptional()
+  @IsNumber()
+  amountPaid?: number;
+
+  @IsOptional()
+  @IsString()
+  paidOn?: string;
+
+  @IsOptional()
+  @IsString()
+  paymentReference?: string;
 }
 
 export class ImportInvoicesDto {

@@ -1,4 +1,9 @@
-import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
 import type { ClientRequestActivityType, ProjectStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
@@ -21,12 +26,26 @@ import type { CreateRaciEntryDto } from "./dto/create-raci-entry.dto";
 import type { UpdateRaciEntryDto } from "./dto/update-raci-entry.dto";
 import type { CreateRaidEntryDto } from "./dto/create-raid-entry.dto";
 import type { UpdateRaidEntryDto } from "./dto/update-raid-entry.dto";
+import { recordStageChange } from "../../common/stage-history";
+import { ThreadsService } from "../../threads/threads.service";
 
 const userSelect = { id: true, fullName: true, email: true, roles: { select: { role: true } } };
+const serviceLineSelect = { id: true, code: true, name: true, isRecurring: true };
+const contractSummarySelect = {
+  id: true,
+  contractNumber: true,
+  status: true,
+  value: true,
+  currency: true,
+  billingFrequency: true,
+  startDate: true,
+  endDate: true,
+};
 
 @Injectable()
 export class ProjectsService {
   constructor(
+    private readonly threads: ThreadsService,
     private readonly prisma: PrismaService,
     private readonly documentsService: DocumentsService,
     private readonly timelineExtensionsService: TimelineExtensionsService,
@@ -40,17 +59,18 @@ export class ProjectsService {
   // exception is `sharedWithMe`: a project outside the viewer's department they've been
   // explicitly added to as a team member — an opt-in grant, not a blanket leak, so it uses its
   // own narrower authorization (team membership) instead of the department-code check.
-  findAll(
+  async findAll(
     filters: {
       departmentId?: string;
       status?: ProjectStatus;
       clientId?: string;
+      serviceLineId?: string;
       sharedWithMe?: boolean;
     },
     pagination: PaginationQueryDto = {},
     viewer: AuthenticatedUser,
   ) {
-    const deptCodes = viewerDepartmentCodes(viewer);
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     return maybePaginate(
       this.prisma.project,
       {
@@ -58,6 +78,7 @@ export class ProjectsService {
           ...(filters.departmentId && { departmentId: filters.departmentId }),
           ...(filters.status && { status: filters.status }),
           ...(filters.clientId && { clientId: filters.clientId }),
+          ...(filters.serviceLineId && { serviceLineId: filters.serviceLineId }),
           ...(filters.sharedWithMe
             ? {
                 departmentId: { not: viewer.departmentId ?? undefined },
@@ -75,6 +96,8 @@ export class ProjectsService {
         include: {
           department: true,
           client: true,
+          serviceLine: { select: serviceLineSelect },
+          contract: { select: contractSummarySelect },
           tender: { select: { id: true, referenceNumber: true, title: true } },
           clientRequest: { select: { id: true, referenceNumber: true, title: true } },
           _count: { select: { tasks: true } },
@@ -85,9 +108,7 @@ export class ProjectsService {
     );
   }
 
-  // 404 (not 403) for an out-of-scope project — it shouldn't even register as existing to a
-  // viewer who can't see it, matching the "invisible, not just access-denied" convention already
-  // used for system_admin visibility elsewhere in this app.
+  // 404 (not 403) for an out-of-scope project.
   async findOne(id: string, viewer: AuthenticatedUser) {
     const project = await this.prisma.project.findUniqueOrThrow({
       where: { id },
@@ -95,11 +116,12 @@ export class ProjectsService {
         department: true,
         client: true,
         contract: true,
+        serviceLine: { select: serviceLineSelect },
         tender: { select: { id: true, referenceNumber: true, title: true } },
         clientRequest: { select: { id: true, referenceNumber: true, title: true } },
       },
     });
-    const deptCodes = viewerDepartmentCodes(viewer);
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     const needsMembershipCheck = deptCodes
       ? !deptCodes.includes(project.department.code) ||
         (project.visibility === "restricted" && project.createdBy !== viewer.id)
@@ -118,7 +140,8 @@ export class ProjectsService {
     const department = await this.prisma.department.findUniqueOrThrow({
       where: { id: dto.departmentId },
     });
-    assertDepartmentAccess(department, user);
+    await assertDepartmentAccess(department, user, this.prisma);
+    const serviceLine = await this.resolveServiceLine(dto.serviceLineId, dto.departmentId);
 
     const project = await this.prisma.project.create({
       data: {
@@ -127,9 +150,10 @@ export class ProjectsService {
         clientId: dto.clientId,
         contractId: dto.contractId,
         departmentId: dto.departmentId,
+        serviceLineId: serviceLine?.id,
         status: dto.status,
         visibility: dto.visibility,
-        engagementType: dto.engagementType,
+        engagementType: dto.engagementType ?? (serviceLine?.isRecurring ? "ongoing" : undefined),
         startDate: dto.startDate ? new Date(dto.startDate) : undefined,
         endDate: dto.endDate ? new Date(dto.endDate) : undefined,
         createdBy: user.id,
@@ -139,6 +163,18 @@ export class ProjectsService {
       await this.grantTeamAccess(project.id, project.name, dto.memberIds, user);
     }
     return project;
+  }
+
+  // Keeps each department to its own service lines (e.g. HR projects can't pick IT's HRMS line).
+  private async resolveServiceLine(serviceLineId: string | null | undefined, departmentId: string) {
+    if (!serviceLineId) return null;
+    const serviceLine = await this.prisma.serviceLine.findUniqueOrThrow({
+      where: { id: serviceLineId },
+    });
+    if (serviceLine.departmentId !== departmentId) {
+      throw new BadRequestException("That service line belongs to a different department");
+    }
+    return serviceLine;
   }
 
   // Additive-only: creates a ProjectTeamMember row (userId set) for anyone in `userIds` not
@@ -191,24 +227,50 @@ export class ProjectsService {
       where: { id },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
 
     const isAdminOrCeo = user.roles.includes("system_admin") || user.roles.includes("ceo");
     if (dto.departmentId && dto.departmentId !== project.departmentId && !isAdminOrCeo) {
-      throw new ForbiddenException(
-        "Only the CEO or System Administrator can move a project to a different department",
-      );
+      throw new ForbiddenException("Only the CEO can move a project to a different department");
     }
 
-    const { memberIds, extensionReason, extensionAttribution, ...rest } = dto;
+    if (dto.serviceLineId) {
+      await this.resolveServiceLine(dto.serviceLineId, dto.departmentId ?? project.departmentId);
+    }
+    // Linking a contract to a client-less project adopts the contract's client.
+    let adoptedClientId: string | undefined;
+    if (dto.contractId && !project.clientId && dto.clientId === undefined) {
+      const contract = await this.prisma.contract.findUniqueOrThrow({
+        where: { id: dto.contractId },
+        select: { clientId: true },
+      });
+      adoptedClientId = contract.clientId;
+    }
+
+    const { memberIds, extensionReason, extensionAttribution, startDate, endDate, ...rest } = dto;
+    const stageMoved =
+      dto.deliveryStage !== undefined && dto.deliveryStage !== project.deliveryStage;
+    const statusMoved = dto.status !== undefined && dto.status !== project.status;
     const updated = await this.prisma.project.update({
       where: { id },
       data: {
         ...rest,
-        startDate: dto.startDate ? new Date(dto.startDate) : undefined,
-        endDate: dto.endDate ? new Date(dto.endDate) : undefined,
+        ...(stageMoved && { deliveryStageChangedAt: new Date() }),
+        ...(statusMoved && { completedAt: dto.status === "completed" ? new Date() : null }),
+        ...(adoptedClientId && { clientId: adoptedClientId }),
+        ...(startDate !== undefined && { startDate: startDate ? new Date(startDate) : null }),
+        ...(endDate !== undefined && { endDate: endDate ? new Date(endDate) : null }),
       },
     });
+    if (stageMoved) {
+      await recordStageChange(this.prisma, {
+        entityType: "project",
+        entityId: id,
+        from: project.deliveryStage,
+        to: updated.deliveryStage,
+        userId: user.id,
+      });
+    }
     if (memberIds?.length) await this.grantTeamAccess(id, updated.name, memberIds, user);
 
     // A timeline extension is only meaningful when a real previous end date got pushed later —
@@ -242,7 +304,7 @@ export class ProjectsService {
       where: { id },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
 
     const tasks = await this.prisma.task.findMany({
       where: { projectId: id },
@@ -265,7 +327,7 @@ export class ProjectsService {
       where: { id: projectId },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
 
     return this.prisma.milestone.create({
       data: {
@@ -283,7 +345,7 @@ export class ProjectsService {
       where: { id: milestoneId },
       include: { project: { include: { department: true } } },
     });
-    assertDepartmentAccess(milestone.project.department, user);
+    await assertDepartmentAccess(milestone.project.department, user, this.prisma);
 
     return this.prisma.milestone.update({
       where: { id: milestoneId },
@@ -299,7 +361,7 @@ export class ProjectsService {
       where: { id: milestoneId },
       include: { project: { include: { department: true } } },
     });
-    assertDepartmentAccess(milestone.project.department, user);
+    await assertDepartmentAccess(milestone.project.department, user, this.prisma);
     return this.prisma.milestone.delete({ where: { id: milestoneId } });
   }
 
@@ -383,18 +445,33 @@ export class ProjectsService {
 
   async createActivity(
     projectId: string,
-    dto: { type?: ClientRequestActivityType; summary: string; occurredAt?: string },
+    dto: {
+      type?: ClientRequestActivityType;
+      summary: string;
+      occurredAt?: string;
+      parentId?: string;
+    },
     user: AuthenticatedUser,
   ) {
     const project = await this.prisma.project.findUniqueOrThrow({
       where: { id: projectId },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
+    const parent = dto.parentId
+      ? await this.prisma.projectActivity.findUnique({
+          where: { id: dto.parentId },
+          select: { id: true, parentId: true, projectId: true },
+        })
+      : null;
+    const parentId = dto.parentId
+      ? this.threads.rootOf(parent, parent?.projectId === projectId)
+      : null;
 
     const activity = await this.prisma.projectActivity.create({
       data: {
         projectId,
+        parentId,
         type: dto.type,
         summary: dto.summary,
         occurredAt: dto.occurredAt ? new Date(dto.occurredAt) : undefined,
@@ -402,6 +479,20 @@ export class ProjectsService {
       },
       include: { creator: { select: userSelect } },
     });
+    if (parentId) {
+      const thread = await this.prisma.projectActivity.findMany({
+        where: { OR: [{ id: parentId }, { parentId }] },
+        select: { createdBy: true },
+      });
+      await this.threads.notifyReply({
+        participantIds: thread.map((t) => t.createdBy),
+        actor: user,
+        where: `project "${project.name}"`,
+        body: dto.summary,
+        resourceType: "project",
+        resourceId: projectId,
+      });
+    }
     return { ...activity, creator: activity.creator ? maskUserRef(activity.creator, user) : null };
   }
 
@@ -424,7 +515,7 @@ export class ProjectsService {
       where: { id: projectId },
       include: { department: true },
     });
-    assertDepartmentAccess(project.department, user);
+    await assertDepartmentAccess(project.department, user, this.prisma);
     return project;
   }
 
@@ -464,7 +555,14 @@ export class ProjectsService {
       include: { user: { select: userSelect } },
       orderBy: { createdAt: "asc" },
     });
-    return members.map((m) => ({ ...m, user: m.user ? maskUserRef(m.user, viewer) : null }));
+    return members.map((m) => {
+      const user = m.user ? maskUserRef(m.user, viewer) : null;
+      return {
+        ...m,
+        name: user && m.user?.fullName !== user.fullName ? user.fullName : m.name,
+        user,
+      };
+    });
   }
 
   async createTeamMember(projectId: string, dto: CreateTeamMemberDto, user: AuthenticatedUser) {

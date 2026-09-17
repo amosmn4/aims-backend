@@ -1,13 +1,13 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
+import { assertModuleWrite } from "../../common/module-access";
+import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { CreateRequirementTemplateDto } from "./dto/create-requirement-template.dto";
 import type { UpdateRequirementTemplateDto } from "./dto/update-requirement-template.dto";
 import type { CreateTemplateItemDto } from "./dto/create-template-item.dto";
 import type { UpdateTemplateItemDto } from "./dto/update-template-item.dto";
 
-// Global, reusable catalog — not tender-scoped. Any of the operating departments can create/
-// manage templates (organic, team-built checklists), matching the same WRITE_ROLES convention
-// tenders themselves use, enforced at the controller.
+// Global, reusable requirement checklists — managed only by the Tender module, like tenders themselves.
 @Injectable()
 export class TenderRequirementTemplatesService {
   constructor(private readonly prisma: PrismaService) {}
@@ -26,12 +26,22 @@ export class TenderRequirementTemplatesService {
     });
   }
 
-  create(dto: CreateRequirementTemplateDto, userId: string) {
+  private assertManage(user: AuthenticatedUser) {
+    return assertModuleWrite(
+      "tender",
+      user,
+      this.prisma,
+      "Only the Tender team can manage templates",
+    );
+  }
+
+  async create(dto: CreateRequirementTemplateDto, user: AuthenticatedUser) {
+    await this.assertManage(user);
     return this.prisma.tenderRequirementTemplate.create({
       data: {
         name: dto.name,
         description: dto.description,
-        createdBy: userId,
+        createdBy: user.id,
         items: dto.items
           ? {
               create: dto.items.map((item, i) => ({
@@ -46,26 +56,31 @@ export class TenderRequirementTemplatesService {
     });
   }
 
-  update(id: string, dto: UpdateRequirementTemplateDto) {
+  async update(id: string, dto: UpdateRequirementTemplateDto, user: AuthenticatedUser) {
+    await this.assertManage(user);
     return this.prisma.tenderRequirementTemplate.update({ where: { id }, data: dto });
   }
 
-  remove(id: string) {
+  async remove(id: string, user: AuthenticatedUser) {
+    await this.assertManage(user);
     return this.prisma.tenderRequirementTemplate.delete({ where: { id } });
   }
 
-  async addItem(templateId: string, dto: CreateTemplateItemDto) {
+  async addItem(templateId: string, dto: CreateTemplateItemDto, user: AuthenticatedUser) {
+    await this.assertManage(user);
     const count = await this.prisma.tenderRequirementTemplateItem.count({ where: { templateId } });
     return this.prisma.tenderRequirementTemplateItem.create({
       data: { templateId, ...dto, sortOrder: count },
     });
   }
 
-  updateItem(itemId: string, dto: UpdateTemplateItemDto) {
+  async updateItem(itemId: string, dto: UpdateTemplateItemDto, user: AuthenticatedUser) {
+    await this.assertManage(user);
     return this.prisma.tenderRequirementTemplateItem.update({ where: { id: itemId }, data: dto });
   }
 
-  removeItem(itemId: string) {
+  async removeItem(itemId: string, user: AuthenticatedUser) {
+    await this.assertManage(user);
     return this.prisma.tenderRequirementTemplateItem.delete({ where: { id: itemId } });
   }
 }

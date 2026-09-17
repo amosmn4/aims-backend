@@ -1,4 +1,4 @@
-import { IsDateString, IsNumber, IsOptional, IsString } from "class-validator";
+import { IsDateString, IsNumber, IsOptional, IsString, MaxLength, Min } from "class-validator";
 
 export class CreateReadingDto {
   @IsString()
@@ -8,9 +8,12 @@ export class CreateReadingDto {
   readingDate!: string;
 
   @IsNumber()
+  @Min(0)
   value!: number;
 
+  // null clears the notes on update.
   @IsOptional()
   @IsString()
-  notes?: string;
+  @MaxLength(191)
+  notes?: string | null;
 }

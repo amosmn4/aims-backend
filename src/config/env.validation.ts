@@ -45,12 +45,27 @@ const envSchema = z.object({
   SMTP_PASSWORD: z.string().min(1).optional(),
   SMTP_FROM: z.string().min(1).optional(),
 
+  // Optional SMS (Africa's Talking) and WhatsApp Cloud API alerts; skipped when unset.
+  AT_USERNAME: z.string().min(1).optional(),
+  AT_API_KEY: z.string().min(1).optional(),
+  AT_SENDER_ID: z.string().min(1).optional(),
+  WHATSAPP_TOKEN: z.string().min(1).optional(),
+  WHATSAPP_PHONE_NUMBER_ID: z.string().min(1).optional(),
+  WHATSAPP_TEMPLATE_NAME: z.string().min(1).optional(),
+  WHATSAPP_TEMPLATE_LANGUAGE: z.string().min(1).optional(),
+
   // Shared secret the amsol.africa website authenticates with to call the public blog feed +
   // engagement endpoints (GET /public/blog/feed, POST /public/blog/engagement) — see
   // marketing/blog/public-blog-api-key.guard.ts. Image/video streaming stays unauthenticated
   // (plain <img>/<video> tags can't send custom headers). Optional at boot so the app still
   // starts without it, but those two routes reject every request until it's set.
   PUBLIC_BLOG_API_KEY: z.string().min(1).optional(),
+
+  // AI insights/chat (water module only for now). OpenAI primary, Gemini fallback. Both optional.
+  OPENAI_API_KEY: z.string().min(1).optional(),
+  OPENAI_MODEL: z.string().min(1).optional(),
+  GEMINI_API_KEY: z.string().min(1).optional(),
+  GEMINI_MODEL: z.string().min(1).optional(),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

@@ -4,7 +4,12 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import type { Readable } from "node:stream";
 import type { Response } from "express";
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+} from "@aws-sdk/client-s3";
 
 export interface StreamOptions {
   contentType?: string;
@@ -66,26 +71,33 @@ export class StorageService {
 
     if (this.client && this.bucket) {
       try {
-        const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+        const result = await this.client.send(
+          new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+        );
         (result.Body as Readable).pipe(res);
-      } catch {
-        throw new NotFoundException("File is missing from storage");
+        return;
+      } catch (err) {
+        // Files uploaded before S3 was configured still live on local disk — fall through to it.
+        this.logger.warn(`S3 read failed for "${key}", trying local disk: ${(err as Error).name}`);
       }
-      return;
     }
 
     const fullPath = path.join(LOCAL_ROOT, key);
     try {
       await fs.access(fullPath);
     } catch {
+      this.logger.warn(`Storage file not found: ${key}`);
       throw new NotFoundException("File is missing from storage");
     }
-    res.sendFile(fullPath);
+    // `root` keeps send's dotfile check off the deploy path (a ".dir" parent would otherwise 404).
+    res.sendFile(key, { root: LOCAL_ROOT });
   }
 
   async delete(key: string): Promise<void> {
     if (this.client && this.bucket) {
-      await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key })).catch(() => {});
+      await this.client
+        .send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }))
+        .catch(() => {});
       return;
     }
     await fs.rm(path.join(LOCAL_ROOT, key), { force: true });

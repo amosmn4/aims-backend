@@ -12,9 +12,7 @@ import { parsePaginationQuery } from "../common/pagination";
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
-  // Overrides the class-level @Roles("system_admin") with no required roles, so any
-  // authenticated staff member can populate account-manager-style dropdowns. System admins
-  // are filtered out of the result in the service unless the caller is one themselves.
+  // Open to all staff for people pickers.
   @Get("lite")
   @Roles()
   findAllLite(@CurrentUser() user: AuthenticatedUser) {
@@ -46,7 +44,11 @@ export class UsersController {
   }
 
   @Patch(":id")
-  update(@Param("id") id: string, @Body() dto: UpdateUserDto, @CurrentUser() user: AuthenticatedUser) {
+  update(
+    @Param("id") id: string,
+    @Body() dto: UpdateUserDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
     return this.usersService.update(id, dto, user);
   }
 

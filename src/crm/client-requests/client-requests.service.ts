@@ -9,7 +9,10 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { DocumentsService } from "../../documents/documents.service";
 import { NotificationsService } from "../../notifications/notifications.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
+import { can, canWithCapability } from "../../common/permission-resolution";
+import { assertModuleWrite, canWriteModule } from "../../common/module-access";
 import { viewerDepartmentCodes } from "../../common/department-scope";
+import { hasResourceGrant } from "../../common/has-resource-grant";
 import { maskUserRef } from "../../common/mask-user-ref";
 import { TtlCache } from "../../common/ttl-cache";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
@@ -21,6 +24,9 @@ import type { UpdateClientRequestStageDto } from "./dto/update-client-request-st
 import type { ConvertToProjectDto } from "./dto/convert-to-project.dto";
 import type { ConvertToContractDto } from "./dto/convert-to-contract.dto";
 import type { CreateActivityDto } from "./dto/create-activity.dto";
+import { recordStageChange } from "../../common/stage-history";
+import { endOfDay, startOfDay } from "../../common/date-range";
+import { ThreadsService } from "../../threads/threads.service";
 
 const ALL_STAGES: ClientRequestStage[] = [
   "new",
@@ -52,12 +58,15 @@ function isAdminOrCeo(user: AuthenticatedUser) {
   return user.roles.includes("system_admin") || user.roles.includes("ceo");
 }
 
-// Operations owns intake (creates/routes every request) and Tender also acts on unrouted ones
-// (see assertAccess below) — both need to see the whole intake queue, not just their own
-// department's slice. Every other department only sees requests actually routed to it.
-function requestDeptFilter(viewer: AuthenticatedUser): Prisma.ClientRequestWhereInput {
-  const deptCodes = viewerDepartmentCodes(viewer);
-  if (deptCodes === null || deptCodes.includes("operations") || deptCodes.includes("tender")) {
+// Operations owns intake (creates/routes every request) — it alone needs the whole queue,
+// including everything still unrouted. Every other department (Tender included) only ever sees
+// requests actually routed to it; their view starts at "assigned," never "new."
+async function requestDeptFilter(
+  viewer: AuthenticatedUser,
+  prisma: PrismaService,
+): Promise<Prisma.ClientRequestWhereInput> {
+  const deptCodes = await viewerDepartmentCodes(viewer, prisma);
+  if (deptCodes === null || deptCodes.includes("operations")) {
     return {};
   }
   return { department: { code: { in: deptCodes } } };
@@ -70,17 +79,32 @@ function buildWhere(filters: ClientRequestFilters): Prisma.ClientRequestWhereInp
     ...(filters.stage && { stage: filters.stage }),
     ...(filters.source && { source: filters.source }),
     ...(filters.clientId && { clientId: filters.clientId }),
-    ...(filters.q && { title: { contains: filters.q } }),
+    ...(filters.q && {
+      OR: [
+        { title: { contains: filters.q } },
+        { referenceNumber: { contains: filters.q } },
+        { prospectClientName: { contains: filters.q } },
+        { contactName: { contains: filters.q } },
+        { client: { name: { contains: filters.q } } },
+      ],
+    }),
     ...((filters.dateFrom || filters.dateTo) && {
       createdAt: {
-        ...(filters.dateFrom && { gte: new Date(filters.dateFrom) }),
-        ...(filters.dateTo && { lte: new Date(filters.dateTo) }),
+        ...(filters.dateFrom && { gte: startOfDay(filters.dateFrom) }),
+        ...(filters.dateTo && { lte: endOfDay(filters.dateTo) }),
       },
     }),
   };
 }
 
 const userSelect = { id: true, fullName: true, email: true, roles: { select: { role: true } } };
+
+const USER_REF = {
+  id: true,
+  fullName: true,
+  email: true,
+  roles: { select: { role: true } },
+} as const;
 
 @Injectable()
 export class ClientRequestsService {
@@ -98,6 +122,7 @@ export class ClientRequestsService {
     private readonly prisma: PrismaService,
     private readonly documentsService: DocumentsService,
     private readonly notificationsService: NotificationsService,
+    private readonly threads: ThreadsService,
   ) {}
 
   // Shared by create/update/route — notify only when assignedToId is actually changing to a
@@ -122,7 +147,7 @@ export class ClientRequestsService {
     });
   }
 
-  findAll(
+  async findAll(
     filters: ClientRequestFilters,
     viewer: AuthenticatedUser,
     pagination: PaginationQueryDto = {},
@@ -130,7 +155,7 @@ export class ClientRequestsService {
     return maybePaginate(
       this.prisma.clientRequest,
       {
-        where: { ...buildWhere(filters), ...requestDeptFilter(viewer) },
+        where: { ...buildWhere(filters), ...(await requestDeptFilter(viewer, this.prisma)) },
         include: {
           client: { select: { id: true, name: true } },
           department: { select: { id: true, name: true, code: true } },
@@ -143,8 +168,9 @@ export class ClientRequestsService {
   }
 
   // Cached for 30s per distinct filter set *and* viewer scope — see TendersService.pipelineSummary.
-  pipelineSummary(filters: ClientRequestFilters, viewer: AuthenticatedUser) {
-    const cacheKey = JSON.stringify({ filters, scope: viewerDepartmentCodes(viewer) });
+  async pipelineSummary(filters: ClientRequestFilters, viewer: AuthenticatedUser) {
+    const scope = await viewerDepartmentCodes(viewer, this.prisma);
+    const cacheKey = JSON.stringify({ filters, scope });
     return this.pipelineSummaryCache.getOrSet(cacheKey, () =>
       this.computePipelineSummary(filters, viewer),
     );
@@ -156,7 +182,7 @@ export class ClientRequestsService {
   // attributing a lost/withdrawn request to every stage it actually reached via `lostFromStage`
   // rather than just its final `stage`.
   private async computePipelineSummary(filters: ClientRequestFilters, viewer: AuthenticatedUser) {
-    const where = { ...buildWhere(filters), ...requestDeptFilter(viewer) };
+    const where = { ...buildWhere(filters), ...(await requestDeptFilter(viewer, this.prisma)) };
     const [liveRows, lostRows] = await Promise.all([
       this.prisma.clientRequest.groupBy({
         by: ["stage"],
@@ -211,7 +237,11 @@ export class ClientRequestsService {
   async lostBreakdown(filters: ClientRequestFilters, viewer: AuthenticatedUser) {
     const rows = await this.prisma.clientRequest.groupBy({
       by: ["lostFromStage"],
-      where: { ...buildWhere(filters), ...requestDeptFilter(viewer), stage: { in: LOST_STAGES } },
+      where: {
+        ...buildWhere(filters),
+        ...(await requestDeptFilter(viewer, this.prisma)),
+        stage: { in: LOST_STAGES },
+      },
       _count: { _all: true },
     });
     return rows
@@ -228,7 +258,7 @@ export class ClientRequestsService {
   // today."
   async timeInStage(filters: ClientRequestFilters, viewer: AuthenticatedUser) {
     const rows = await this.prisma.clientRequest.findMany({
-      where: { ...buildWhere(filters), ...requestDeptFilter(viewer) },
+      where: { ...buildWhere(filters), ...(await requestDeptFilter(viewer, this.prisma)) },
       select: {
         id: true,
         title: true,
@@ -304,13 +334,16 @@ export class ClientRequestsService {
         convertedFromLead: { select: { id: true, name: true } },
       },
     });
-    const deptCodes = viewerDepartmentCodes(viewer);
-    if (
+    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
+    const outOfScope =
       deptCodes &&
       !deptCodes.includes("operations") &&
       !deptCodes.includes("tender") &&
       (!request.department || !deptCodes.includes(request.department.code)) &&
-      request.assignedToId !== viewer.id
+      request.assignedToId !== viewer.id;
+    if (
+      outOfScope &&
+      !(await hasResourceGrant("client_request", id, viewer, "read", this.prisma))
     ) {
       throw new NotFoundException("Client request not found");
     }
@@ -320,18 +353,33 @@ export class ClientRequestsService {
     };
   }
 
-  /** Before routing (no department yet) only tender/admin/ceo can act on a request — Tender
-   * owns intake (same team as the pre-project Tender pipeline). Once routed, ownership follows
-   * the assigned department, same as every other module's assertDepartmentAccess usage. */
-  private async assertAccess(request: { departmentId: string | null }, user: AuthenticatedUser) {
+  /** Before routing (no department yet) only operations/admin/ceo can act on a request —
+   * Operations owns intake. Once routed, ownership follows the assigned department, same as
+   * every other module's assertDepartmentAccess usage. `requestId`, when given, also honors an
+   * explicit access grant on this specific request (see access-grant methods below). */
+  private async assertAccess(
+    request: { id?: string; departmentId: string | null },
+    user: AuthenticatedUser,
+  ) {
     if (!request.departmentId) {
-      if (isAdminOrCeo(user) || user.roles.includes("tender")) return;
-      throw new ForbiddenException("Only Tender can manage an unrouted request");
+      if (isAdminOrCeo(user) || user.roles.includes("operations")) return;
+      throw new ForbiddenException("Only Operations can manage an unrouted request");
     }
     const department = await this.prisma.department.findUniqueOrThrow({
       where: { id: request.departmentId },
     });
-    assertDepartmentAccess(department, user);
+    // Operations owns intake, so it can still correct or re-route a request after routing it.
+    if (await this.canWriteIntake(user)) return;
+    try {
+      await assertDepartmentAccess(department, user, this.prisma);
+    } catch (err) {
+      if (
+        !request.id ||
+        !(await hasResourceGrant("client_request", request.id, user, "write", this.prisma))
+      ) {
+        throw err;
+      }
+    }
   }
 
   async create(dto: CreateClientRequestDto, user: AuthenticatedUser) {
@@ -346,10 +394,56 @@ export class ClientRequestsService {
     return request;
   }
 
+  private canWriteIntake(user: AuthenticatedUser) {
+    return canWriteModule("operations", user, this.prisma);
+  }
+
+  // Onboarding a won request must be done by someone in the department it was routed to.
+  private async assertOwningDepartment(departmentId: string, user: AuthenticatedUser) {
+    const department = await this.prisma.department.findUniqueOrThrow({
+      where: { id: departmentId },
+    });
+    if (!(await canWithCapability(user, department, "onboard_clients", this.prisma))) {
+      throw new ForbiddenException(`Only the ${department.name} team can onboard this client`);
+    }
+  }
+
   async update(id: string, dto: UpdateClientRequestDto, user: AuthenticatedUser) {
     const existing = await this.prisma.clientRequest.findUniqueOrThrow({ where: { id } });
     await this.assertAccess(existing, user);
-    const updated = await this.prisma.clientRequest.update({ where: { id }, data: dto });
+
+    const departmentChanged =
+      dto.departmentId !== undefined && dto.departmentId !== existing.departmentId;
+    if (departmentChanged) {
+      await this.assertAccess({ departmentId: dto.departmentId ?? null }, user);
+    }
+    // Editing the department is a (re-)route: stamp it the same way route() does.
+    const routing =
+      departmentChanged && dto.departmentId
+        ? {
+            routedAt: new Date(),
+            ...(existing.stage === "new" && { stage: "assigned" as const }),
+          }
+        : departmentChanged && existing.stage === "assigned"
+          ? { stage: "new" as const, routedAt: null }
+          : {};
+
+    const nextStage = "stage" in routing ? routing.stage : existing.stage;
+    const updated = await this.prisma.clientRequest.update({
+      where: { id },
+      data: {
+        ...dto,
+        ...routing,
+        ...(nextStage !== existing.stage && { stageChangedAt: new Date() }),
+      },
+    });
+    await recordStageChange(this.prisma, {
+      entityType: "client_request",
+      entityId: id,
+      from: existing.stage,
+      to: updated.stage,
+      userId: user.id,
+    });
     await this.notifyIfNewlyAssigned(
       id,
       updated.title,
@@ -371,7 +465,15 @@ export class ClientRequestsService {
         assignedToId: dto.assignedToId,
         stage: "assigned",
         routedAt: new Date(),
+        ...(existing.stage !== "assigned" && { stageChangedAt: new Date() }),
       },
+    });
+    await recordStageChange(this.prisma, {
+      entityType: "client_request",
+      entityId: id,
+      from: existing.stage,
+      to: "assigned",
+      userId: user.id,
     });
     await this.notifyIfNewlyAssigned(
       id,
@@ -389,22 +491,96 @@ export class ClientRequestsService {
 
     const now = new Date();
     const movingToLost = dto.stage === "lost" || dto.stage === "withdrawn";
-    return this.prisma.clientRequest.update({
+    if (movingToLost && !dto.lostReason?.trim()) {
+      throw new BadRequestException(
+        dto.stage === "lost" ? "Say why the request was lost" : "Say why the request was withdrawn",
+      );
+    }
+    const changed = dto.stage !== existing.stage;
+    const updated = await this.prisma.clientRequest.update({
       where: { id },
       data: {
         stage: dto.stage,
-        engagedAt: dto.stage === "engaging" ? now : existing.engagedAt,
-        proposalSentAt: dto.stage === "proposal" ? now : existing.proposalSentAt,
+        ...(changed && { stageChangedAt: now }),
+        routedAt: dto.stage === "assigned" ? (existing.routedAt ?? now) : existing.routedAt,
+        engagedAt: dto.stage === "engaging" ? (existing.engagedAt ?? now) : existing.engagedAt,
+        proposalSentAt:
+          dto.stage === "proposal" ? (existing.proposalSentAt ?? now) : existing.proposalSentAt,
         lostAt: movingToLost ? now : existing.lostAt,
         lostFromStage: movingToLost ? existing.stage : existing.lostFromStage,
-        lostReason: movingToLost ? dto.lostReason : existing.lostReason,
+        lostReason: movingToLost ? dto.lostReason!.trim() : existing.lostReason,
+      },
+    });
+    await recordStageChange(this.prisma, {
+      entityType: "client_request",
+      entityId: id,
+      from: existing.stage,
+      to: dto.stage,
+      userId: user.id,
+    });
+    return updated;
+  }
+
+  // Deleting is an intake decision, so it belongs to Operations.
+  async remove(id: string, user: AuthenticatedUser) {
+    await assertModuleWrite(
+      "operations",
+      user,
+      this.prisma,
+      "Only Operations can delete client requests",
+    );
+    await this.documentsService.deleteAllForResource("client_request", id);
+    return this.prisma.clientRequest.delete({ where: { id } });
+  }
+
+  /* ---------- Access grants (share this request outside its own department) ---------- */
+
+  async listAccessGrants(requestId: string, viewer: AuthenticatedUser) {
+    const grants = await this.prisma.resourceAccessGrant.findMany({
+      where: { resourceType: "client_request", resourceId: requestId },
+      include: {
+        user: { select: USER_REF },
+        department: { select: { id: true, name: true, code: true } },
+        creator: { select: USER_REF },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    return grants.map((g) => ({
+      ...g,
+      user: g.user ? maskUserRef(g.user, viewer) : null,
+      creator: g.creator ? maskUserRef(g.creator, viewer) : null,
+    }));
+  }
+
+  async createAccessGrant(
+    requestId: string,
+    dto: { userId?: string; departmentId?: string; level: "read" | "write" },
+    user: AuthenticatedUser,
+  ) {
+    const request = await this.prisma.clientRequest.findUniqueOrThrow({ where: { id: requestId } });
+    await this.assertAccess(request, user);
+    if (!dto.userId && !dto.departmentId) {
+      throw new BadRequestException("Share with either a user or a department");
+    }
+    return this.prisma.resourceAccessGrant.create({
+      data: {
+        resourceType: "client_request",
+        resourceId: requestId,
+        userId: dto.userId,
+        departmentId: dto.departmentId,
+        level: dto.level,
+        createdBy: user.id,
       },
     });
   }
 
-  async remove(id: string) {
-    await this.documentsService.deleteAllForResource("client_request", id);
-    return this.prisma.clientRequest.delete({ where: { id } });
+  async deleteAccessGrant(requestId: string, grantId: string, user: AuthenticatedUser) {
+    const request = await this.prisma.clientRequest.findUniqueOrThrow({ where: { id: requestId } });
+    await this.assertAccess(request, user);
+    await this.prisma.resourceAccessGrant.deleteMany({
+      where: { id: grantId, resourceType: "client_request", resourceId: requestId },
+    });
+    return { id: grantId };
   }
 
   async convertToProject(id: string, dto: ConvertToProjectDto, user: AuthenticatedUser) {
@@ -412,20 +588,18 @@ export class ClientRequestsService {
       where: { id },
       include: { convertedProject: true },
     });
-    await this.assertAccess(request, user);
     if (!request.departmentId) {
       throw new BadRequestException("Route this request to a department before converting it");
     }
+    await this.assertOwningDepartment(request.departmentId, user);
     if (request.convertedProject) {
       // Idempotent, mirrors TendersService.convertToContract — calling twice returns the
       // existing project rather than creating a duplicate (clientRequestId is DB-unique too).
       return request.convertedProject;
     }
 
-    const clientId = dto.clientId ?? request.clientId;
-    if (!clientId) {
-      throw new BadRequestException("A client is required to create a project from this request");
-    }
+    // Project.clientId is nullable — not every project has a client on file yet.
+    const clientId = dto.clientId ?? request.clientId ?? null;
 
     const project = await this.prisma.project.create({
       data: {
@@ -433,6 +607,14 @@ export class ClientRequestsService {
         description: request.description,
         clientId,
         departmentId: request.departmentId,
+        serviceLineId: request.serviceLineId
+          ? (
+              await this.prisma.serviceLine.findFirst({
+                where: { id: request.serviceLineId, departmentId: request.departmentId },
+                select: { id: true },
+              })
+            )?.id
+          : null,
         startDate: dto.startDate ? new Date(dto.startDate) : undefined,
         clientRequestId: request.id,
         createdBy: user.id,
@@ -441,7 +623,19 @@ export class ClientRequestsService {
 
     await this.prisma.clientRequest.update({
       where: { id },
-      data: { stage: "won", convertedAt: new Date(), conversionType: "project" },
+      data: {
+        stage: "won",
+        convertedAt: new Date(),
+        conversionType: "project",
+        ...(request.stage !== "won" && { stageChangedAt: new Date() }),
+      },
+    });
+    await recordStageChange(this.prisma, {
+      entityType: "client_request",
+      entityId: id,
+      from: request.stage,
+      to: "won",
+      userId: user.id,
     });
 
     return project;
@@ -452,10 +646,10 @@ export class ClientRequestsService {
       where: { id },
       include: { convertedContract: true },
     });
-    await this.assertAccess(request, user);
     if (!request.departmentId) {
       throw new BadRequestException("Route this request to a department before converting it");
     }
+    await this.assertOwningDepartment(request.departmentId, user);
     if (request.convertedContract) {
       return request.convertedContract;
     }
@@ -487,7 +681,19 @@ export class ClientRequestsService {
 
     await this.prisma.clientRequest.update({
       where: { id },
-      data: { stage: "won", convertedAt: new Date(), conversionType: "recurring_contract" },
+      data: {
+        stage: "won",
+        convertedAt: new Date(),
+        conversionType: "recurring_contract",
+        ...(request.stage !== "won" && { stageChangedAt: new Date() }),
+      },
+    });
+    await recordStageChange(this.prisma, {
+      entityType: "client_request",
+      entityId: id,
+      from: request.stage,
+      to: "won",
+      userId: user.id,
     });
 
     return contract;
@@ -510,17 +716,41 @@ export class ClientRequestsService {
   async createActivity(requestId: string, dto: CreateActivityDto, user: AuthenticatedUser) {
     const request = await this.prisma.clientRequest.findUniqueOrThrow({ where: { id: requestId } });
     await this.assertAccess(request, user);
+    const parent = dto.parentId
+      ? await this.prisma.clientRequestActivity.findUnique({
+          where: { id: dto.parentId },
+          select: { id: true, parentId: true, requestId: true },
+        })
+      : null;
+    const parentId = dto.parentId
+      ? this.threads.rootOf(parent, parent?.requestId === requestId)
+      : null;
 
     const activity = await this.prisma.clientRequestActivity.create({
       data: {
         requestId,
-        type: dto.type,
+        parentId,
+        type: dto.type ?? (parentId ? "note" : undefined),
         summary: dto.summary,
         occurredAt: dto.occurredAt ? new Date(dto.occurredAt) : undefined,
         createdBy: user.id,
       },
       include: { creator: { select: userSelect } },
     });
+    if (parentId) {
+      const thread = await this.prisma.clientRequestActivity.findMany({
+        where: { OR: [{ id: parentId }, { parentId }] },
+        select: { createdBy: true },
+      });
+      await this.threads.notifyReply({
+        participantIds: thread.map((t) => t.createdBy),
+        actor: user,
+        where: `request "${request.title}"`,
+        body: dto.summary,
+        resourceType: "client_request",
+        resourceId: requestId,
+      });
+    }
     return { ...activity, creator: activity.creator ? maskUserRef(activity.creator, user) : null };
   }
 

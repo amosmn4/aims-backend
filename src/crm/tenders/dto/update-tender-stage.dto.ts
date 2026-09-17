@@ -23,4 +23,9 @@ export class UpdateTenderStageDto {
   @IsOptional()
   @IsString()
   wonAt?: string;
+
+  // Why the bid was won, captured when marking it awarded.
+  @IsOptional()
+  @IsString()
+  wonReason?: string;
 }

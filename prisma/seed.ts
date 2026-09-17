@@ -112,7 +112,7 @@ async function main() {
     update: { passwordHash, isActive: true },
   });
 
-  for (const role of ["system_admin", "ceo"] as const) {
+  for (const role of ["system_admin"] as const) {
     await prisma.userRole.upsert({
       where: { userId_role: { userId: admin.id, role } },
       create: { userId: admin.id, role },

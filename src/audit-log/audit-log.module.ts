@@ -6,10 +6,7 @@ import { AuditLogInterceptor } from "./audit-log.interceptor";
 
 @Module({
   controllers: [AuditLogController],
-  providers: [
-    AuditLogService,
-    { provide: APP_INTERCEPTOR, useClass: AuditLogInterceptor },
-  ],
+  providers: [AuditLogService, { provide: APP_INTERCEPTOR, useClass: AuditLogInterceptor }],
   exports: [AuditLogService],
 })
 export class AuditLogModule {}

@@ -41,9 +41,18 @@ export class ClientsController {
   // client-requests.controller.ts / tenders.controller.ts. Editing/removing the master record is
   // narrower (finance + hr, who own client/contract lifecycle) below.
   @Post()
-  @Roles("finance", "hr", "it", "marketing", "tender", "operations")
-  create(@Body() dto: CreateClientDto) {
-    return this.clientsService.create(dto);
+  @Roles(
+    "finance",
+    "hr",
+    "it",
+    "marketing",
+    "tender",
+    "operations",
+    "department_head",
+    "account_manager",
+  )
+  create(@Body() dto: CreateClientDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.clientsService.create(dto, user);
   }
 
   @Patch(":id")
