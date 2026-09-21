@@ -37,7 +37,10 @@ export interface InboxItem {
   kind: "department_report" | "finance_report";
   id: string;
   title: string;
-  department: { id: string | null; name: string; code: string };
+  department: { id: string | null; name: string; code: string } | null;
+  reportKind?: "department" | "project" | "individual";
+  decidedBy?: "ceo" | "department_head";
+  subjectName?: string | null;
   periodStart: Date;
   periodEnd: Date;
   status: string;
@@ -59,10 +62,11 @@ export class ReportsInboxService {
     if (!isAdminOrCeo(user)) throw new ForbiddenException("Only the CEO has a reports inbox");
     const finance = await this.prisma.department.findUnique({ where: { code: "finance" } });
     const [deptReports, financeReports] = await Promise.all([
-      this.prisma.departmentReport.findMany({
+      this.prisma.report.findMany({
         where: { NOT: { status: "draft" } },
         include: {
           department: { select: { id: true, name: true, code: true } },
+          subjectUser: { select: { id: true, fullName: true, email: true } },
           creator: { select: USER_REF },
           messages: { orderBy: { createdAt: "desc" }, include: { author: { select: USER_REF } } },
         },
@@ -81,9 +85,15 @@ export class ReportsInboxService {
         const last = r.messages[0];
         return {
           kind: "department_report" as const,
+          reportKind: r.kind,
+          // Says whether this one is the CEO's to decide or a head's.
+          decidedBy: r.reviewerKind,
+          subjectName: r.subjectUser
+            ? (r.subjectUser.fullName ?? r.subjectUser.email)
+            : (r.department?.name ?? null),
           id: r.id,
           title: r.title,
-          department: r.department,
+          department: r.department ?? null,
           periodStart: r.periodStart,
           periodEnd: r.periodEnd,
           status: r.status,

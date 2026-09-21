@@ -100,6 +100,19 @@ function weekKey(d: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
+/** Monday of the week a date falls in, at UTC midnight. */
+function weekStart(d: Date): Date {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  date.setUTCDate(date.getUTCDate() - ((date.getUTCDay() + 6) % 7));
+  return date;
+}
+
+function addDays(d: Date, days: number): Date {
+  const next = new Date(d);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
 function monthKeyOf(d: Date): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
@@ -1183,28 +1196,50 @@ export class WaterService {
     };
   }
 
-  async trend(filters: { zoneId?: string; months?: number }) {
-    const count = Math.min(Math.max(filters.months ?? 6, 1), 24);
+  /** The same three totals per period, by week or by month, oldest first. */
+  async trend(filters: {
+    zoneId?: string;
+    months?: number;
+    granularity?: "week" | "month";
+    periods?: number;
+  }) {
+    const weekly = filters.granularity === "week";
+    const asked = filters.periods ?? filters.months ?? (weekly ? 12 : 6);
+    const count = Math.min(Math.max(asked, 1), weekly ? 52 : 24);
     const zoneIds = filters.zoneId ? await this.zoneAndDescendantIds(filters.zoneId) : undefined;
     const hhWhere = this.householdWhere(zoneIds);
-    const months: string[] = [];
-    for (let i = count - 1; i >= 0; i--) {
-      months.push(shiftMonth(undefined, -i));
+
+    const windows: { period: string; month: string; start: Date; end: Date }[] = [];
+    if (weekly) {
+      const thisWeek = weekStart(new Date());
+      for (let i = count - 1; i >= 0; i--) {
+        const start = addDays(thisWeek, -7 * i);
+        const end = addDays(start, 7);
+        windows.push({ period: dayKey(start), month: monthKeyOf(start), start, end });
+      }
+    } else {
+      for (let i = count - 1; i >= 0; i--) {
+        const month = shiftMonth(undefined, -i);
+        windows.push({ period: month, month, ...monthRange(month) });
+      }
     }
 
     return Promise.all(
-      months.map(async (month) => {
-        const { start, end } = monthRange(month);
+      windows.map(async (w) => {
         const [hhAgg, mainTotal, bulkTotal] = await Promise.all([
           this.prisma.waterUsageRecord.aggregate({
-            where: { recordedAt: { gte: start, lt: end }, ...hhWhere },
+            where: { recordedAt: { gte: w.start, lt: w.end }, ...hhWhere },
             _sum: { unitsSold: true },
           }),
-          this.mainMeterUsage(MAIN_METER_BOREHOLE_TO_TANK, start, end),
-          this.readingUsageForType("bulk", start, end, zoneIds),
+          this.mainMeterUsage(MAIN_METER_BOREHOLE_TO_TANK, w.start, w.end),
+          this.readingUsageForType("bulk", w.start, w.end, zoneIds),
         ]);
         return {
-          month,
+          period: w.period,
+          granularity: weekly ? ("week" as const) : ("month" as const),
+          month: w.month,
+          periodStart: w.start,
+          periodEnd: w.end,
           mainTotal,
           bulkTotal,
           householdTotal: Number(hhAgg._sum.unitsSold ?? 0),
@@ -1213,8 +1248,11 @@ export class WaterService {
     );
   }
 
-  async zoneComparison(filters: { month?: string }) {
-    const { start, end } = monthRange(filters.month);
+  async zoneComparison(filters: { month?: string; dateFrom?: Date; dateTo?: Date }) {
+    const { start, end } =
+      filters.dateFrom && filters.dateTo
+        ? { start: filters.dateFrom, end: endOfDay(filters.dateTo) }
+        : monthRange(filters.month);
     const { rows, zoneLessHouseholdTotal } = await this.zoneLossBreakdown(start, end);
 
     const mapped = rows.map((r) => ({

@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { Cron, CronExpression } from "@nestjs/schedule";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EmailService } from "./email.service";
+import { EVENT_KEY_BY_TYPE } from "../channels/notification-channels.service";
 
 function escapeHtml(value: string): string {
   return value
@@ -58,9 +59,23 @@ export class NotificationsDigestService {
     });
     const optedOutIds = new Set(optedOut.map((p) => p.userId));
 
+    // Anything the person switched off or muted stays out of the daily email too.
+    const userIds = [...new Set(unread.map((n) => n.userId))];
+    const channelPrefs = await this.prisma.notificationChannelPreference.findMany({
+      where: { userId: { in: userIds } },
+      select: { userId: true, eventKey: true, inApp: true, mutedUntil: true },
+    });
+    const now = new Date();
+    const silenced = new Set(
+      channelPrefs
+        .filter((p) => !p.inApp || (p.mutedUntil && p.mutedUntil.getTime() > now.getTime()))
+        .map((p) => `${p.userId}:${p.eventKey}`),
+    );
+
     const byUser = new Map<string, { email: string; name: string; items: DigestItem[] }>();
     for (const n of unread) {
       if (!n.user?.email || optedOutIds.has(n.userId)) continue;
+      if (silenced.has(`${n.userId}:${EVENT_KEY_BY_TYPE[n.type]}`)) continue;
       const entry = byUser.get(n.userId) ?? {
         email: n.user.email,
         name: n.user.fullName ?? n.user.email,

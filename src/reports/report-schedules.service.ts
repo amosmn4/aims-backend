@@ -35,6 +35,7 @@ export class ReportSchedulesService {
   @Cron("0 8 * * *", { timeZone: TIME_ZONE })
   async remindDueReports(today = new Date()) {
     const settings = await this.prisma.companySettings.findUnique({ where: { id: "company" } });
+    if (settings?.reportRemindersEnabled === false) return;
     const dueDay = settings?.reportDueDay ?? 5;
     const day = today.getDate();
     if (![dueDay - 3, dueDay, dueDay + 1].includes(day)) return;
@@ -82,6 +83,77 @@ export class ReportSchedulesService {
         });
       }
     }
+
+    await this.remindOwnReports(start, end, label, dueDate, day === dueDay);
+    await this.remindReviewers(label);
+  }
+
+  /** Nudges each person about their own report. Reminded, never blocked. */
+  private async remindOwnReports(
+    start: Date,
+    end: Date,
+    label: string,
+    dueDate: string,
+    dueToday: boolean,
+  ) {
+    const [staff, written] = await Promise.all([
+      this.prisma.user.findMany({
+        where: { isActive: true, departmentId: { not: null } },
+        select: { id: true },
+      }),
+      this.prisma.report.findMany({
+        where: {
+          kind: "individual",
+          periodStart: { gte: start, lte: end },
+          NOT: { status: "draft" },
+        },
+        select: { subjectId: true },
+      }),
+    ]);
+    const done = new Set(written.map((r) => r.subjectId));
+    for (const person of staff) {
+      if (done.has(person.id)) continue;
+      await this.notifications.notify({
+        userId: person.id,
+        type: "report_due",
+        severity: "info",
+        title: `Your own ${label} report is due ${dueToday ? "today" : `on ${dueDate}`}`,
+        body: "AIMS has your figures ready — it takes about five minutes.",
+        resourceType: "my_reports",
+        resourceId: start.toISOString().slice(0, 7),
+      });
+    }
+  }
+
+  /** Tells each department head how many of their people are waiting on them. */
+  private async remindReviewers(label: string) {
+    const waiting = await this.prisma.report.groupBy({
+      by: ["departmentId"],
+      where: { status: "submitted", reviewerKind: "department_head" },
+      _count: true,
+    });
+    for (const row of waiting) {
+      if (!row.departmentId || row._count === 0) continue;
+      const heads = await this.prisma.user.findMany({
+        where: {
+          departmentId: row.departmentId,
+          isActive: true,
+          roles: { some: { role: "department_head" } },
+        },
+        select: { id: true },
+      });
+      for (const head of heads) {
+        await this.notifications.notify({
+          userId: head.id,
+          type: "report_due",
+          severity: "info",
+          title: `${row._count} ${label} report${row._count === 1 ? "" : "s"} waiting on you`,
+          body: "Read them and approve, or send one back saying what needs to change.",
+          resourceType: "team_reports",
+          resourceId: row.departmentId,
+        });
+      }
+    }
   }
 
   @Cron("0 7 1 * *", { timeZone: TIME_ZONE })
@@ -118,8 +190,9 @@ export class ReportSchedulesService {
       where: { isActive: true, isCore: true },
     });
     const [deptReports, financeReports] = await Promise.all([
-      this.prisma.departmentReport.findMany({
+      this.prisma.report.findMany({
         where: {
+          kind: "department",
           periodType: "monthly",
           periodStart: { gte: start, lte: end },
           NOT: { status: "draft" },
@@ -176,7 +249,9 @@ export class ReportSchedulesService {
         where: { isActive: true, isCore: true },
         orderBy: { sortOrder: "asc" },
       }),
-      this.prisma.departmentReport.findMany({ where: { status: "approved", periodEnd: inMonth } }),
+      this.prisma.report.findMany({
+        where: { kind: "department", status: "approved", periodEnd: inMonth },
+      }),
       this.prisma.financeReport.findMany({ where: { status: "approved", periodEnd: inMonth } }),
     ]);
     const sections = departments.map((d) => {

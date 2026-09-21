@@ -214,16 +214,31 @@ export class WaterController {
   }
 
   @Get("trend")
-  trend(@Query("zoneId") zoneId?: string, @Query("months") months?: string) {
+  trend(
+    @Query("zoneId") zoneId?: string,
+    @Query("months") months?: string,
+    @Query("granularity") granularity?: "week" | "month",
+    @Query("periods") periods?: string,
+  ) {
     return this.waterService.trend({
       zoneId,
       months: months ? Number(months) : undefined,
+      granularity: granularity === "week" ? "week" : "month",
+      periods: periods ? Number(periods) : undefined,
     });
   }
 
   @Get("zone-comparison")
-  zoneComparison(@Query("month") month?: string) {
-    return this.waterService.zoneComparison({ month });
+  zoneComparison(
+    @Query("month") month?: string,
+    @Query("dateFrom") dateFrom?: string,
+    @Query("dateTo") dateTo?: string,
+  ) {
+    return this.waterService.zoneComparison({
+      month,
+      dateFrom: dateFrom ? new Date(dateFrom) : undefined,
+      dateTo: dateTo ? new Date(dateTo) : undefined,
+    });
   }
 
   @Get("reports/summary")

@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsEmail,
   IsIn,
   IsInt,
@@ -54,6 +55,16 @@ export class UpdateCompanySettingsDto {
   @Min(1)
   @Max(28)
   reportDueDay?: number;
+
+  // Off stops the monthly "report due" reminders for the whole company.
+  @IsOptional()
+  @IsBoolean()
+  reportRemindersEnabled?: boolean;
+
+  // On means heads decide on their team's own reports and progress reports.
+  @IsOptional()
+  @IsBoolean()
+  departmentHeadsReview?: boolean;
 
   // Who staff contact about access, invites and passwords; shown on the sign-in pages.
   @IsOptional()

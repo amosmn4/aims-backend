@@ -27,6 +27,9 @@ import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 // per-resource AttachmentsPanel (different query params against the same table) rather than
 // Contracts-style nested routes — see DocumentsService for why that keeps them automatically
 // in sync.
+// Types a browser shows on its own; anything else is sent as a download instead.
+const PREVIEWABLE = /^(application\/pdf|image\/(png|jpeg|jpg|gif|webp|svg\+xml)|text\/plain)$/i;
+
 @Controller("documents")
 export class DocumentsController {
   constructor(
@@ -91,6 +94,27 @@ export class DocumentsController {
   ) {
     const { fileName, key } = await this.documentsService.getFileForDownload(id, versionId, user);
     await this.storage.streamToResponse(key, res, { disposition: "attachment", fileName });
+  }
+
+  // Opens in the browser instead of downloading, for files a browser can show.
+  @Get(":id/preview")
+  @Roles()
+  async preview(
+    @Param("id") id: string,
+    @Query("versionId") versionId: string | undefined,
+    @CurrentUser() user: AuthenticatedUser,
+    @Res() res: Response,
+  ) {
+    const { fileName, key, mimeType } = await this.documentsService.getFileForDownload(
+      id,
+      versionId,
+      user,
+    );
+    await this.storage.streamToResponse(key, res, {
+      disposition: PREVIEWABLE.test(mimeType ?? "") ? "inline" : "attachment",
+      fileName,
+      contentType: mimeType ?? undefined,
+    });
   }
 
   @Get(":id/versions")

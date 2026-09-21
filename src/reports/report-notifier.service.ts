@@ -80,6 +80,7 @@ export class ReportNotifierService {
     for (const u of users) {
       const sub = u.reportEmailSubscriptions[0];
       if (sub && !sub.enabled) continue;
+      if (!(await this.channels.allowsEvent(u.id, event.type))) continue;
       if (await this.channels.emailsEvent(u.id, event.type)) continue;
       await this.email.send(
         u.email,

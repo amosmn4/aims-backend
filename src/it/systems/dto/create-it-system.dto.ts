@@ -1,3 +1,4 @@
+import { SystemDetailDto } from "./system-detail.dto";
 import { IsIn, IsOptional, IsString } from "class-validator";
 
 export const IT_SYSTEM_TYPES = [
@@ -10,7 +11,7 @@ export const IT_SYSTEM_TYPES = [
 ] as const;
 export const IT_SYSTEM_STATUSES = ["active", "inactive", "deprecated"] as const;
 
-export class CreateItSystemDto {
+export class CreateItSystemDto extends SystemDetailDto {
   @IsString()
   name!: string;
 

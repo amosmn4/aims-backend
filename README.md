@@ -1,5 +1,17 @@
 # AIMS Backend
 
+## Before the reports migration (one time)
+
+The migration that turns `department_reports` into `reports` is the only one that
+renames a table holding live data. Run this first — it only reads:
+
+```bash
+node scripts/check-reports-migration.cjs
+```
+
+It stops you if two reports exist for the same department and period, which the new
+rule forbids. Run it again after deploying to confirm every row came through.
+
 ## Deploying to production (after `git pull`)
 
 Run these from the `backend/` folder, in order:

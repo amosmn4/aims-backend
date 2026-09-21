@@ -151,6 +151,7 @@ export class NotificationsService {
 
   /** No preference row means every category is on; only an explicit false turns one off. */
   private async wants(userId: string, type: NotificationType) {
+    if (!(await this.channels.allowsEvent(userId, type))) return false;
     const category = CATEGORY_BY_TYPE[type];
     if (!category) return true;
     const pref = await this.prisma.notificationPreference.findUnique({ where: { userId } });
