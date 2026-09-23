@@ -12,6 +12,21 @@ node scripts/check-reports-migration.cjs
 It stops you if two reports exist for the same department and period, which the new
 rule forbids. Run it again after deploying to confirm every row came through.
 
+To prove the migration itself on a throwaway copy of the old shape — it builds a
+scratch database, runs the migration against it, checks the result and drops it:
+
+```bash
+node scripts/dry-run-reports-migration.cjs
+```
+
+If a deploy stops part way, the migration is safe to run again. Recover with:
+
+```bash
+git pull
+npx prisma migrate resolve --rolled-back 20260921090000_reports_generalised
+npx prisma migrate deploy
+```
+
 ## Deploying to production (after `git pull`)
 
 Run these from the `backend/` folder, in order:
