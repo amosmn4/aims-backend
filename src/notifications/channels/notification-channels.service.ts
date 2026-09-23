@@ -51,6 +51,11 @@ export class NotificationChannelsService {
     private readonly config: ConfigService,
   ) {}
 
+  /** A muted alert is paused until its date passes; then it comes back on its own. */
+  private isMuted(mutedUntil: Date | null | undefined, now = new Date()) {
+    return !!mutedUntil && mutedUntil.getTime() > now.getTime();
+  }
+
   async forUser(userId: string) {
     const [rows, user] = await Promise.all([
       this.prisma.notificationChannelPreference.findMany({ where: { userId } }),
@@ -70,7 +75,14 @@ export class NotificationChannelsService {
           const r = byKey.get(e.key);
           return [
             e.key,
-            { email: r?.email ?? false, sms: r?.sms ?? false, whatsapp: r?.whatsapp ?? false },
+            {
+              inApp: r?.inApp ?? true,
+              email: r?.email ?? false,
+              sms: r?.sms ?? false,
+              whatsapp: r?.whatsapp ?? false,
+              mutedUntil: r?.mutedUntil ?? null,
+              muted: this.isMuted(r?.mutedUntil),
+            },
           ];
         }),
       ),
@@ -79,17 +91,70 @@ export class NotificationChannelsService {
 
   async setForUser(
     userId: string,
-    dto: { eventKey: string; email?: boolean; sms?: boolean; whatsapp?: boolean },
+    dto: {
+      eventKey: string;
+      inApp?: boolean;
+      email?: boolean;
+      sms?: boolean;
+      whatsapp?: boolean;
+      mutedUntil?: string | null;
+    },
   ) {
     const eventKey = CHANNEL_EVENTS.find((e) => e.key === dto.eventKey)?.key;
     if (!eventKey) throw new BadRequestException("Choose a type of alert");
-    const data = { email: dto.email, sms: dto.sms, whatsapp: dto.whatsapp };
+    const mutedUntil = this.parseMute(dto.mutedUntil);
+    const data = {
+      inApp: dto.inApp,
+      email: dto.email,
+      sms: dto.sms,
+      whatsapp: dto.whatsapp,
+      mutedUntil,
+    };
     await this.prisma.notificationChannelPreference.upsert({
       where: { userId_eventKey: { userId, eventKey } },
-      create: { userId, eventKey, email: !!dto.email, sms: !!dto.sms, whatsapp: !!dto.whatsapp },
+      create: {
+        userId,
+        eventKey,
+        inApp: dto.inApp ?? true,
+        email: !!dto.email,
+        sms: !!dto.sms,
+        whatsapp: !!dto.whatsapp,
+        mutedUntil: mutedUntil ?? null,
+      },
       update: data,
     });
     return this.forUser(userId);
+  }
+
+  /** Pauses or restarts every kind of alert in one go. */
+  async muteAll(userId: string, mutedUntil?: string | null) {
+    const until = this.parseMute(mutedUntil) ?? null;
+    for (const event of CHANNEL_EVENTS) {
+      await this.prisma.notificationChannelPreference.upsert({
+        where: { userId_eventKey: { userId, eventKey: event.key } },
+        create: { userId, eventKey: event.key, mutedUntil: until },
+        update: { mutedUntil: until },
+      });
+    }
+    return this.forUser(userId);
+  }
+
+  private parseMute(value?: string | null) {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) throw new BadRequestException("Choose a date to mute until");
+    return date;
+  }
+
+  /** Whether this kind of alert should reach the person at all — off or muted means no. */
+  async allowsEvent(userId: string, type: NotificationType) {
+    const pref = await this.prisma.notificationChannelPreference.findUnique({
+      where: { userId_eventKey: { userId, eventKey: EVENT_KEY_BY_TYPE[type] } },
+      select: { inApp: true, mutedUntil: true },
+    });
+    if (!pref) return true;
+    return pref.inApp && !this.isMuted(pref.mutedUntil);
   }
 
   /** Sends the alert on each extra channel the person switched on; never throws. */
@@ -100,6 +165,7 @@ export class NotificationChannelsService {
         include: { user: { select: { email: true, phone: true, fullName: true, isActive: true } } },
       });
       if (!pref || !pref.user.isActive) return;
+      if (this.isMuted(pref.mutedUntil)) return;
       const link = parseCorsOrigins(this.config.get<string>("CORS_ORIGIN"))[0] ?? "";
       const text = `AIMS: ${title}${body ? ` — ${body}` : ""}`;
       const jobs: Promise<boolean>[] = [];
@@ -144,8 +210,8 @@ export class NotificationChannelsService {
   async emailsEvent(userId: string, type: NotificationType) {
     const pref = await this.prisma.notificationChannelPreference.findUnique({
       where: { userId_eventKey: { userId, eventKey: EVENT_KEY_BY_TYPE[type] } },
-      select: { email: true },
+      select: { email: true, mutedUntil: true },
     });
-    return !!pref?.email;
+    return !!pref?.email && !this.isMuted(pref?.mutedUntil);
   }
 }

@@ -103,6 +103,7 @@ enum DocumentResourceType {
   tender_document_library
   // A department's own library: policies, templates and files not tied to one record.
   department
+  it_system
 }
 
 // Matches the AMSOL Pipeline prototype's tender board exactly: identified -> applying
@@ -295,7 +296,7 @@ model Department {
   permissionOverrides  UserPermissionOverride[]
   resourceAccessGrants ResourceAccessGrant[]
   clients              Client[]
-  departmentReports    DepartmentReport[]
+  reports              Report[]
   expenses             Expense[]
   calendarEvents       CalendarEvent[]
   inventoryItems       InventoryItem[]
@@ -329,9 +330,10 @@ model User {
   createdFinanceReports      FinanceReport[]                 @relation("FinanceReportCreatedBy")
   reviewedFinanceReports     FinanceReport[]                 @relation("FinanceReportReviewedBy")
   financeReportComments      FinanceReportComment[]
-  createdDepartmentReports   DepartmentReport[]              @relation("DepartmentReportCreatedBy")
-  reviewedDepartmentReports  DepartmentReport[]              @relation("DepartmentReportReviewedBy")
-  departmentReportMessages   DepartmentReportMessage[]
+  createdReports             Report[]                        @relation("ReportCreatedBy")
+  reviewedReports            Report[]                        @relation("ReportReviewedBy")
+  subjectReports             Report[]                        @relation("ReportSubjectUser")
+  reportMessages             ReportMessage[]
   reportEmailSubscriptions   ReportEmailSubscription[]
   createdExpenses            Expense[]                       @relation("ExpenseCreatedBy")
   calendarEvents             CalendarEvent[]                 @relation("CalendarEventCreatedBy")
@@ -619,11 +621,32 @@ enum ReportMessageKind {
   approved
 }
 
-enum DepartmentReportStatus {
+enum ReportStatus {
   draft
   submitted
   changes_requested
   approved
+}
+
+// What a report is about. The subject is a department, a project or a person.
+enum ReportKind {
+  department
+  project
+  individual
+}
+
+// Which set of sections and figures a report starts from.
+enum ReportTemplate {
+  department_monthly
+  project_progress
+  project_completion
+  individual_period
+}
+
+// Who is expected to decide on a report.
+enum ReviewerKind {
+  ceo
+  department_head
 }
 
 enum ReportPeriodType {
@@ -633,36 +656,56 @@ enum ReportPeriodType {
   other
 }
 
-// A report a department submits to the CEO; the conversation lives in DepartmentReportMessage.
-model DepartmentReport {
-  id           String                 @id @default(uuid()) @db.Char(36)
-  departmentId String                 @map("department_id") @db.Char(36)
-  title        String
-  periodType   ReportPeriodType       @default(monthly) @map("period_type")
-  periodStart  DateTime               @map("period_start") @db.Date
-  periodEnd    DateTime               @map("period_end") @db.Date
-  summary      String?                @db.Text
-  figures      Json
-  status       DepartmentReportStatus @default(draft)
-  submittedBy  String?                @map("submitted_by") @db.Char(36)
-  submittedAt  DateTime?              @map("submitted_at")
-  reviewedBy   String?                @map("reviewed_by") @db.Char(36)
-  reviewedAt   DateTime?              @map("reviewed_at")
-  createdBy    String                 @map("created_by") @db.Char(36)
-  createdAt    DateTime               @default(now()) @map("created_at")
-  updatedAt    DateTime               @updatedAt @map("updated_at")
+// A report about a department, a project or a person. The conversation lives in ReportMessage.
+model Report {
+  id            String         @id @default(uuid()) @db.Char(36)
+  kind          ReportKind     @default(department)
+  template      ReportTemplate @default(department_monthly)
+  // The department, project or user this report is about. Never null, so the
+  // one-per-period unique key actually holds (MySQL treats NULLs as distinct).
+  subjectId     String         @map("subject_id") @db.Char(36)
+  // The department it rolls up to; a project's own, or the person's.
+  departmentId  String?        @map("department_id") @db.Char(36)
+  // Set only for individual reports, so a person's own reports can be listed.
+  subjectUserId String?        @map("subject_user_id") @db.Char(36)
 
-  department Department                @relation(fields: [departmentId], references: [id], onDelete: Cascade)
-  creator    User                      @relation("DepartmentReportCreatedBy", fields: [createdBy], references: [id], onDelete: Cascade)
-  reviewer   User?                     @relation("DepartmentReportReviewedBy", fields: [reviewedBy], references: [id], onDelete: SetNull)
-  messages   DepartmentReportMessage[]
+  title       String
+  periodType  ReportPeriodType @default(monthly) @map("period_type")
+  periodStart DateTime         @map("period_start") @db.Date
+  periodEnd   DateTime         @map("period_end") @db.Date
+  summary     String?          @db.Text
+  // Typed figures with provenance; see report-figures.ts.
+  figures     Json
+  // The ordered body of the report; see report-sections.ts.
+  sections    Json?
 
+  status          ReportStatus @default(draft)
+  reviewerKind    ReviewerKind @default(ceo) @map("reviewer_kind")
+  lastReviewNote  String?      @map("last_review_note") @db.Text
+  submissionCount Int          @default(0) @map("submission_count")
+  submittedBy     String?      @map("submitted_by") @db.Char(36)
+  submittedAt     DateTime?    @map("submitted_at")
+  reviewedBy      String?      @map("reviewed_by") @db.Char(36)
+  reviewedAt      DateTime?    @map("reviewed_at")
+  createdBy       String       @map("created_by") @db.Char(36)
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  department  Department?     @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  subjectUser User?           @relation("ReportSubjectUser", fields: [subjectUserId], references: [id], onDelete: Cascade)
+  creator     User            @relation("ReportCreatedBy", fields: [createdBy], references: [id], onDelete: Cascade)
+  reviewer    User?           @relation("ReportReviewedBy", fields: [reviewedBy], references: [id], onDelete: SetNull)
+  messages    ReportMessage[]
+
+  @@unique([kind, subjectId, periodStart, periodEnd])
   @@index([departmentId, status])
-  @@index([periodEnd])
-  @@map("department_reports")
+  @@index([status, periodEnd])
+  @@index([subjectUserId, periodEnd])
+  @@index([kind, subjectId])
+  @@map("reports")
 }
 
-model DepartmentReportMessage {
+model ReportMessage {
   id        String            @id @default(uuid()) @db.Char(36)
   reportId  String            @map("report_id") @db.Char(36)
   authorId  String            @map("author_id") @db.Char(36)
@@ -671,13 +714,13 @@ model DepartmentReportMessage {
   body      String            @db.Text
   createdAt DateTime          @default(now()) @map("created_at")
 
-  report  DepartmentReport          @relation(fields: [reportId], references: [id], onDelete: Cascade)
-  author  User                      @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  parent  DepartmentReportMessage?  @relation("DepartmentReportMessageReplies", fields: [parentId], references: [id], onDelete: SetNull)
-  replies DepartmentReportMessage[] @relation("DepartmentReportMessageReplies")
+  report  Report          @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  author  User            @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  parent  ReportMessage?  @relation("ReportMessageReplies", fields: [parentId], references: [id], onDelete: SetNull)
+  replies ReportMessage[] @relation("ReportMessageReplies")
 
   @@index([reportId, createdAt])
-  @@map("department_report_messages")
+  @@map("report_messages")
 }
 
 // Which scheduled report emails a person receives (report_submitted, board_pack, pipeline_weekly, debtors, water_monthly).
@@ -702,6 +745,11 @@ model CompanySettings {
   financialYearStartMonth Int      @default(1) @map("financial_year_start_month")
   timeZone                String   @default("Africa/Nairobi") @map("time_zone")
   reportDueDay            Int      @default(5) @map("report_due_day")
+  // When off, AIMS stops the "report due" reminders for everyone.
+  reportRemindersEnabled  Boolean  @default(true) @map("report_reminders_enabled")
+  // When on, a department head decides on their team members own reports and their
+  // department projects progress reports. Off means everything goes to the CEO.
+  departmentHeadsReview   Boolean  @default(false) @map("department_heads_review")
   // Who staff should contact about access, invites and passwords.
   supportContactName      String?  @map("support_contact_name")
   supportContactEmail     String?  @map("support_contact_email")
@@ -1760,19 +1808,81 @@ enum ItSystemStatus {
 // not a full asset-management or incident-tracking tool. IT's project work uses the existing
 // Projects/Tasks module like every other department; this just tracks what exists.
 model ItSystem {
-  id        String         @id @default(uuid()) @db.Char(36)
-  name      String
-  type      ItSystemType
-  status    ItSystemStatus @default(active)
-  owner     String?
-  notes     String?        @db.Text
-  createdAt DateTime       @default(now()) @map("created_at")
-  updatedAt DateTime       @updatedAt @map("updated_at")
+  id              String         @id @default(uuid()) @db.Char(36)
+  name            String
+  type            ItSystemType
+  status          ItSystemStatus @default(active)
+  owner           String?
+  notes           String?        @db.Text
+  // What it does, in plain words.
+  purpose         String?        @db.Text
+  // Lists of names, e.g. ["React", "NestJS"] and ["GitHub", "Figma"].
+  techStack       Json?          @map("tech_stack")
+  tools           Json?
+  repoUrl         String?        @map("repo_url")
+  docsUrl         String?        @map("docs_url")
+  liveUrl         String?        @map("live_url")
+  // Where the build has reached, for systems being developed.
+  currentStage    SdlcStage?     @map("current_stage")
+  progressPercent Int?           @map("progress_percent")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
 
   tickets       Ticket[]
   uptimeRecords SystemUptimeRecord[]
+  stages        ItSystemStage[]
+  features      ItSystemFeature[]
 
   @@map("it_systems")
+}
+
+enum ItSystemStageStatus {
+  not_started
+  in_progress
+  done
+}
+
+// What was decided and done at each SDLC step of a system.
+model ItSystemStage {
+  id        String              @id @default(uuid()) @db.Char(36)
+  systemId  String              @map("system_id") @db.Char(36)
+  stage     SdlcStage
+  status    ItSystemStageStatus @default(not_started)
+  notes     String?             @db.Text
+  startedAt DateTime?           @map("started_at") @db.Date
+  doneAt    DateTime?           @map("done_at") @db.Date
+  updatedBy String?             @map("updated_by") @db.Char(36)
+  updatedAt DateTime            @updatedAt @map("updated_at")
+
+  system ItSystem @relation(fields: [systemId], references: [id], onDelete: Cascade)
+
+  @@unique([systemId, stage])
+  @@map("it_system_stages")
+}
+
+enum ItSystemFeatureStatus {
+  planned
+  building
+  live
+  dropped
+}
+
+// A feature of a system: what's planned, being built, or live.
+model ItSystemFeature {
+  id          String                @id @default(uuid()) @db.Char(36)
+  systemId    String                @map("system_id") @db.Char(36)
+  title       String
+  description String?               @db.Text
+  status      ItSystemFeatureStatus @default(planned)
+  sortOrder   Int                   @default(0) @map("sort_order")
+  createdBy   String?               @map("created_by") @db.Char(36)
+  createdAt   DateTime              @default(now()) @map("created_at")
+  updatedAt   DateTime              @updatedAt @map("updated_at")
+
+  system ItSystem @relation(fields: [systemId], references: [id], onDelete: Cascade)
+
+  @@index([systemId])
+  @@map("it_system_features")
 }
 
 enum TicketStatus {
@@ -2345,12 +2455,16 @@ model CalendarEvent {
 
 // Extra delivery channels per person and alert type; the in-app bell is always on.
 model NotificationChannelPreference {
-  userId    String   @map("user_id") @db.Char(36)
-  eventKey  String   @map("event_key") @db.VarChar(40)
-  email     Boolean  @default(false)
-  sms       Boolean  @default(false)
-  whatsapp  Boolean  @default(false)
-  updatedAt DateTime @updatedAt @map("updated_at")
+  userId     String    @map("user_id") @db.Char(36)
+  eventKey   String    @map("event_key") @db.VarChar(40)
+  // The bell itself; off means the alert isn't created at all.
+  inApp      Boolean   @default(true) @map("in_app")
+  // Set to pause this kind of alert until a date, without turning it off for good.
+  mutedUntil DateTime? @map("muted_until")
+  email      Boolean   @default(false)
+  sms        Boolean   @default(false)
+  whatsapp   Boolean   @default(false)
+  updatedAt  DateTime  @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

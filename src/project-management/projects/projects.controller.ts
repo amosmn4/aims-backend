@@ -18,6 +18,7 @@ import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import { parsePaginationQuery } from "../../common/pagination";
+import { CreateAccessGrantDto } from "../../common/dto/create-access-grant.dto";
 
 @Controller("projects")
 export class ProjectsController {
@@ -48,6 +49,32 @@ export class ProjectsController {
   @Roles()
   findOne(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.findOne(id, user);
+  }
+
+  @Get(":id/access-grants")
+  @Roles()
+  listAccessGrants(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.projectsService.listAccessGrants(id, user);
+  }
+
+  @Post(":id/access-grants")
+  @Roles()
+  createAccessGrant(
+    @Param("id") id: string,
+    @Body() dto: CreateAccessGrantDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.projectsService.createAccessGrant(id, dto, user);
+  }
+
+  @Delete(":id/access-grants/:grantId")
+  @Roles()
+  deleteAccessGrant(
+    @Param("id") id: string,
+    @Param("grantId") grantId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.projectsService.deleteAccessGrant(id, grantId, user);
   }
 
   @Post()

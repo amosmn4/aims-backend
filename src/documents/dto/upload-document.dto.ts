@@ -9,6 +9,7 @@ const RESOURCE_TYPES = [
   "client_request",
   "tender_document_library",
   "department",
+  "it_system",
 ] as const;
 
 export class UploadDocumentDto {

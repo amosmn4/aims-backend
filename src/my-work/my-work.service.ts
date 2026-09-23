@@ -100,7 +100,7 @@ export class MyWorkService {
       }),
       reviewer
         ? Promise.all([
-            this.prisma.departmentReport.count({ where: { status: "submitted" } }),
+            this.prisma.report.count({ where: { status: "submitted", reviewerKind: "ceo" } }),
             this.prisma.financeReport.count({ where: { status: "submitted" } }),
           ])
         : Promise.resolve(null),
@@ -140,7 +140,7 @@ export class MyWorkService {
       if (await canWithCapability(user, d, "submit_reports", this.prisma)) mine.push(d);
     }
     if (mine.length === 0) return [];
-    const existing = await this.prisma.departmentReport.findMany({
+    const existing = await this.prisma.report.findMany({
       where: { departmentId: { in: mine.map((d) => d.id) }, periodStart: { gte: start, lt: end } },
       select: { id: true, departmentId: true, status: true, updatedAt: true },
       orderBy: { updatedAt: "desc" },

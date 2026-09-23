@@ -64,10 +64,11 @@ export class StorageService {
 
   async streamToResponse(key: string, res: Response, opts: StreamOptions): Promise<void> {
     if (opts.contentType) res.type(opts.contentType);
-    if (opts.disposition === "attachment") {
-      const name = opts.fileName ?? key.split("/").pop() ?? "download";
-      res.setHeader("Content-Disposition", `attachment; filename="${name.replace(/"/g, "")}"`);
-    }
+    const name = opts.fileName ?? key.split("/").pop() ?? "download";
+    res.setHeader(
+      "Content-Disposition",
+      `${opts.disposition}; filename="${name.replace(/"/g, "")}"`,
+    );
 
     if (this.client && this.bucket) {
       try {

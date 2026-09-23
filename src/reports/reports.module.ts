@@ -1,23 +1,28 @@
 import { Module } from "@nestjs/common";
 import { NotificationsModule } from "../notifications/notifications.module";
 import { DocumentsModule } from "../documents/documents.module";
-import { DepartmentReportsController } from "./department-reports.controller";
-import { DepartmentReportsService } from "./department-reports.service";
+import { AiModule } from "../ai/ai.module";
+import { ReportsController } from "./reports.controller";
+import { ReportsService } from "./reports.service";
+import { ReportAccessService } from "./report-access.service";
+import { ReportContentService } from "./report-content.service";
+import { ReportsAiService } from "./reports-ai.service";
 import { ReportNotifierService } from "./report-notifier.service";
 import { ReportsInboxService } from "./reports-inbox.service";
 import { ReportSchedulesService } from "./report-schedules.service";
-import { SuggestedFiguresService } from "./suggested-figures.service";
 
 @Module({
-  imports: [NotificationsModule, DocumentsModule],
-  controllers: [DepartmentReportsController],
+  imports: [NotificationsModule, DocumentsModule, AiModule],
+  controllers: [ReportsController],
   providers: [
-    DepartmentReportsService,
+    ReportsService,
+    ReportAccessService,
+    ReportContentService,
+    ReportsAiService,
     ReportNotifierService,
     ReportsInboxService,
     ReportSchedulesService,
-    SuggestedFiguresService,
   ],
-  exports: [ReportNotifierService],
+  exports: [ReportNotifierService, ReportsService],
 })
 export class ReportsModule {}

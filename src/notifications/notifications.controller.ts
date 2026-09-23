@@ -4,7 +4,7 @@ import { NotificationsSweepService } from "./notifications-sweep.service";
 import { NotificationsDigestService } from "./email/notifications-digest.service";
 import { CreateReminderDto } from "./dto/create-reminder.dto";
 import { UpdateNotificationPreferencesDto } from "./dto/update-notification-preferences.dto";
-import { SetChannelPreferenceDto } from "./dto/set-channel-preference.dto";
+import { MuteAllDto, SetChannelPreferenceDto } from "./dto/set-channel-preference.dto";
 import { NotificationChannelsService } from "./channels/notification-channels.service";
 import { Roles } from "../auth/decorators/roles.decorator";
 import { Throttle } from "@nestjs/throttler";
@@ -37,6 +37,12 @@ export class NotificationsController {
   @Roles()
   setChannel(@Body() dto: SetChannelPreferenceDto, @CurrentUser() user: AuthenticatedUser) {
     return this.channels.setForUser(user.id, dto);
+  }
+
+  @Put("channels/mute-all")
+  @Roles()
+  muteAll(@Body() dto: MuteAllDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.channels.muteAll(user.id, dto.mutedUntil);
   }
 
   @Get()

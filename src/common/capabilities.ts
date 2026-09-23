@@ -11,6 +11,7 @@ export const CAPABILITIES = [
   { key: "raise_invoices", label: "Raise invoices and record payments" },
   { key: "manage_tenders", label: "Manage tenders" },
   { key: "log_client_requests", label: "Log and route client requests" },
+  { key: "publish_blog", label: "Write and publish blog posts" },
 ] as const;
 export type Capability = (typeof CAPABILITIES)[number]["key"];
 
@@ -49,6 +50,8 @@ export function defaultCapability(role: AppRole, capability: Capability): boolea
       return role === "tender" || role === "department_head" || role === "account_manager";
     case "log_client_requests":
       return role === "operations" || role === "department_head" || role === "account_manager";
+    case "publish_blog":
+      return role === "marketing";
   }
 }
 

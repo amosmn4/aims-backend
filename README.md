@@ -1,5 +1,17 @@
 # AIMS Backend
 
+## Before the reports migration (one time)
+
+The migration that turns `department_reports` into `reports` is the only one that
+renames a table holding live data. Run this first — it only reads:
+
+```bash
+node scripts/check-reports-migration.cjs
+```
+
+It stops you if two reports exist for the same department and period, which the new
+rule forbids. Run it again after deploying to confirm every row came through.
+
 ## Deploying to production (after `git pull`)
 
 Run these from the `backend/` folder, in order:
@@ -64,6 +76,15 @@ npm run water:clear-seed -- --yes   # removes seeded/uploaded payments and the m
 npm run water:seed -- --dry-run     # shows what the new files would add
 npm run water:seed                  # loads the new files (safe to re-run; duplicates are skipped)
 npm run water:seed -- --accounts    # also registers mPaya accounts that have no payments yet
+```
+
+If a command stops with `Property 'waterAiInsight' does not exist on type 'PrismaClient'` (or a
+similar unknown-table error), this server's Prisma client is older than the schema. Run steps 2
+and 3 of the deploy above first:
+
+```bash
+npx prisma migrate deploy
+npx prisma generate
 ```
 
 Both commands print the database host and name first — check it before using `--yes`. The clear

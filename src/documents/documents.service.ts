@@ -143,6 +143,12 @@ export class DocumentsService {
       return;
     }
 
+    if (resourceType === "it_system") {
+      await this.prisma.itSystem.findUniqueOrThrow({ where: { id: resourceId } });
+      await assertModuleWrite("it", user, this.prisma, "Only the IT team can manage system files");
+      return;
+    }
+
     if (resourceType === "department") {
       const department = await this.prisma.department.findUniqueOrThrow({
         where: { id: resourceId },
@@ -157,12 +163,12 @@ export class DocumentsService {
     }
 
     if (resourceType === "department_report") {
-      const report = await this.prisma.departmentReport.findUniqueOrThrow({
+      const report = await this.prisma.report.findUniqueOrThrow({
         where: { id: resourceId },
         include: { department: true },
       });
       if (isAdminOrCeo(user)) return;
-      if (!(await can(user, report.department, "write", this.prisma))) {
+      if (!report.department || !(await can(user, report.department, "write", this.prisma))) {
         throw new ForbiddenException("Only people in this department can manage its report files");
       }
       return;
@@ -312,7 +318,7 @@ export class DocumentsService {
           where: { departmentId: filters.departmentId },
           select: { id: true },
         }),
-        this.prisma.departmentReport.findMany({
+        this.prisma.report.findMany({
           where: { departmentId: filters.departmentId },
           select: { id: true },
         }),
@@ -345,32 +351,36 @@ export class DocumentsService {
       if (deptCodes !== null) {
         const seesTenderPipeline = deptCodes.includes("tender");
         const seesIntakeQueue = seesTenderPipeline || deptCodes.includes("operations");
-        const [projects, tasks, tenders, requests, deptReports, libraries] = await Promise.all([
-          this.prisma.project.findMany({
-            where: { department: { code: { in: deptCodes } } },
-            select: { id: true },
-          }),
-          this.prisma.task.findMany({
-            where: { project: { department: { code: { in: deptCodes } } } },
-            select: { id: true },
-          }),
-          this.prisma.tender.findMany({
-            where: seesTenderPipeline ? {} : { department: { code: { in: deptCodes } } },
-            select: { id: true },
-          }),
-          this.prisma.clientRequest.findMany({
-            where: seesIntakeQueue ? {} : { department: { code: { in: deptCodes } } },
-            select: { id: true },
-          }),
-          this.prisma.departmentReport.findMany({
-            where: { department: { code: { in: deptCodes } } },
-            select: { id: true },
-          }),
-          this.prisma.department.findMany({
-            where: { code: { in: deptCodes } },
-            select: { id: true },
-          }),
-        ]);
+        const [projects, tasks, tenders, requests, deptReports, libraries, systems] =
+          await Promise.all([
+            this.prisma.project.findMany({
+              where: { department: { code: { in: deptCodes } } },
+              select: { id: true },
+            }),
+            this.prisma.task.findMany({
+              where: { project: { department: { code: { in: deptCodes } } } },
+              select: { id: true },
+            }),
+            this.prisma.tender.findMany({
+              where: seesTenderPipeline ? {} : { department: { code: { in: deptCodes } } },
+              select: { id: true },
+            }),
+            this.prisma.clientRequest.findMany({
+              where: seesIntakeQueue ? {} : { department: { code: { in: deptCodes } } },
+              select: { id: true },
+            }),
+            this.prisma.report.findMany({
+              where: { department: { code: { in: deptCodes } } },
+              select: { id: true },
+            }),
+            this.prisma.department.findMany({
+              where: { code: { in: deptCodes } },
+              select: { id: true },
+            }),
+            deptCodes.includes("it")
+              ? this.prisma.itSystem.findMany({ select: { id: true } })
+              : Promise.resolve([]),
+          ]);
         const allowedByType: Record<string, Set<string>> = {
           project: new Set(projects.map((p) => p.id)),
           task: new Set(tasks.map((t) => t.id)),
@@ -378,6 +388,7 @@ export class DocumentsService {
           client_request: new Set(requests.map((r) => r.id)),
           department_report: new Set(deptReports.map((r) => r.id)),
           department: new Set(libraries.map((d) => d.id)),
+          it_system: new Set(systems.map((sys) => sys.id)),
         };
         entries = entries.filter((doc) => {
           if (doc.resourceType === "finance_report") return deptCodes.includes("finance");
@@ -703,7 +714,11 @@ export class DocumentsService {
           where: { id: doc.latestVersionId! },
         });
 
-    return { fileName: version.fileName, key: `${KEY_PREFIX}/${version.storagePath}` };
+    return {
+      fileName: version.fileName,
+      mimeType: version.mimeType,
+      key: `${KEY_PREFIX}/${version.storagePath}`,
+    };
   }
 
   async update(documentId: string, dto: UpdateDocumentDto, user: AuthenticatedUser) {

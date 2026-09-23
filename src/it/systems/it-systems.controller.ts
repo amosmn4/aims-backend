@@ -3,6 +3,12 @@ import { ItSystemsService } from "./it-systems.service";
 import { RecordUptimeDto } from "./dto/uptime.dto";
 import { CreateItSystemDto } from "./dto/create-it-system.dto";
 import { UpdateItSystemDto } from "./dto/update-it-system.dto";
+import {
+  CreateSystemFeatureDto,
+  UpdateSystemFeatureDto,
+  UpdateSystemStageDto,
+} from "./dto/system-detail.dto";
+import type { SdlcStage } from "@prisma/client";
 import { Roles } from "../../auth/decorators/roles.decorator";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
@@ -21,6 +27,39 @@ export class ItSystemsController {
   @Roles()
   findOne(@Param("id") id: string) {
     return this.itSystemsService.findOne(id);
+  }
+
+  @Put(":id/stages/:stage")
+  @Roles("it")
+  saveStage(
+    @Param("id") id: string,
+    @Param("stage") stage: string,
+    @Body() dto: UpdateSystemStageDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.itSystemsService.saveStage(id, stage as SdlcStage, dto, user.id);
+  }
+
+  @Post(":id/features")
+  @Roles("it")
+  addFeature(
+    @Param("id") id: string,
+    @Body() dto: CreateSystemFeatureDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.itSystemsService.addFeature(id, dto, user.id);
+  }
+
+  @Patch("features/:featureId")
+  @Roles("it")
+  updateFeature(@Param("featureId") featureId: string, @Body() dto: UpdateSystemFeatureDto) {
+    return this.itSystemsService.updateFeature(featureId, dto);
+  }
+
+  @Delete("features/:featureId")
+  @Roles("it")
+  removeFeature(@Param("featureId") featureId: string) {
+    return this.itSystemsService.removeFeature(featureId);
   }
 
   @Post()

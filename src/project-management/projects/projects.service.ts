@@ -27,6 +27,7 @@ import type { UpdateRaciEntryDto } from "./dto/update-raci-entry.dto";
 import type { CreateRaidEntryDto } from "./dto/create-raid-entry.dto";
 import type { UpdateRaidEntryDto } from "./dto/update-raid-entry.dto";
 import { recordStageChange } from "../../common/stage-history";
+import { hasResourceGrant } from "../../common/has-resource-grant";
 import { ThreadsService } from "../../threads/threads.service";
 
 const userSelect = { id: true, fullName: true, email: true, roles: { select: { role: true } } };
@@ -71,6 +72,7 @@ export class ProjectsService {
     viewer: AuthenticatedUser,
   ) {
     const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
+    const sharedIds = await this.sharedProjectIds(viewer);
     return maybePaginate(
       this.prisma.project,
       {
@@ -81,15 +83,25 @@ export class ProjectsService {
           ...(filters.serviceLineId && { serviceLineId: filters.serviceLineId }),
           ...(filters.sharedWithMe
             ? {
-                departmentId: { not: viewer.departmentId ?? undefined },
-                team: { some: { userId: viewer.id } },
+                OR: [
+                  {
+                    departmentId: { not: viewer.departmentId ?? undefined },
+                    team: { some: { userId: viewer.id } },
+                  },
+                  { id: { in: sharedIds } },
+                ],
               }
             : deptCodes && {
-                department: { code: { in: deptCodes } },
                 OR: [
-                  { visibility: "department" },
-                  { createdBy: viewer.id },
-                  { team: { some: { userId: viewer.id } } },
+                  {
+                    department: { code: { in: deptCodes } },
+                    OR: [
+                      { visibility: "department" },
+                      { createdBy: viewer.id },
+                      { team: { some: { userId: viewer.id } } },
+                    ],
+                  },
+                  { id: { in: sharedIds } },
                 ],
               }),
         },
@@ -131,9 +143,112 @@ export class ProjectsService {
         where: { projectId: id, userId: viewer.id },
         select: { id: true },
       });
-      if (!isTeamMember) throw new NotFoundException("Project not found");
+      const shared =
+        !isTeamMember && (await hasResourceGrant("project", id, viewer, "read", this.prisma));
+      if (!isTeamMember && !shared) throw new NotFoundException("Project not found");
     }
     return project;
+  }
+
+  /* ---------- Sharing a project with people outside its own department ---------- */
+
+  /** Project ids shared with this person directly or with their department. */
+  private async sharedProjectIds(viewer: AuthenticatedUser) {
+    const grants = await this.prisma.resourceAccessGrant.findMany({
+      where: {
+        resourceType: "project",
+        OR: [
+          { userId: viewer.id },
+          ...(viewer.departmentId ? [{ departmentId: viewer.departmentId }] : []),
+        ],
+      },
+      select: { resourceId: true },
+    });
+    return grants.map((g) => g.resourceId);
+  }
+
+  async listAccessGrants(projectId: string, viewer: AuthenticatedUser) {
+    await this.findOne(projectId, viewer);
+    const grants = await this.prisma.resourceAccessGrant.findMany({
+      where: { resourceType: "project", resourceId: projectId },
+      include: {
+        user: { select: userSelect },
+        department: { select: { id: true, name: true, code: true } },
+        creator: { select: userSelect },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    return grants.map((g) => ({
+      ...g,
+      user: g.user ? maskUserRef(g.user, viewer) : null,
+      creator: g.creator ? maskUserRef(g.creator, viewer) : null,
+    }));
+  }
+
+  async createAccessGrant(
+    projectId: string,
+    dto: { userId?: string; departmentId?: string; level: "read" | "write" },
+    user: AuthenticatedUser,
+  ) {
+    const project = await this.assertProjectAccess(projectId, user);
+    if (!dto.userId && !dto.departmentId) {
+      throw new BadRequestException("Share with either a person or a department");
+    }
+    const existing = await this.prisma.resourceAccessGrant.findFirst({
+      where: {
+        resourceType: "project",
+        resourceId: projectId,
+        userId: dto.userId ?? null,
+        departmentId: dto.departmentId ?? null,
+      },
+    });
+    const grant = existing
+      ? await this.prisma.resourceAccessGrant.update({
+          where: { id: existing.id },
+          data: { level: dto.level },
+        })
+      : await this.prisma.resourceAccessGrant.create({
+          data: {
+            resourceType: "project",
+            resourceId: projectId,
+            userId: dto.userId,
+            departmentId: dto.departmentId,
+            level: dto.level,
+            createdBy: user.id,
+          },
+        });
+    for (const userId of await this.grantRecipients(dto)) {
+      if (userId === user.id) continue;
+      await this.notificationsService.notify({
+        userId,
+        type: "project_shared",
+        title: `A project was shared with you: ${project.name}`,
+        body: dto.level === "write" ? "You can view and update it." : "You can view it.",
+        resourceType: "project",
+        resourceId: projectId,
+        createdBy: user.id,
+      });
+    }
+    return grant;
+  }
+
+  /** Everyone a share reaches: one person, or a whole department's active staff. */
+  private async grantRecipients(dto: { userId?: string; departmentId?: string }) {
+    if (dto.userId) return [dto.userId];
+    if (!dto.departmentId) return [];
+    const users = await this.prisma.user.findMany({
+      where: { departmentId: dto.departmentId, isActive: true },
+      select: { id: true },
+    });
+    return users.map((u) => u.id);
+  }
+
+  async deleteAccessGrant(projectId: string, grantId: string, user: AuthenticatedUser) {
+    await this.assertProjectAccess(projectId, user);
+    await this.prisma.resourceAccessGrant.deleteMany({
+      where: { id: grantId, resourceType: "project", resourceId: projectId },
+    });
+    return { id: grantId };
   }
 
   async create(dto: CreateProjectDto, user: AuthenticatedUser) {
@@ -223,11 +338,7 @@ export class ProjectsService {
   }
 
   async update(id: string, dto: UpdateProjectDto, user: AuthenticatedUser) {
-    const project = await this.prisma.project.findUniqueOrThrow({
-      where: { id },
-      include: { department: true },
-    });
-    await assertDepartmentAccess(project.department, user, this.prisma);
+    const project = await this.assertProjectAccess(id, user);
 
     const isAdminOrCeo = user.roles.includes("system_admin") || user.roles.includes("ceo");
     if (dto.departmentId && dto.departmentId !== project.departmentId && !isAdminOrCeo) {
@@ -453,11 +564,7 @@ export class ProjectsService {
     },
     user: AuthenticatedUser,
   ) {
-    const project = await this.prisma.project.findUniqueOrThrow({
-      where: { id: projectId },
-      include: { department: true },
-    });
-    await assertDepartmentAccess(project.department, user, this.prisma);
+    const project = await this.assertProjectAccess(projectId, user);
     const parent = dto.parentId
       ? await this.prisma.projectActivity.findUnique({
           where: { id: dto.parentId },
@@ -515,6 +622,7 @@ export class ProjectsService {
       where: { id: projectId },
       include: { department: true },
     });
+    if (await hasResourceGrant("project", projectId, user, "write", this.prisma)) return project;
     await assertDepartmentAccess(project.department, user, this.prisma);
     return project;
   }
