@@ -2091,6 +2091,40 @@ enum WaterMeterType {
   household
 }
 
+// Water that left the network without reaching a household, recorded on purpose.
+enum WaterAdjustmentKind {
+  // Charging a length of pipe after it was emptied. A 6-inch main holds a lot.
+  line_fill
+  flushing
+  burst_repair
+  other
+}
+
+// A known, explained volume, so it is never counted as unexplained loss.
+model WaterNetworkAdjustment {
+  id         String              @id @default(uuid()) @db.Char(36)
+  // Null means it applies to the whole network rather than one zone.
+  zoneId     String?             @map("zone_id") @db.Char(36)
+  occurredAt DateTime            @map("occurred_at") @db.Date
+  units      Decimal             @db.Decimal(12, 2)
+  kind       WaterAdjustmentKind @default(line_fill)
+  note       String?             @db.VarChar(300)
+  createdBy  String?             @map("created_by") @db.Char(36)
+  createdAt  DateTime            @default(now()) @map("created_at")
+
+  zone WaterZone? @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+
+  @@index([occurredAt])
+  @@index([zoneId, occurredAt])
+  @@map("water_network_adjustments")
+}
+
+// Which stretch of the network a main meter measures.
+enum WaterMainStage {
+  borehole_to_tank
+  tank_to_network
+}
+
 enum WaterVendingSystem {
   amsol
   mpaya
@@ -2109,10 +2143,11 @@ model WaterZone {
   parentZoneId String?  @map("parent_zone_id") @db.Char(36)
   createdAt    DateTime @default(now()) @map("created_at")
 
-  parent    WaterZone?      @relation("ZoneHierarchy", fields: [parentZoneId], references: [id], onDelete: Restrict)
-  children  WaterZone[]     @relation("ZoneHierarchy")
-  meters    WaterMeter[]
-  customers WaterCustomer[]
+  parent      WaterZone?               @relation("ZoneHierarchy", fields: [parentZoneId], references: [id], onDelete: Restrict)
+  children    WaterZone[]              @relation("ZoneHierarchy")
+  meters      WaterMeter[]
+  customers   WaterCustomer[]
+  adjustments WaterNetworkAdjustment[]
 
   @@unique([parentZoneId, name])
   @@index([parentZoneId])
@@ -2141,6 +2176,8 @@ model WaterMeter {
   id              String             @id @default(uuid()) @db.Char(36)
   meterNumber     String             @unique @map("meter_number")
   meterType       WaterMeterType     @default(household) @map("meter_type")
+  // Set on main meters only, so the name is free to change without breaking the sums.
+  mainStage       WaterMainStage?    @map("main_stage")
   // Household meters are identified by customer; main/bulk meters use name + location.
   // A bulk meter's `zoneId` covers every sub-zone via the zone tree.
   name            String?
