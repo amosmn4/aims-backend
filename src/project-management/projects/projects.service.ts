@@ -30,6 +30,14 @@ import type { CreateRaidEntryDto } from "./dto/create-raid-entry.dto";
 import type { UpdateRaidEntryDto } from "./dto/update-raid-entry.dto";
 import { recordStageChange } from "../../common/stage-history";
 import { hasResourceGrant } from "../../common/has-resource-grant";
+import {
+  assertProjectManage,
+  assertProjectWrite,
+  canReadCompanyProject,
+  companyProjectRole,
+  companyProjectsOf,
+} from "../../common/project-access";
+import { isAdminOrCeo as userIsAdminOrCeo } from "../../common/is-admin-or-ceo";
 import { ThreadsService } from "../../threads/threads.service";
 
 const userSelect = { id: true, fullName: true, email: true, roles: { select: { role: true } } };
@@ -69,6 +77,7 @@ export class ProjectsService {
       clientId?: string;
       serviceLineId?: string;
       sharedWithMe?: boolean;
+      scope?: "department" | "company";
     },
     pagination: PaginationQueryDto = {},
     viewer: AuthenticatedUser,
@@ -83,6 +92,7 @@ export class ProjectsService {
           ...(filters.status && { status: filters.status }),
           ...(filters.clientId && { clientId: filters.clientId }),
           ...(filters.serviceLineId && { serviceLineId: filters.serviceLineId }),
+          ...(filters.scope && { scope: filters.scope }),
           ...(filters.sharedWithMe
             ? {
                 OR: [
@@ -104,11 +114,14 @@ export class ProjectsService {
                     ],
                   },
                   { id: { in: sharedIds } },
+                  companyProjectsOf(viewer.id),
                 ],
               }),
         },
         include: {
           department: true,
+          lead: { select: { id: true, fullName: true } },
+          team: { select: { userId: true, access: true } },
           client: true,
           serviceLine: { select: serviceLineSelect },
           contract: { select: contractSummarySelect },
@@ -131,6 +144,8 @@ export class ProjectsService {
       where: { id },
       include: {
         department: true,
+        lead: { select: { id: true, fullName: true } },
+        team: { select: { userId: true, access: true } },
         client: true,
         contract: true,
         serviceLine: { select: serviceLineSelect },
@@ -138,9 +153,15 @@ export class ProjectsService {
         clientRequest: { select: { id: true, referenceNumber: true, title: true } },
       },
     });
+    if (project.scope === "company") {
+      if (!(await canReadCompanyProject(project, viewer, this.prisma))) {
+        throw new NotFoundException("Project not found");
+      }
+      return project;
+    }
     const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     const needsMembershipCheck = deptCodes
-      ? !deptCodes.includes(project.department.code) ||
+      ? !deptCodes.includes(project.department!.code) ||
         (project.visibility === "restricted" && project.createdBy !== viewer.id)
       : false; // admin/CEO (deptCodes === null) always see everything
     if (needsMembershipCheck) {
@@ -257,11 +278,12 @@ export class ProjectsService {
   }
 
   async create(dto: CreateProjectDto, user: AuthenticatedUser) {
+    if (dto.scope === "company") return this.createCompanyProject(dto, user);
     const department = await this.prisma.department.findUniqueOrThrow({
       where: { id: dto.departmentId },
     });
     await assertDepartmentAccess(department, user, this.prisma);
-    const serviceLine = await this.resolveServiceLine(dto.serviceLineId, dto.departmentId);
+    const serviceLine = await this.resolveServiceLine(dto.serviceLineId, department.id);
 
     const project = await this.prisma.project.create({
       data: {
@@ -282,6 +304,63 @@ export class ProjectsService {
     if (dto.memberIds?.length) {
       await this.grantTeamAccess(project.id, project.name, dto.memberIds, user);
     }
+    return project;
+  }
+
+  /** A project owned by its creator and team, not a department. CEO and department heads only. */
+  private async createCompanyProject(dto: CreateProjectDto, user: AuthenticatedUser) {
+    if (!userIsAdminOrCeo(user) && !user.roles.includes("department_head")) {
+      throw new ForbiddenException(
+        "Only the CEO and department heads can set up company projects.",
+      );
+    }
+    const members = (dto.members ?? []).filter((m) => m.userId !== user.id);
+    const people = await this.prisma.user.findMany({
+      where: { id: { in: [user.id, ...members.map((m) => m.userId)] } },
+      select: { id: true, fullName: true, email: true },
+    });
+    const nameOf = new Map(people.map((p) => [p.id, p.fullName ?? p.email]));
+    const project = await this.prisma.project.create({
+      data: {
+        scope: "company",
+        name: dto.name,
+        description: dto.description,
+        status: dto.status ?? "active",
+        visibility: "restricted",
+        engagementType: dto.engagementType,
+        startDate: dto.startDate ? new Date(dto.startDate) : undefined,
+        endDate: dto.endDate ? new Date(dto.endDate) : undefined,
+        leadId: user.id,
+        createdBy: user.id,
+        team: {
+          create: [
+            { userId: user.id, name: nameOf.get(user.id) ?? "Lead", role: "Lead", access: "lead" },
+            ...members
+              .filter((m) => nameOf.has(m.userId))
+              .map((m) => ({
+                userId: m.userId,
+                name: nameOf.get(m.userId)!,
+                role: m.access === "viewer" ? "Viewer" : "Member",
+                access: m.access,
+              })),
+          ],
+        },
+      },
+    });
+    await Promise.all(
+      members
+        .filter((m) => nameOf.has(m.userId))
+        .map((m) =>
+          this.notificationsService.notify({
+            userId: m.userId,
+            type: "project_shared",
+            title: `You were added to: ${project.name}`,
+            resourceType: "project",
+            resourceId: project.id,
+            createdBy: user.id,
+          }),
+        ),
+    );
     return project;
   }
 
@@ -343,15 +422,20 @@ export class ProjectsService {
   }
 
   async update(id: string, dto: UpdateProjectDto, user: AuthenticatedUser) {
-    const project = await this.assertProjectAccess(id, user);
+    const project = await this.loadAccessTarget(id);
+    if (project.scope === "company") {
+      await assertProjectManage(project, user, this.prisma);
+    } else {
+      await this.assertProjectAccess(id, user);
+    }
 
     const isAdminOrCeo = user.roles.includes("system_admin") || user.roles.includes("ceo");
     if (dto.departmentId && dto.departmentId !== project.departmentId && !isAdminOrCeo) {
       throw new ForbiddenException("Only the CEO can move a project to a different department");
     }
 
-    if (dto.serviceLineId) {
-      await this.resolveServiceLine(dto.serviceLineId, dto.departmentId ?? project.departmentId);
+    if (dto.serviceLineId && project.scope !== "company") {
+      await this.resolveServiceLine(dto.serviceLineId, dto.departmentId ?? project.departmentId!);
     }
     // Linking a contract to a client-less project adopts the contract's client.
     let adoptedClientId: string | undefined;
@@ -363,7 +447,21 @@ export class ProjectsService {
       adoptedClientId = contract.clientId;
     }
 
-    const { memberIds, extensionReason, extensionAttribution, startDate, endDate, ...rest } = dto;
+    const {
+      memberIds,
+      extensionReason,
+      extensionAttribution,
+      startDate,
+      endDate,
+      scope: _scope,
+      members: _members,
+      ...rest
+    } = dto;
+    // A company project never moves into a department, and a department project never loses one.
+    if (project.scope === "company") {
+      delete rest.departmentId;
+      delete rest.serviceLineId;
+    }
     const stageMoved =
       dto.deliveryStage !== undefined && dto.deliveryStage !== project.deliveryStage;
     const statusMoved = dto.status !== undefined && dto.status !== project.status;
@@ -416,11 +514,8 @@ export class ProjectsService {
   // Tasks cascade-delete at the DB level, but their attached Documents don't (Document has
   // no DB-level FK — see DocumentsService) so they're cleaned up explicitly here first.
   async remove(id: string, user: AuthenticatedUser) {
-    const project = await this.prisma.project.findUniqueOrThrow({
-      where: { id },
-      include: { department: true },
-    });
-    await assertDepartmentAccess(project.department, user, this.prisma);
+    const project = await this.loadAccessTarget(id);
+    await assertProjectManage(project, user, this.prisma);
 
     const tasks = await this.prisma.task.findMany({
       where: { projectId: id },
@@ -431,7 +526,8 @@ export class ProjectsService {
     return this.prisma.project.delete({ where: { id } });
   }
 
-  listMilestones(projectId: string) {
+  async listMilestones(projectId: string, viewer: AuthenticatedUser) {
+    await this.assertCanRead(projectId, viewer);
     return this.prisma.milestone.findMany({
       where: { projectId },
       orderBy: { dueDate: "asc" },
@@ -439,11 +535,7 @@ export class ProjectsService {
   }
 
   async createMilestone(projectId: string, dto: CreateMilestoneDto, user: AuthenticatedUser) {
-    const project = await this.prisma.project.findUniqueOrThrow({
-      where: { id: projectId },
-      include: { department: true },
-    });
-    await assertDepartmentAccess(project.department, user, this.prisma);
+    await assertProjectWrite(await this.loadAccessTarget(projectId), user, this.prisma);
 
     return this.prisma.milestone.create({
       data: {
@@ -459,9 +551,8 @@ export class ProjectsService {
   async updateMilestone(milestoneId: string, dto: UpdateMilestoneDto, user: AuthenticatedUser) {
     const milestone = await this.prisma.milestone.findUniqueOrThrow({
       where: { id: milestoneId },
-      include: { project: { include: { department: true } } },
     });
-    await assertDepartmentAccess(milestone.project.department, user, this.prisma);
+    await assertProjectWrite(await this.loadAccessTarget(milestone.projectId), user, this.prisma);
 
     return this.prisma.milestone.update({
       where: { id: milestoneId },
@@ -475,13 +566,13 @@ export class ProjectsService {
   async removeMilestone(milestoneId: string, user: AuthenticatedUser) {
     const milestone = await this.prisma.milestone.findUniqueOrThrow({
       where: { id: milestoneId },
-      include: { project: { include: { department: true } } },
     });
-    await assertDepartmentAccess(milestone.project.department, user, this.prisma);
+    await assertProjectWrite(await this.loadAccessTarget(milestone.projectId), user, this.prisma);
     return this.prisma.milestone.delete({ where: { id: milestoneId } });
   }
 
-  listDeliverables(projectId: string) {
+  async listDeliverables(projectId: string, viewer: AuthenticatedUser) {
+    await this.assertCanRead(projectId, viewer);
     return this.prisma.projectDeliverable.findMany({
       where: { projectId },
       orderBy: [{ dueDate: "asc" }, { createdAt: "asc" }],
@@ -489,7 +580,7 @@ export class ProjectsService {
   }
 
   async createDeliverable(projectId: string, dto: CreateDeliverableDto, user: AuthenticatedUser) {
-    await this.assertProjectAccess(projectId, user);
+    await this.assertProjectAccess(projectId, user, { checkRole: true });
     return this.prisma.projectDeliverable.create({
       data: {
         projectId,
@@ -505,7 +596,7 @@ export class ProjectsService {
 
   async updateDeliverable(id: string, dto: UpdateDeliverableDto, user: AuthenticatedUser) {
     const existing = await this.prisma.projectDeliverable.findUniqueOrThrow({ where: { id } });
-    await this.assertProjectAccess(existing.projectId, user);
+    await this.assertProjectAccess(existing.projectId, user, { checkRole: true });
     const statusChanged = dto.status !== undefined && dto.status !== existing.status;
     return this.prisma.projectDeliverable.update({
       where: { id },
@@ -521,7 +612,7 @@ export class ProjectsService {
 
   async removeDeliverable(id: string, user: AuthenticatedUser) {
     const existing = await this.prisma.projectDeliverable.findUniqueOrThrow({ where: { id } });
-    await this.assertProjectAccess(existing.projectId, user);
+    await this.assertProjectAccess(existing.projectId, user, { checkRole: true });
     return this.prisma.projectDeliverable.delete({ where: { id } });
   }
 
@@ -592,6 +683,7 @@ export class ProjectsService {
   /* ---------- Activity & Communication log ---------- */
 
   async listActivities(projectId: string, viewer: AuthenticatedUser) {
+    await this.assertCanRead(projectId, viewer);
     const activities = await this.prisma.projectActivity.findMany({
       where: { projectId },
       include: { creator: { select: userSelect } },
@@ -613,7 +705,15 @@ export class ProjectsService {
     },
     user: AuthenticatedUser,
   ) {
-    const project = await this.assertProjectAccess(projectId, user);
+    const target = await this.loadAccessTarget(projectId);
+    // Viewers of a company project may reply, but not start a discussion.
+    const replyingViewer =
+      target.scope === "company" &&
+      !!dto.parentId &&
+      (await companyProjectRole(target, user, this.prisma)) === "viewer";
+    const project = replyingViewer
+      ? target
+      : await this.assertProjectAccess(projectId, user, { checkRole: true });
     const parent = dto.parentId
       ? await this.prisma.projectActivity.findUnique({
           where: { id: dto.parentId },
@@ -648,8 +748,57 @@ export class ProjectsService {
         resourceType: "project",
         resourceId: projectId,
       });
+    } else if (project.scope === "company") {
+      await this.notifyTeam(projectId, user, {
+        title: `New discussion on ${project.name}`,
+        body: dto.summary,
+      });
     }
     return { ...activity, creator: activity.creator ? maskUserRef(activity.creator, user) : null };
+  }
+
+  /** Anyone who can add work marks a top-level discussion as a decision (or unmarks it). */
+  async setDecision(activityId: string, isDecision: boolean, user: AuthenticatedUser) {
+    const activity = await this.prisma.projectActivity.findUniqueOrThrow({
+      where: { id: activityId },
+    });
+    if (activity.parentId) throw new BadRequestException("Only a discussion can be a decision.");
+    const project = await this.loadAccessTarget(activity.projectId);
+    await assertProjectWrite(project, user, this.prisma);
+    return this.prisma.projectActivity.update({
+      where: { id: activityId },
+      data: {
+        isDecision,
+        decidedBy: isDecision ? user.id : null,
+        decidedAt: isDecision ? new Date() : null,
+      },
+    });
+  }
+
+  /** Tells everyone on the project except the actor. */
+  private async notifyTeam(
+    projectId: string,
+    actor: AuthenticatedUser,
+    { title, body }: { title: string; body?: string },
+  ) {
+    const team = await this.prisma.projectTeamMember.findMany({
+      where: { projectId, userId: { not: null } },
+      select: { userId: true },
+    });
+    const ids = [...new Set(team.map((t) => t.userId!))].filter((id) => id !== actor.id);
+    await Promise.all(
+      ids.map((userId) =>
+        this.notificationsService.notify({
+          userId,
+          type: "project_alert",
+          title,
+          body: body && body.length > 160 ? `${body.slice(0, 157)}...` : body,
+          resourceType: "project",
+          resourceId: projectId,
+          createdBy: actor.id,
+        }),
+      ),
+    );
   }
 
   async deleteActivity(activityId: string, user: AuthenticatedUser) {
@@ -666,14 +815,38 @@ export class ProjectsService {
   /** Shared by every Project Workspace sub-resource (cost items, team, RACI, RAID) — fetch the
    * parent project with its department and assert access once instead of repeating the
    * findUniqueOrThrow + assertDepartmentAccess pair at every call site. */
-  private async assertProjectAccess(projectId: string, user: AuthenticatedUser) {
-    const project = await this.prisma.project.findUniqueOrThrow({
+  private async assertProjectAccess(
+    projectId: string,
+    user: AuthenticatedUser,
+    options: { checkRole?: boolean } = {},
+  ) {
+    const project = await this.loadAccessTarget(projectId);
+    if (project.scope === "department") {
+      if (await hasResourceGrant("project", projectId, user, "write", this.prisma)) return project;
+    }
+    await assertProjectWrite(project, user, this.prisma, options);
+    return project;
+  }
+
+  private loadAccessTarget(projectId: string) {
+    return this.prisma.project.findUniqueOrThrow({
       where: { id: projectId },
       include: { department: true },
     });
-    if (await hasResourceGrant("project", projectId, user, "write", this.prisma)) return project;
-    await assertDepartmentAccess(project.department, user, this.prisma);
-    return project;
+  }
+
+  /** Company projects are team-only; department projects keep their open reads. */
+  private async assertCanRead(projectId: string, viewer: AuthenticatedUser) {
+    const project = await this.prisma.project.findUniqueOrThrow({
+      where: { id: projectId },
+      select: { id: true, scope: true, leadId: true },
+    });
+    if (
+      project.scope === "company" &&
+      !(await canReadCompanyProject(project, viewer, this.prisma))
+    ) {
+      throw new NotFoundException("Project not found");
+    }
   }
 
   /* ---------- Cost items (Financials tab: budget vs actual by category) ---------- */
@@ -707,6 +880,7 @@ export class ProjectsService {
   /* ---------- Team & Resources ---------- */
 
   async listTeam(projectId: string, viewer: AuthenticatedUser) {
+    await this.assertCanRead(projectId, viewer);
     const members = await this.prisma.projectTeamMember.findMany({
       where: { projectId },
       include: { user: { select: userSelect } },
@@ -723,7 +897,18 @@ export class ProjectsService {
   }
 
   async createTeamMember(projectId: string, dto: CreateTeamMemberDto, user: AuthenticatedUser) {
-    const project = await this.assertProjectAccess(projectId, user);
+    const project = await this.loadAccessTarget(projectId);
+    if (project.scope === "company") {
+      await assertProjectManage(project, user, this.prisma);
+      if (!dto.userId) throw new BadRequestException("Choose a person to add.");
+      const already = await this.prisma.projectTeamMember.findFirst({
+        where: { projectId, userId: dto.userId },
+        select: { id: true },
+      });
+      if (already) throw new BadRequestException("That person is already on this project.");
+    } else {
+      await this.assertProjectAccess(projectId, user);
+    }
     const member = await this.prisma.projectTeamMember.create({
       data: { projectId, ...dto },
       include: { user: { select: userSelect } },
@@ -745,7 +930,14 @@ export class ProjectsService {
     const member = await this.prisma.projectTeamMember.findUniqueOrThrow({
       where: { id: memberId },
     });
-    await this.assertProjectAccess(member.projectId, user);
+    const project = await this.loadAccessTarget(member.projectId);
+    if (project.scope === "company") {
+      await assertProjectManage(project, user, this.prisma);
+      if (member.access === "lead")
+        throw new BadRequestException("The lead's access can't change.");
+    } else {
+      await this.assertProjectAccess(member.projectId, user);
+    }
     const updated = await this.prisma.projectTeamMember.update({
       where: { id: memberId },
       data: dto,
@@ -758,7 +950,13 @@ export class ProjectsService {
     const member = await this.prisma.projectTeamMember.findUniqueOrThrow({
       where: { id: memberId },
     });
-    await this.assertProjectAccess(member.projectId, user);
+    const project = await this.loadAccessTarget(member.projectId);
+    if (project.scope === "company") {
+      await assertProjectManage(project, user, this.prisma);
+      if (member.access === "lead") throw new BadRequestException("The lead can't be removed.");
+    } else {
+      await this.assertProjectAccess(member.projectId, user);
+    }
     return this.prisma.projectTeamMember.delete({ where: { id: memberId } });
   }
 

@@ -65,7 +65,7 @@ export class RecruitmentService {
 
   async upsert(projectId: string, dto: UpsertRecruitmentFunnelDto, user: AuthenticatedUser) {
     const project = await this.findVisibleRecruitmentProject(projectId, user);
-    await assertDepartmentAccess(project.department, user, this.prisma);
+    await assertDepartmentAccess(project.department!, user, this.prisma);
 
     const existing = await this.prisma.recruitmentFunnel.findUnique({ where: { projectId } });
     const merged = Object.fromEntries(
@@ -100,7 +100,7 @@ export class RecruitmentService {
 
   async addPlacement(projectId: string, dto: CreatePlacementDto, user: AuthenticatedUser) {
     const project = await this.findVisibleRecruitmentProject(projectId, user);
-    await assertDepartmentAccess(project.department, user, this.prisma);
+    await assertDepartmentAccess(project.department!, user, this.prisma);
     const placement = await this.prisma.recruitmentPlacement.create({
       data: {
         projectId,
@@ -120,7 +120,7 @@ export class RecruitmentService {
       where: { id: placementId },
     });
     const project = await this.findVisibleRecruitmentProject(placement.projectId, user);
-    await assertDepartmentAccess(project.department, user, this.prisma);
+    await assertDepartmentAccess(project.department!, user, this.prisma);
     await this.prisma.recruitmentPlacement.delete({ where: { id: placementId } });
     const [remaining, funnel] = await Promise.all([
       this.prisma.recruitmentPlacement.count({ where: { projectId: placement.projectId } }),

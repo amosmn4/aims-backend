@@ -2,6 +2,11 @@ import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/commo
 import type { TaskStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
+import {
+  assertProjectWrite,
+  canReadCompanyProject,
+  companyProjectsOf,
+} from "../../common/project-access";
 import { viewerDepartmentCodes } from "../../common/department-scope";
 import { maskUserRef } from "../../common/mask-user-ref";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
@@ -46,7 +51,6 @@ export class TasksService {
     const isOwnAssigneeFilter = !!filters.assigneeId && filters.assigneeId === viewer.id;
     const projectWhere: Record<string, unknown> = {};
     if (filters.departmentId) projectWhere.departmentId = filters.departmentId;
-    if (!isOwnAssigneeFilter && deptCodes) projectWhere.department = { code: { in: deptCodes } };
 
     return maybePaginate(
       this.prisma.task,
@@ -59,15 +63,21 @@ export class TasksService {
           ...(!isOwnAssigneeFilter &&
             deptCodes && {
               OR: [
-                { project: { visibility: "department" } },
-                { project: { createdBy: viewer.id } },
-                { project: { team: { some: { userId: viewer.id } } } },
-                { assigneeId: viewer.id },
+                {
+                  project: { department: { code: { in: deptCodes } } },
+                  OR: [
+                    { project: { visibility: "department" } },
+                    { project: { createdBy: viewer.id } },
+                    { project: { team: { some: { userId: viewer.id } } } },
+                    { assigneeId: viewer.id },
+                  ],
+                },
+                { project: companyProjectsOf(viewer.id) },
               ],
             }),
         },
         include: {
-          project: { select: { id: true, name: true, departmentId: true } },
+          project: { select: { id: true, name: true, departmentId: true, scope: true } },
           dependsOn: {
             include: { dependsOn: { select: { id: true, title: true, status: true } } },
           },
@@ -87,10 +97,17 @@ export class TasksService {
         dependsOn: { include: { dependsOn: { select: { id: true, title: true, status: true } } } },
       },
     });
+    if (task.project.scope === "company") {
+      const allowed =
+        task.assigneeId === viewer.id ||
+        (await canReadCompanyProject(task.project, viewer, this.prisma));
+      if (!allowed) throw new NotFoundException("Task not found");
+      return task;
+    }
     const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
     const needsMembershipCheck =
       !!deptCodes &&
-      (!deptCodes.includes(task.project.department.code) ||
+      (!deptCodes.includes(task.project.department!.code) ||
         (task.project.visibility === "restricted" && task.project.createdBy !== viewer.id)) &&
       task.assigneeId !== viewer.id;
     if (needsMembershipCheck) {
@@ -134,7 +151,11 @@ export class TasksService {
       include: { project: { include: { department: true } } },
     });
     if (task.assigneeId === user.id) return task;
-    await assertDepartmentAccess(task.project.department, user, this.prisma);
+    if (task.project.scope === "company") {
+      await assertProjectWrite(task.project, user, this.prisma);
+    } else {
+      await assertDepartmentAccess(task.project.department!, user, this.prisma);
+    }
     return task;
   }
 
@@ -143,7 +164,8 @@ export class TasksService {
       where: { id: dto.projectId },
       include: { department: true },
     });
-    await assertDepartmentAccess(project.department, user, this.prisma);
+    // The create route is open to everyone signed in, so department projects keep their old roles.
+    await assertProjectWrite(project, user, this.prisma, { checkRole: true });
 
     const task = await this.prisma.task.create({
       data: {

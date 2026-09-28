@@ -14,6 +14,11 @@ export interface ReportContent {
 
 const empty: ReportContent = { figures: [], lists: {} };
 const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
+/** Long discussion posts become one readable line in a report list. */
+const clip = (text: string, max = 220) => {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+};
 
 /**
  * Works out what a report should say, from what AIMS already recorded for the
@@ -289,48 +294,66 @@ export class ReportContentService {
     });
     if (!project) return empty;
 
-    const [milestones, tasks, costs, raid, extensions, stages] = await Promise.all([
-      this.prisma.milestone.findMany({
-        where: { projectId },
-        select: { id: true, title: true, dueDate: true, isComplete: true, updatedAt: true },
-        orderBy: { dueDate: "asc" },
-      }),
-      this.prisma.task.findMany({
-        where: { projectId },
-        select: {
-          id: true,
-          title: true,
-          status: true,
-          dueDate: true,
-          updatedAt: true,
-          estimatedHours: true,
-          actualHours: true,
-        },
-      }),
-      this.prisma.projectCostItem.findMany({
-        where: { projectId },
-        select: { category: true, budgetedAmount: true, actualAmount: true },
-      }),
-      this.prisma.projectRaidEntry.findMany({
-        where: { projectId, status: "open" },
-        select: { id: true, type: true, description: true, severity: true, mitigation: true },
-        orderBy: { severity: "desc" },
-      }),
-      this.prisma.timelineExtension.findMany({
-        where: { entityType: "project", entityId: projectId },
-        select: { previousDate: true, newDate: true, reason: true, attributedTo: true },
-        orderBy: { createdAt: "asc" },
-      }),
-      this.prisma.stageChange.findMany({
-        where: {
-          entityType: "project",
-          entityId: projectId,
-          ...(window && { changedAt: window }),
-        },
-        select: { fromStage: true, toStage: true, changedAt: true },
-        orderBy: { changedAt: "asc" },
-      }),
-    ]);
+    const [milestones, tasks, costs, raid, extensions, stages, posts, deliverables] =
+      await Promise.all([
+        this.prisma.milestone.findMany({
+          where: { projectId },
+          select: { id: true, title: true, dueDate: true, isComplete: true, updatedAt: true },
+          orderBy: { dueDate: "asc" },
+        }),
+        this.prisma.task.findMany({
+          where: { projectId },
+          select: {
+            id: true,
+            title: true,
+            status: true,
+            dueDate: true,
+            updatedAt: true,
+            estimatedHours: true,
+            actualHours: true,
+          },
+        }),
+        this.prisma.projectCostItem.findMany({
+          where: { projectId },
+          select: { category: true, budgetedAmount: true, actualAmount: true },
+        }),
+        this.prisma.projectRaidEntry.findMany({
+          where: { projectId, status: "open" },
+          select: { id: true, type: true, description: true, severity: true, mitigation: true },
+          orderBy: { severity: "desc" },
+        }),
+        this.prisma.timelineExtension.findMany({
+          where: { entityType: "project", entityId: projectId },
+          select: { previousDate: true, newDate: true, reason: true, attributedTo: true },
+          orderBy: { createdAt: "asc" },
+        }),
+        this.prisma.stageChange.findMany({
+          where: {
+            entityType: "project",
+            entityId: projectId,
+            ...(window && { changedAt: window }),
+          },
+          select: { fromStage: true, toStage: true, changedAt: true },
+          orderBy: { changedAt: "asc" },
+        }),
+        // Top-level discussions, with how many replies each drew.
+        this.prisma.projectActivity.findMany({
+          where: { projectId, parentId: null },
+          select: {
+            summary: true,
+            occurredAt: true,
+            isDecision: true,
+            decidedAt: true,
+            creator: { select: { fullName: true, email: true } },
+            _count: { select: { replies: true } },
+          },
+          orderBy: { occurredAt: "asc" },
+        }),
+        this.prisma.projectDeliverable.findMany({
+          where: { projectId, status: "delivered" },
+          select: { title: true, deliveredAt: true },
+        }),
+      ]);
 
     const inWindow = (d: Date | null) => !window || (!!d && d >= window.gte && d <= window.lte);
     const doneMilestones = milestones.filter((m) => m.isComplete);
@@ -389,6 +412,13 @@ export class ReportContentService {
             source: "aims" as const,
             when: day(m.dueDate),
           })),
+        ...deliverables
+          .filter((d) => inWindow(d.deliveredAt))
+          .map((d) => ({
+            text: `Delivered: ${d.title}`,
+            source: "aims" as const,
+            when: day(d.deliveredAt),
+          })),
         ...doneTasks
           .filter((t) => inWindow(t.updatedAt))
           .slice(0, 20)
@@ -419,11 +449,40 @@ export class ReportContentService {
       open: openTasks
         .slice(0, 20)
         .map((t) => ({ text: t.title, source: "aims" as const, when: day(t.dueDate) })),
-      delivered: doneMilestones.map((m) => ({
-        text: m.title,
-        source: "aims" as const,
-        when: day(m.dueDate),
-      })),
+      delivered: [
+        ...deliverables.map((d) => ({
+          text: d.title,
+          source: "aims" as const,
+          when: day(d.deliveredAt),
+        })),
+        ...doneMilestones.map((m) => ({
+          text: `Milestone: ${m.title}`,
+          source: "aims" as const,
+          when: day(m.dueDate),
+        })),
+      ],
+      decided: posts
+        .filter((p) => p.isDecision && inWindow(p.decidedAt ?? p.occurredAt))
+        .map((p) => ({
+          text: clip(p.summary),
+          source: "aims" as const,
+          link: `/projects/${projectId}?view=discussions`,
+          when: day(p.decidedAt ?? p.occurredAt),
+        })),
+      discussed: posts
+        .filter((p) => !p.isDecision && inWindow(p.occurredAt))
+        .map((p) => {
+          const who = p.creator?.fullName ?? p.creator?.email;
+          const replies = p._count.replies;
+          return {
+            text: `${clip(p.summary)}${who ? ` — ${who}` : ""}${
+              replies ? ` (${replies} ${replies === 1 ? "reply" : "replies"})` : ""
+            }`,
+            source: "aims" as const,
+            link: `/projects/${projectId}?view=discussions`,
+            when: day(p.occurredAt),
+          };
+        }),
     };
 
     return { figures, lists };

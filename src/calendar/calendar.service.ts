@@ -7,6 +7,7 @@ import {
 import type { AppRole, Prisma, TenderStage } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { isAdminOrCeo } from "../common/is-admin-or-ceo";
+import { companyProjectsOf } from "../common/project-access";
 import { viewerDepartmentCodes } from "../common/department-scope";
 import { maskUserRef } from "../common/mask-user-ref";
 import { DEPARTMENT_ROLES, userCan } from "../common/capabilities";
@@ -379,11 +380,16 @@ export class CalendarService {
     const codes = await viewerDepartmentCodes(viewer, this.prisma);
     if (codes === null) return {};
     return {
-      department: { code: { in: codes } },
       OR: [
-        { visibility: "department" },
-        { createdBy: viewer.id },
-        { team: { some: { userId: viewer.id } } },
+        {
+          department: { code: { in: codes } },
+          OR: [
+            { visibility: "department" },
+            { createdBy: viewer.id },
+            { team: { some: { userId: viewer.id } } },
+          ],
+        },
+        companyProjectsOf(viewer.id),
       ],
     };
   }

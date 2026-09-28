@@ -39,7 +39,7 @@ export interface InboxItem {
   title: string;
   department: { id: string | null; name: string; code: string } | null;
   reportKind?: "department" | "project" | "individual";
-  decidedBy?: "ceo" | "department_head";
+  decidedBy?: "ceo" | "department_head" | "none";
   subjectName?: string | null;
   periodStart: Date;
   periodEnd: Date;

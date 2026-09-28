@@ -21,6 +21,7 @@ import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import { parsePaginationQuery } from "../../common/pagination";
 import { CreateAccessGrantDto } from "../../common/dto/create-access-grant.dto";
+import { SetDecisionDto } from "./dto/set-decision.dto";
 
 @Controller("projects")
 export class ProjectsController {
@@ -36,12 +37,20 @@ export class ProjectsController {
     @Query("status") status?: ProjectStatus,
     @Query("clientId") clientId?: string,
     @Query("sharedWithMe") sharedWithMe?: string,
+    @Query("scope") scope?: string,
     @Query("serviceLineId") serviceLineId?: string,
     @Query("page") page?: string,
     @Query("pageSize") pageSize?: string,
   ) {
     return this.projectsService.findAll(
-      { departmentId, status, clientId, serviceLineId, sharedWithMe: sharedWithMe === "true" },
+      {
+        departmentId,
+        status,
+        clientId,
+        serviceLineId,
+        sharedWithMe: sharedWithMe === "true",
+        scope: scope === "company" || scope === "department" ? scope : undefined,
+      },
       parsePaginationQuery(page, pageSize),
       user,
     );
@@ -113,8 +122,8 @@ export class ProjectsController {
 
   @Get(":id/milestones")
   @Roles()
-  listMilestones(@Param("id") id: string) {
-    return this.projectsService.listMilestones(id);
+  listMilestones(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.projectsService.listMilestones(id, user);
   }
 
   @Post(":id/milestones")
@@ -148,12 +157,12 @@ export class ProjectsController {
 
   @Get(":id/deliverables")
   @Roles()
-  listDeliverables(@Param("id") id: string) {
-    return this.projectsService.listDeliverables(id);
+  listDeliverables(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.projectsService.listDeliverables(id, user);
   }
 
   @Post(":id/deliverables")
-  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
+  @Roles()
   createDeliverable(
     @Param("id") id: string,
     @Body() dto: CreateDeliverableDto,
@@ -163,7 +172,7 @@ export class ProjectsController {
   }
 
   @Patch("deliverables/:deliverableId")
-  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
+  @Roles()
   updateDeliverable(
     @Param("deliverableId") deliverableId: string,
     @Body() dto: UpdateDeliverableDto,
@@ -173,7 +182,7 @@ export class ProjectsController {
   }
 
   @Delete("deliverables/:deliverableId")
-  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
+  @Roles()
   removeDeliverable(
     @Param("deliverableId") deliverableId: string,
     @CurrentUser() user: AuthenticatedUser,
@@ -188,7 +197,7 @@ export class ProjectsController {
   }
 
   @Post(":id/activities")
-  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
+  @Roles()
   createActivity(
     @Param("id") id: string,
     @Body() dto: CreateProjectActivityDto,
@@ -201,6 +210,17 @@ export class ProjectsController {
   @Roles()
   deleteActivity(@Param("activityId") activityId: string, @CurrentUser() user: AuthenticatedUser) {
     return this.projectsService.deleteActivity(activityId, user);
+  }
+
+  // The service lets anyone who can add work to the project decide.
+  @Patch("activities/:activityId/decision")
+  @Roles()
+  setDecision(
+    @Param("activityId") activityId: string,
+    @Body() body: SetDecisionDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.projectsService.setDecision(activityId, body.isDecision, user);
   }
 
   /* ---------- Cost items ---------- */

@@ -358,6 +358,7 @@ model User {
   projectActivities          ProjectActivity[]               @relation("ProjectActivityCreatedBy")
   tenderActivities           TenderActivity[]                @relation("TenderActivityCreatedBy")
   projectTeamMemberships     ProjectTeamMember[]
+  projectsLed                Project[]                       @relation("ProjectLead")
   leadActivities             LeadActivity[]                  @relation("LeadActivityCreatedBy")
   blogPosts                  BlogPost[]                      @relation("BlogPostCreatedBy")
   ticketsRequested           Ticket[]                        @relation("TicketRequester")
@@ -626,6 +627,8 @@ enum ReportStatus {
   submitted
   changes_requested
   approved
+  // Project reports: shared with everyone on the project; nobody approves them.
+  shared
 }
 
 // What a report is about. The subject is a department, a project or a person.
@@ -647,6 +650,8 @@ enum ReportTemplate {
 enum ReviewerKind {
   ceo
   department_head
+  // Project reports are shared with the team, not decided on.
+  none
 }
 
 enum ReportPeriodType {
@@ -892,15 +897,30 @@ model DebtorFollowUp {
 // Projects originate from a won tender or directly from a client engagement (both optional —
 // an internal project may have neither). Financials aren't duplicated here: a project's
 // budget/actual/margin are read live from Budget/Invoice via contractId.
+// "company": owned by a lead and team, not a department; only the team and CEO see it.
+enum ProjectScope {
+  department
+  company
+}
+
+enum ProjectMemberAccess {
+  lead
+  member
+  viewer
+}
+
 model Project {
   id                     String                @id @default(uuid()) @db.Char(36)
+  scope                  ProjectScope          @default(department)
   name                   String
   description            String?               @db.Text
   clientId               String?               @map("client_id") @db.Char(36)
   contractId             String?               @map("contract_id") @db.Char(36)
   clientRequestId        String?               @unique @map("client_request_id") @db.Char(36)
   tenderId               String?               @unique @map("tender_id") @db.Char(36)
-  departmentId           String                @map("department_id") @db.Char(36)
+  // Null for company projects.
+  departmentId           String?               @map("department_id") @db.Char(36)
+  leadId                 String?               @map("lead_id") @db.Char(36)
   // Which service line this work delivers (e.g. HR Recruitment); drives department dashboards.
   serviceLineId          String?               @map("service_line_id") @db.Char(36)
   status                 ProjectStatus         @default(planning)
@@ -935,7 +955,8 @@ model Project {
   contract          Contract?              @relation(fields: [contractId], references: [id], onDelete: SetNull)
   clientRequest     ClientRequest?         @relation(fields: [clientRequestId], references: [id], onDelete: SetNull)
   tender            Tender?                @relation(fields: [tenderId], references: [id], onDelete: SetNull)
-  department        Department             @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  department        Department?            @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  lead              User?                  @relation("ProjectLead", fields: [leadId], references: [id], onDelete: SetNull)
   serviceLine       ServiceLine?           @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
   tasks             Task[]
   milestones        Milestone[]
@@ -955,6 +976,8 @@ model Project {
   @@index([contractId])
   @@index([serviceLineId])
   @@index([deliveryStage])
+  @@index([scope])
+  @@index([leadId])
   @@map("projects")
 }
 
@@ -1133,6 +1156,10 @@ model ProjectActivity {
   createdBy  String?                   @map("created_by") @db.Char(36)
   // Set when this entry replies to another one on the same record.
   parentId   String?                   @map("parent_id") @db.Char(36)
+  // A discussion the lead marked as settled; pinned on the project's Overview.
+  isDecision Boolean                   @default(false) @map("is_decision")
+  decidedBy  String?                   @map("decided_by") @db.Char(36)
+  decidedAt  DateTime?                 @map("decided_at")
   createdAt  DateTime                  @default(now()) @map("created_at")
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -1182,6 +1209,8 @@ model ProjectTeamMember {
   name              String
   role              String
   type              ProjectTeamMemberType @default(internal)
+  // Company projects: what this person may do. Department projects ignore it.
+  access            ProjectMemberAccess   @default(member)
   allocationPercent Int                   @default(0) @map("allocation_percent")
   hoursLogged       Decimal               @default(0) @map("hours_logged") @db.Decimal(8, 2)
   createdAt         DateTime              @default(now()) @map("created_at")

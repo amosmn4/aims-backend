@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { DocumentsService } from "../documents/documents.service";
 import { viewerDepartmentCodes } from "../common/department-scope";
+import { companyProjectsOf } from "../common/project-access";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import type { Prisma } from "@prisma/client";
 
@@ -42,11 +43,16 @@ async function projectScope(
   const deptCodes = await viewerDepartmentCodes(viewer, prisma);
   if (deptCodes === null) return {};
   return {
-    department: { code: { in: deptCodes } },
     OR: [
-      { visibility: "department" },
-      { createdBy: viewer.id },
-      { team: { some: { userId: viewer.id } } },
+      {
+        department: { code: { in: deptCodes } },
+        OR: [
+          { visibility: "department" },
+          { createdBy: viewer.id },
+          { team: { some: { userId: viewer.id } } },
+        ],
+      },
+      companyProjectsOf(viewer.id),
     ],
   };
 }
