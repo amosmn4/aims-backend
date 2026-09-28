@@ -939,6 +939,7 @@ model Project {
   serviceLine       ServiceLine?           @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
   tasks             Task[]
   milestones        Milestone[]
+  deliverables      ProjectDeliverable[]
   activities        ProjectActivity[]
   costItems         ProjectCostItem[]
   team              ProjectTeamMember[]
@@ -1092,6 +1093,31 @@ model Milestone {
 
   @@index([projectId])
   @@map("milestones")
+}
+
+// What the project owes the client (e.g. "Shortlist of 5 candidates"), logged and ticked off.
+enum DeliverableStatus {
+  not_started
+  in_progress
+  delivered
+}
+
+model ProjectDeliverable {
+  id          String            @id @default(uuid()) @db.Char(36)
+  projectId   String            @map("project_id") @db.Char(36)
+  title       String
+  description String?           @db.Text
+  dueDate     DateTime?         @map("due_date") @db.Date
+  status      DeliverableStatus @default(not_started)
+  deliveredAt DateTime?         @map("delivered_at")
+  createdBy   String?           @map("created_by") @db.Char(36)
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("project_deliverables")
 }
 
 // Same shape as ClientRequestActivity — the "Activity & Communication" log on a delivery
@@ -2092,6 +2118,12 @@ enum WaterMeterType {
 }
 
 // Water that left the network without reaching a household, recorded on purpose.
+// Why a meter left service. Its readings and purchases are always kept.
+enum WaterMeterInactiveReason {
+  replaced
+  removed
+}
+
 enum WaterAdjustmentKind {
   // Charging a length of pipe after it was emptied. A 6-inch main holds a lot.
   line_fill
@@ -2173,26 +2205,29 @@ model WaterCustomer {
 
 // Meters are the module's primary entry point — registering one finds-or-creates its customer.
 model WaterMeter {
-  id              String             @id @default(uuid()) @db.Char(36)
-  meterNumber     String             @unique @map("meter_number")
-  meterType       WaterMeterType     @default(household) @map("meter_type")
+  id              String                    @id @default(uuid()) @db.Char(36)
+  meterNumber     String                    @unique @map("meter_number")
+  meterType       WaterMeterType            @default(household) @map("meter_type")
   // Set on main meters only, so the name is free to change without breaking the sums.
-  mainStage       WaterMainStage?    @map("main_stage")
+  mainStage       WaterMainStage?           @map("main_stage")
   // Household meters are identified by customer; main/bulk meters use name + location.
   // A bulk meter's `zoneId` covers every sub-zone via the zone tree.
   name            String?
   location        String?
-  customerId      String?            @map("customer_id") @db.Char(36)
-  plotNo          String?            @map("plot_no")
-  installedAt     DateTime?          @map("installed_at")
-  zoneId          String?            @map("zone_id") @db.Char(36)
-  isActive        Boolean            @default(true) @map("is_active")
+  customerId      String?                   @map("customer_id") @db.Char(36)
+  plotNo          String?                   @map("plot_no")
+  installedAt     DateTime?                 @map("installed_at")
+  zoneId          String?                   @map("zone_id") @db.Char(36)
+  isActive        Boolean                   @default(true) @map("is_active")
+  deactivatedAt   DateTime?                 @map("deactivated_at")
+  inactiveReason  WaterMeterInactiveReason? @map("inactive_reason")
+  inactiveNote    String?                   @map("inactive_note")
   // Which vending platform reads/tops up this meter. Defaults to `amsol` for existing meters.
-  vendingSystem   WaterVendingSystem @default(amsol) @map("vending_system")
+  vendingSystem   WaterVendingSystem        @default(amsol) @map("vending_system")
   // Set when this meter physically replaced another — audit trail only, not vending-history data.
-  replacesMeterId String?            @unique @map("replaces_meter_id") @db.Char(36)
-  createdAt       DateTime           @default(now()) @map("created_at")
-  updatedAt       DateTime           @updatedAt @map("updated_at")
+  replacesMeterId String?                   @unique @map("replaces_meter_id") @db.Char(36)
+  createdAt       DateTime                  @default(now()) @map("created_at")
+  updatedAt       DateTime                  @updatedAt @map("updated_at")
 
   customer        WaterCustomer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
   zone            WaterZone?     @relation(fields: [zoneId], references: [id], onDelete: SetNull)
@@ -2244,7 +2279,7 @@ model WaterUsageRecord {
   @@map("water_usage_records")
 }
 
-// A dial reading for a main/bulk meter. Consecutive readings derive period usage for NRW.
+// Main/bulk: the dial total. Household (prepaid): the credit balance left on the meter.
 model WaterMeterReading {
   id          String   @id @default(uuid()) @db.Char(36)
   meterId     String   @map("meter_id") @db.Char(36)

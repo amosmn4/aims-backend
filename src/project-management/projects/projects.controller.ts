@@ -5,6 +5,8 @@ import { CreateProjectDto } from "./dto/create-project.dto";
 import { UpdateProjectDto } from "./dto/update-project.dto";
 import { CreateMilestoneDto } from "./dto/create-milestone.dto";
 import { UpdateMilestoneDto } from "./dto/update-milestone.dto";
+import { CreateDeliverableDto } from "./dto/create-deliverable.dto";
+import { UpdateDeliverableDto } from "./dto/update-deliverable.dto";
 import { CreateProjectActivityDto } from "./dto/create-project-activity.dto";
 import { CreateCostItemDto } from "./dto/create-cost-item.dto";
 import { UpdateCostItemDto } from "./dto/update-cost-item.dto";
@@ -142,6 +144,41 @@ export class ProjectsController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.projectsService.removeMilestone(milestoneId, user);
+  }
+
+  @Get(":id/deliverables")
+  @Roles()
+  listDeliverables(@Param("id") id: string) {
+    return this.projectsService.listDeliverables(id);
+  }
+
+  @Post(":id/deliverables")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
+  createDeliverable(
+    @Param("id") id: string,
+    @Body() dto: CreateDeliverableDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.projectsService.createDeliverable(id, dto, user);
+  }
+
+  @Patch("deliverables/:deliverableId")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
+  updateDeliverable(
+    @Param("deliverableId") deliverableId: string,
+    @Body() dto: UpdateDeliverableDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.projectsService.updateDeliverable(deliverableId, dto, user);
+  }
+
+  @Delete("deliverables/:deliverableId")
+  @Roles("finance", "hr", "it", "marketing", "tender", "department_head", "account_manager")
+  removeDeliverable(
+    @Param("deliverableId") deliverableId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.projectsService.removeDeliverable(deliverableId, user);
   }
 
   @Get(":id/activities")

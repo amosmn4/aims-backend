@@ -12,6 +12,14 @@ import type { CreateMeterDto } from "./dto/create-meter.dto";
 import type { UpdateMeterDto } from "./dto/update-meter.dto";
 import type { CreateReadingDto } from "./dto/create-reading.dto";
 import type { UpdateReadingDto } from "./dto/update-reading.dto";
+import type { RetireMeterDto } from "./dto/retire-meter.dto";
+import {
+  balancePeriods,
+  balanceUsageInWindow,
+  type BalanceFlag,
+  type BalancePurchase,
+  type BalanceReading,
+} from "./household-balance";
 import type { CreateUsageUploadDto } from "./dto/create-usage-upload.dto";
 import { WATER_METER_TYPES, WATER_VENDING_SYSTEMS } from "./dto/create-meter.dto";
 import { endOfDay } from "../common/date-range";
@@ -111,6 +119,24 @@ function addDays(d: Date, days: number): Date {
   const next = new Date(d);
   next.setUTCDate(next.getUTCDate() + days);
   return next;
+}
+
+// Opening balances older than this are too stale to split usage by window.
+const BALANCE_LOOKBACK_DAYS = 400;
+// Enough earlier periods for a household's usual daily use.
+const BALANCE_BASELINE_DAYS = 210;
+const FLAG_RANK: Record<BalanceFlag, number> = { balance_too_high: 0, no_use: 1, high_use: 2 };
+
+function groupBalanceReadings(
+  rows: { id: string; meterId: string; readingDate: Date; value: unknown }[],
+) {
+  const map = new Map<string, BalanceReading[]>();
+  for (const r of rows) {
+    const list = map.get(r.meterId) ?? [];
+    list.push({ id: r.id, readingDate: r.readingDate, value: Number(r.value) });
+    map.set(r.meterId, list);
+  }
+  return map;
 }
 
 function monthKeyOf(d: Date): string {
@@ -467,6 +493,7 @@ export class WaterService {
         installedAt: dto.installedAt ? new Date(dto.installedAt) : undefined,
         zoneId,
         isActive: dto.isActive ?? true,
+        deactivatedAt: dto.isActive === false ? new Date() : undefined,
         vendingSystem: dto.vendingSystem,
         replacesMeterId,
       },
@@ -532,6 +559,9 @@ export class WaterService {
               : null,
         zoneId,
         isActive: dto.isActive,
+        ...(dto.isActive === true &&
+          !existing.isActive && { deactivatedAt: null, inactiveReason: null, inactiveNote: null }),
+        ...(dto.isActive === false && existing.isActive && { deactivatedAt: new Date() }),
         vendingSystem: dto.vendingSystem,
         replacesMeterId,
       },
@@ -540,8 +570,92 @@ export class WaterService {
     return meter;
   }
 
-  private retireMeter(id: string) {
-    return this.prisma.waterMeter.update({ where: { id }, data: { isActive: false } });
+  private async retireMeter(id: string) {
+    const meter = await this.prisma.waterMeter.findUniqueOrThrow({
+      where: { id },
+      select: { deactivatedAt: true },
+    });
+    return this.prisma.waterMeter.update({
+      where: { id },
+      data: {
+        isActive: false,
+        inactiveReason: "replaced",
+        deactivatedAt: meter.deactivatedAt ?? new Date(),
+      },
+    });
+  }
+
+  /**
+   * Takes a meter out of use without losing anything: records its final reading,
+   * marks why it left, and (when replaced) registers the new meter in the same step.
+   */
+  async takeMeterOutOfUse(id: string, dto: RetireMeterDto, user: AuthenticatedUser) {
+    const meter = await this.prisma.waterMeter.findUniqueOrThrow({ where: { id } });
+    if (!meter.isActive) {
+      throw new BadRequestException(`Meter ${meter.meterNumber} is already out of use.`);
+    }
+    const date = new Date(dto.date);
+    const newMeterNumber =
+      dto.reason === "replaced" && dto.newMeterNumber?.trim() ? dto.newMeterNumber.trim() : null;
+    if (newMeterNumber) {
+      await this.assertMeterNumberAvailable(newMeterNumber);
+      await this.assertReplaceable(id);
+    }
+    if (dto.finalReading != null) {
+      await this.assertNoReadingAt(id, date);
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      if (dto.finalReading != null) {
+        await tx.waterMeterReading.create({
+          data: {
+            meterId: id,
+            readingDate: date,
+            value: dto.finalReading,
+            notes: "Final reading",
+            createdBy: user.id,
+          },
+        });
+      }
+      const retired = await tx.waterMeter.update({
+        where: { id },
+        data: {
+          isActive: false,
+          deactivatedAt: date,
+          inactiveReason: dto.reason,
+          inactiveNote: nullableText(dto.note) ?? null,
+        },
+      });
+      if (!newMeterNumber) return { meter: retired, newMeter: null };
+
+      const newMeter = await tx.waterMeter.create({
+        data: {
+          meterNumber: newMeterNumber,
+          meterType: meter.meterType,
+          mainStage: meter.mainStage,
+          name: meter.name,
+          location: meter.location,
+          customerId: meter.customerId,
+          plotNo: meter.plotNo,
+          zoneId: meter.zoneId,
+          vendingSystem: meter.vendingSystem,
+          installedAt: date,
+          replacesMeterId: id,
+        },
+      });
+      if (dto.newMeterReading != null) {
+        await tx.waterMeterReading.create({
+          data: {
+            meterId: newMeter.id,
+            readingDate: date,
+            value: dto.newMeterReading,
+            notes: "Starting reading",
+            createdBy: user.id,
+          },
+        });
+      }
+      return { meter: retired, newMeter };
+    });
   }
 
   private async assertMeterNumberAvailable(meterNumber: string, exceptId?: string) {
@@ -592,9 +706,25 @@ export class WaterService {
     return undefined;
   }
 
-  // Readings and usage records cascade with the meter (schema onDelete: Cascade).
+  // Only a meter with no history can be deleted; anything else is taken out of use.
   async deleteMeter(id: string) {
-    await this.prisma.waterMeter.findUniqueOrThrow({ where: { id } });
+    const meter = await this.prisma.waterMeter.findUniqueOrThrow({
+      where: { id },
+      select: {
+        meterNumber: true,
+        _count: { select: { readings: true, usageRecords: true } },
+      },
+    });
+    const { readings, usageRecords } = meter._count;
+    if (readings > 0 || usageRecords > 0) {
+      const history = [
+        readings > 0 && plural(readings, "reading"),
+        usageRecords > 0 && plural(usageRecords, "purchase"),
+      ].filter((x): x is string => !!x);
+      throw new BadRequestException(
+        `Meter ${meter.meterNumber} has ${joinWithAnd(history)}, so it can't be deleted. Take it out of use instead; its history stays in reports.`,
+      );
+    }
     return this.prisma.waterMeter.delete({ where: { id } });
   }
 
@@ -709,8 +839,11 @@ export class WaterService {
     const to = parseDateParam(filters.to, "To date", true);
     const q = searchTerm(filters.q);
     const zoneIds = filters.zoneId ? await this.zoneAndDescendantIds(filters.zoneId) : undefined;
+    // Without a type or meter, the list is network (dial) readings; balances are listed on request.
     const meterWhere = {
-      ...(filters.meterType && { meterType: filters.meterType }),
+      ...(filters.meterType
+        ? { meterType: filters.meterType }
+        : !filters.meterId && { meterType: { not: "household" as const } }),
       ...(zoneIds && { zoneId: { in: zoneIds } }),
       ...(q && {
         OR: [
@@ -748,7 +881,16 @@ export class WaterService {
     );
   }
 
-  // Dial readings belong to main and bulk meters only.
+  private async assertNoReadingAt(meterId: string, readingDate: Date, exceptId?: string) {
+    const clash = await this.prisma.waterMeterReading.findFirst({
+      where: { meterId, readingDate, ...(exceptId && { id: { not: exceptId } }) },
+      select: { id: true },
+    });
+    if (clash) {
+      throw new BadRequestException("This meter already has a reading at that date and time.");
+    }
+  }
+
   private async assertReadingMeter(meterId: string) {
     const meter = await this.prisma.waterMeter.findUnique({
       where: { id: meterId },
@@ -764,6 +906,7 @@ export class WaterService {
 
   async createReading(dto: CreateReadingDto, user: AuthenticatedUser) {
     await this.assertReadingMeter(dto.meterId);
+    await this.assertNoReadingAt(dto.meterId, new Date(dto.readingDate));
     return this.prisma.waterMeterReading.create({
       data: {
         meterId: dto.meterId,
@@ -778,6 +921,13 @@ export class WaterService {
   async updateReading(id: string, dto: UpdateReadingDto) {
     const existing = await this.prisma.waterMeterReading.findUniqueOrThrow({ where: { id } });
     if (dto.meterId && dto.meterId !== existing.meterId) await this.assertReadingMeter(dto.meterId);
+    if (dto.readingDate || dto.meterId) {
+      await this.assertNoReadingAt(
+        dto.meterId ?? existing.meterId,
+        dto.readingDate ? new Date(dto.readingDate) : existing.readingDate,
+        id,
+      );
+    }
     return this.prisma.waterMeterReading.update({
       where: { id },
       data: {
@@ -1031,32 +1181,148 @@ export class WaterService {
   /**
    * What households actually drew, and how we know.
    *
-   * A dial reading is the water that truly passed the meter. Tokens are credit
-   * bought, which may be used weeks later — so where readings exist we use them,
-   * and where they do not we fall back to tokens and say so.
+   * Household readings are prepaid balances: used = opening balance + units bought
+   * − closing balance. Meters with two balances around the window are measured;
+   * the rest fall back to tokens bought in the window.
    */
   private async householdConsumption(
     start: Date,
     end: Date,
     zoneIds?: string[],
   ): Promise<{ units: number; basis: "readings" | "tokens"; metersRead: number }> {
-    const metered = await this.prisma.waterMeterReading.findMany({
+    const lookback = addDays(start, -BALANCE_LOOKBACK_DAYS);
+    const readings = await this.prisma.waterMeterReading.findMany({
       where: {
-        readingDate: { gte: start, lt: end },
+        readingDate: { gte: lookback, lt: end },
         meter: { meterType: "household", ...(zoneIds && { zoneId: { in: zoneIds } }) },
       },
-      select: { meterId: true },
-      distinct: ["meterId"],
+      select: { id: true, meterId: true, readingDate: true, value: true },
     });
-    if (metered.length > 0) {
-      const units = await this.readingUsageForType("household", start, end, zoneIds);
-      return { units, basis: "readings", metersRead: metered.length };
+    const byMeter = groupBalanceReadings(readings);
+    const purchases = await this.balancePurchases([...byMeter.keys()], lookback, end);
+
+    let measuredUnits = 0;
+    const measured: string[] = [];
+    for (const [meterId, meterReadings] of byMeter) {
+      const res = balanceUsageInWindow(meterReadings, purchases.get(meterId) ?? [], start, end);
+      if (!res) continue;
+      measured.push(meterId);
+      measuredUnits += res.used;
     }
+
     const tokens = await this.prisma.waterUsageRecord.aggregate({
-      where: { recordedAt: { gte: start, lt: end }, ...this.householdWhere(zoneIds) },
+      where: {
+        recordedAt: { gte: start, lt: end },
+        ...this.householdWhere(zoneIds),
+        ...(measured.length > 0 && { meterId: { notIn: measured } }),
+      },
       _sum: { unitsSold: true },
     });
-    return { units: Number(tokens._sum.unitsSold ?? 0), basis: "tokens", metersRead: 0 };
+    return {
+      units: measuredUnits + Number(tokens._sum.unitsSold ?? 0),
+      basis: measured.length > 0 ? "readings" : "tokens",
+      metersRead: measured.length,
+    };
+  }
+
+  private async balancePurchases(meterIds: string[], after: Date, end: Date) {
+    const map = new Map<string, BalancePurchase[]>();
+    if (meterIds.length === 0) return map;
+    const rows = await this.prisma.waterUsageRecord.findMany({
+      where: { meterId: { in: meterIds }, recordedAt: { gt: after, lt: end } },
+      select: { meterId: true, recordedAt: true, unitsSold: true },
+    });
+    for (const r of rows) {
+      const list = map.get(r.meterId) ?? [];
+      list.push({ recordedAt: r.recordedAt, units: Number(r.unitsSold) });
+      map.set(r.meterId, list);
+    }
+    return map;
+  }
+
+  /* ---------------- Household balances ---------------- */
+
+  /** Every balance reading on one household meter, with what was used in each period. */
+  async meterBalancePeriods(meterId: string) {
+    const meter = await this.prisma.waterMeter.findUniqueOrThrow({
+      where: { id: meterId },
+      select: { id: true, meterType: true },
+    });
+    if (meter.meterType !== "household") {
+      throw new BadRequestException("Balances are only read on household meters.");
+    }
+    const [readings, purchases] = await Promise.all([
+      this.prisma.waterMeterReading.findMany({
+        where: { meterId },
+        orderBy: { readingDate: "asc" },
+        select: { id: true, readingDate: true, value: true, notes: true },
+      }),
+      this.prisma.waterUsageRecord.findMany({
+        where: { meterId },
+        select: { recordedAt: true, unitsSold: true },
+      }),
+    ]);
+    const periods = balancePeriods(
+      readings.map((r) => ({ id: r.id, readingDate: r.readingDate, value: Number(r.value) })),
+      purchases.map((p) => ({ recordedAt: p.recordedAt, units: Number(p.unitsSold) })),
+    );
+    const periodByReading = new Map(periods.map((p) => [p.readingId, p]));
+    return readings
+      .map((r) => ({
+        id: r.id,
+        readingDate: r.readingDate,
+        balance: Number(r.value),
+        notes: r.notes,
+        period: periodByReading.get(r.id) ?? null,
+      }))
+      .reverse();
+  }
+
+  /** Households whose latest balance periods need a look, most serious first. */
+  async householdFlags(months = 3) {
+    const since = addDays(new Date(), -Math.min(Math.max(months, 1), 12) * 30);
+    const lookback = addDays(since, -BALANCE_BASELINE_DAYS);
+    const readings = await this.prisma.waterMeterReading.findMany({
+      where: { readingDate: { gte: lookback }, meter: { meterType: "household" } },
+      select: { id: true, meterId: true, readingDate: true, value: true },
+    });
+    const byMeter = groupBalanceReadings(readings);
+    const purchases = await this.balancePurchases(
+      [...byMeter.keys()],
+      lookback,
+      addDays(new Date(), 1),
+    );
+
+    const flagged: {
+      meterId: string;
+      flag: BalanceFlag;
+      period: ReturnType<typeof balancePeriods>[number];
+    }[] = [];
+    for (const [meterId, meterReadings] of byMeter) {
+      const periods = balancePeriods(meterReadings, purchases.get(meterId) ?? []);
+      const latest = [...periods].reverse().find((p) => p.to >= since && p.flags.length > 0);
+      if (latest) flagged.push({ meterId, flag: latest.flags[0], period: latest });
+    }
+    if (flagged.length === 0) return [];
+
+    const meters = await this.prisma.waterMeter.findMany({
+      where: { id: { in: flagged.map((f) => f.meterId) } },
+      select: {
+        id: true,
+        meterNumber: true,
+        isActive: true,
+        customer: { select: { id: true, name: true } },
+        zone: { select: { id: true, name: true } },
+      },
+    });
+    const meterById = new Map(meters.map((m) => [m.id, m]));
+    return flagged
+      .map((f) => ({ ...f, meter: meterById.get(f.meterId)! }))
+      .filter((f) => f.meter)
+      .sort(
+        (a, b) =>
+          FLAG_RANK[a.flag] - FLAG_RANK[b.flag] || b.period.to.getTime() - a.period.to.getTime(),
+      );
   }
 
   /** Water that left the network for a reason someone wrote down. */
@@ -1145,36 +1411,41 @@ export class WaterService {
     const descendants = await this.zoneAndDescendantIds(zoneId);
     const childIds = descendants.filter((id) => id !== zoneId);
 
-    const [children, meters, customers, bulkTotal, childBulkTotal, households, revenue] =
-      await Promise.all([
-        this.prisma.waterZone.findMany({
-          where: { parentZoneId: zoneId },
-          select: { id: true, name: true },
-          orderBy: { name: "asc" },
-        }),
-        this.prisma.waterMeter.findMany({
-          where: { zoneId },
-          include: { customer: { select: { id: true, name: true } } },
-          orderBy: [{ meterType: "asc" }, { meterNumber: "asc" }],
-        }),
-        this.prisma.waterCustomer.count({ where: { zoneId } }),
-        this.readingUsageForType("bulk", start, end, [zoneId]),
-        childIds.length
-          ? this.readingUsageForType("bulk", start, end, childIds)
-          : Promise.resolve(0),
-        this.prisma.waterUsageRecord.aggregate({
-          where: { recordedAt: { gte: start, lt: end }, meter: { zoneId } },
-          _sum: { unitsSold: true },
-        }),
-        this.prisma.waterUsageRecord.aggregate({
-          where: { recordedAt: { gte: start, lt: end }, meter: { zoneId } },
-          _sum: { amountPaid: true },
-        }),
-      ]);
+    const [
+      children,
+      meters,
+      customers,
+      bulkTotal,
+      childBulkTotal,
+      households,
+      revenue,
+      adjustments,
+    ] = await Promise.all([
+      this.prisma.waterZone.findMany({
+        where: { parentZoneId: zoneId },
+        select: { id: true, name: true },
+        orderBy: { name: "asc" },
+      }),
+      this.prisma.waterMeter.findMany({
+        where: { zoneId },
+        include: { customer: { select: { id: true, name: true } } },
+        orderBy: [{ meterType: "asc" }, { meterNumber: "asc" }],
+      }),
+      this.prisma.waterCustomer.count({ where: { zoneId } }),
+      this.readingUsageForType("bulk", start, end, [zoneId]),
+      childIds.length ? this.readingUsageForType("bulk", start, end, childIds) : Promise.resolve(0),
+      this.householdConsumption(start, end, [zoneId]),
+      this.prisma.waterUsageRecord.aggregate({
+        where: { recordedAt: { gte: start, lt: end }, meter: { zoneId } },
+        _sum: { amountPaid: true },
+      }),
+      this.adjustmentsInPeriod(start, end, [zoneId]),
+    ]);
 
-    // A zone's own loss: its bulk meter, less the zones beneath it, less its own plots.
-    const directHouseholdTotal = Number(households._sum.unitsSold ?? 0);
-    const accounted = directHouseholdTotal + childBulkTotal;
+    // A zone's own loss: its bulk meter, less the zones beneath it, its own plots and known losses.
+    const directHouseholdTotal = households.units;
+    const adjustmentTotal = adjustments.total;
+    const accounted = directHouseholdTotal + childBulkTotal + adjustmentTotal;
     const lossUnits = bulkTotal > 0 ? bulkTotal - accounted : 0;
     const lossPct = bulkTotal > 0 ? (lossUnits / bulkTotal) * 100 : null;
 
@@ -1193,6 +1464,9 @@ export class WaterService {
       bulkTotal,
       childBulkTotal,
       directHouseholdTotal,
+      adjustmentTotal,
+      consumptionBasis: households.basis,
+      provisional: households.basis === "tokens",
       accountedTotal: accounted,
       lossUnits,
       lossPct,

@@ -15,6 +15,7 @@ import { CreateMeterDto } from "./dto/create-meter.dto";
 import { UpdateMeterDto } from "./dto/update-meter.dto";
 import { CreateReadingDto } from "./dto/create-reading.dto";
 import { UpdateReadingDto } from "./dto/update-reading.dto";
+import { RetireMeterDto } from "./dto/retire-meter.dto";
 import { CreateUsageUploadDto } from "./dto/create-usage-upload.dto";
 import { Roles } from "../auth/decorators/roles.decorator";
 import { CurrentUser } from "../auth/decorators/current-user.decorator";
@@ -183,6 +184,25 @@ export class WaterController {
       },
       parsePaginationQuery(page, pageSize),
     );
+  }
+
+  @Get("household-flags")
+  householdFlags(@Query("months") months?: string) {
+    return this.waterService.householdFlags(months ? Number(months) : undefined);
+  }
+
+  @Get("meters/:id/balance-periods")
+  meterBalancePeriods(@Param("id") id: string) {
+    return this.waterService.meterBalancePeriods(id);
+  }
+
+  @Post("meters/:id/take-out-of-use")
+  takeMeterOutOfUse(
+    @Param("id") id: string,
+    @Body() dto: RetireMeterDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.waterService.takeMeterOutOfUse(id, dto, user);
   }
 
   @Get("meters/:id")
