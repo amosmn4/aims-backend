@@ -9,6 +9,7 @@ import {
 } from "class-validator";
 
 export const WATER_METER_TYPES = ["main", "bulk", "household"] as const;
+export const WATER_MAIN_STAGES = ["borehole_to_tank", "tank_to_network"] as const;
 export const WATER_VENDING_SYSTEMS = ["amsol", "mpaya"] as const;
 
 // Optional fields accept null on update to clear the stored value.
@@ -21,6 +22,11 @@ export class CreateMeterDto {
   @IsOptional()
   @IsIn(WATER_METER_TYPES)
   meterType?: (typeof WATER_METER_TYPES)[number];
+
+  // Main meters only: which stretch of the network this one measures.
+  @IsOptional()
+  @IsIn(WATER_MAIN_STAGES)
+  mainStage?: (typeof WATER_MAIN_STAGES)[number] | null;
 
   // Main/bulk meters: a friendly label and physical location, no customer (see WaterService —
   // customerId/customerName are ignored for these types).

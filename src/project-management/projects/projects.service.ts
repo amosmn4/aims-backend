@@ -18,6 +18,8 @@ import type { CreateProjectDto } from "./dto/create-project.dto";
 import type { UpdateProjectDto } from "./dto/update-project.dto";
 import type { CreateMilestoneDto } from "./dto/create-milestone.dto";
 import type { UpdateMilestoneDto } from "./dto/update-milestone.dto";
+import type { CreateDeliverableDto } from "./dto/create-deliverable.dto";
+import type { UpdateDeliverableDto } from "./dto/update-deliverable.dto";
 import type { CreateCostItemDto } from "./dto/create-cost-item.dto";
 import type { UpdateCostItemDto } from "./dto/update-cost-item.dto";
 import type { CreateTeamMemberDto } from "./dto/create-team-member.dto";
@@ -113,6 +115,9 @@ export class ProjectsService {
           tender: { select: { id: true, referenceNumber: true, title: true } },
           clientRequest: { select: { id: true, referenceNumber: true, title: true } },
           _count: { select: { tasks: true } },
+          tasks: { select: { status: true } },
+          deliverables: { select: { status: true } },
+          milestones: { select: { isComplete: true } },
         },
         orderBy: { createdAt: "desc" },
       },
@@ -474,6 +479,50 @@ export class ProjectsService {
     });
     await assertDepartmentAccess(milestone.project.department, user, this.prisma);
     return this.prisma.milestone.delete({ where: { id: milestoneId } });
+  }
+
+  listDeliverables(projectId: string) {
+    return this.prisma.projectDeliverable.findMany({
+      where: { projectId },
+      orderBy: [{ dueDate: "asc" }, { createdAt: "asc" }],
+    });
+  }
+
+  async createDeliverable(projectId: string, dto: CreateDeliverableDto, user: AuthenticatedUser) {
+    await this.assertProjectAccess(projectId, user);
+    return this.prisma.projectDeliverable.create({
+      data: {
+        projectId,
+        title: dto.title,
+        description: dto.description,
+        dueDate: dto.dueDate ? new Date(dto.dueDate) : undefined,
+        status: dto.status,
+        deliveredAt: dto.status === "delivered" ? new Date() : undefined,
+        createdBy: user.id,
+      },
+    });
+  }
+
+  async updateDeliverable(id: string, dto: UpdateDeliverableDto, user: AuthenticatedUser) {
+    const existing = await this.prisma.projectDeliverable.findUniqueOrThrow({ where: { id } });
+    await this.assertProjectAccess(existing.projectId, user);
+    const statusChanged = dto.status !== undefined && dto.status !== existing.status;
+    return this.prisma.projectDeliverable.update({
+      where: { id },
+      data: {
+        title: dto.title,
+        description: dto.description,
+        ...(dto.dueDate !== undefined && { dueDate: dto.dueDate ? new Date(dto.dueDate) : null }),
+        status: dto.status,
+        ...(statusChanged && { deliveredAt: dto.status === "delivered" ? new Date() : null }),
+      },
+    });
+  }
+
+  async removeDeliverable(id: string, user: AuthenticatedUser) {
+    const existing = await this.prisma.projectDeliverable.findUniqueOrThrow({ where: { id } });
+    await this.assertProjectAccess(existing.projectId, user);
+    return this.prisma.projectDeliverable.delete({ where: { id } });
   }
 
   // Financials are read live from Budget/Invoice via the project's linked contract —

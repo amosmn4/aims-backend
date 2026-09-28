@@ -6,6 +6,7 @@ import {
   parseMeterTypeParam,
   parseVendingSystemParam,
 } from "./water.service";
+import { CreateAdjustmentDto } from "./dto/create-adjustment.dto";
 import { CreateZoneDto } from "./dto/create-zone.dto";
 import { UpdateZoneDto } from "./dto/update-zone.dto";
 import { CreateCustomerDto } from "./dto/create-customer.dto";
@@ -14,6 +15,7 @@ import { CreateMeterDto } from "./dto/create-meter.dto";
 import { UpdateMeterDto } from "./dto/update-meter.dto";
 import { CreateReadingDto } from "./dto/create-reading.dto";
 import { UpdateReadingDto } from "./dto/update-reading.dto";
+import { RetireMeterDto } from "./dto/retire-meter.dto";
 import { CreateUsageUploadDto } from "./dto/create-usage-upload.dto";
 import { Roles } from "../auth/decorators/roles.decorator";
 import { CurrentUser } from "../auth/decorators/current-user.decorator";
@@ -39,6 +41,78 @@ export class WaterController {
   @Get("zones/all")
   listAllZones() {
     return this.waterService.listAllZones();
+  }
+
+  @Get("zones/:id/detail")
+  zoneDetail(@Param("id") id: string, @Query("month") month?: string) {
+    return this.waterService.zoneDetail(id, month);
+  }
+
+  @Get("meters/unassigned")
+  unassignedMeters(@Query("meterType") meterType?: WaterMeterType) {
+    return this.waterService.unassignedMeters(meterType);
+  }
+
+  @Post("zones/:id/meters")
+  assignMeters(@Param("id") id: string, @Body() body: { meterIds: string[] }) {
+    return this.waterService.assignMetersToZone(id, body.meterIds ?? []);
+  }
+
+  @Post("meters/to-main-line")
+  moveToMainLine(@Body() body: { meterIds: string[] }) {
+    return this.waterService.assignMetersToZone(null, body.meterIds ?? []);
+  }
+
+  @Get("settled")
+  settled(@Query("months") months?: string) {
+    return this.waterService.settled({ months: months ? Number(months) : undefined });
+  }
+
+  @Get("adjustments")
+  listAdjustments(
+    @Query("zoneId") zoneId?: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+  ) {
+    return this.waterService.listAdjustments({
+      zoneId,
+      from: from ? new Date(from) : undefined,
+      to: to ? new Date(to) : undefined,
+    });
+  }
+
+  @Post("adjustments")
+  createAdjustment(@Body() dto: CreateAdjustmentDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.waterService.createAdjustment(dto, user.id);
+  }
+
+  @Delete("adjustments/:id")
+  deleteAdjustment(@Param("id") id: string) {
+    return this.waterService.deleteAdjustment(id);
+  }
+
+  @Get("zone-series")
+  zoneSeries(
+    @Query("granularity") granularity?: "week" | "month",
+    @Query("periods") periods?: string,
+  ) {
+    return this.waterService.zoneSeries({
+      granularity: granularity === "week" ? "week" : "month",
+      periods: periods ? Number(periods) : undefined,
+    });
+  }
+
+  @Get("meter-series")
+  meterSeries(
+    @Query("granularity") granularity?: "week" | "month",
+    @Query("periods") periods?: string,
+    @Query("meterType") meterType?: WaterMeterType,
+  ) {
+    return this.waterService.meterSeries({
+      granularity: granularity === "week" ? "week" : "month",
+      periods: periods ? Number(periods) : undefined,
+      meterType,
+    });
   }
 
   @Post("zones")
@@ -110,6 +184,25 @@ export class WaterController {
       },
       parsePaginationQuery(page, pageSize),
     );
+  }
+
+  @Get("household-flags")
+  householdFlags(@Query("months") months?: string) {
+    return this.waterService.householdFlags(months ? Number(months) : undefined);
+  }
+
+  @Get("meters/:id/balance-periods")
+  meterBalancePeriods(@Param("id") id: string) {
+    return this.waterService.meterBalancePeriods(id);
+  }
+
+  @Post("meters/:id/take-out-of-use")
+  takeMeterOutOfUse(
+    @Param("id") id: string,
+    @Body() dto: RetireMeterDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.waterService.takeMeterOutOfUse(id, dto, user);
   }
 
   @Get("meters/:id")
