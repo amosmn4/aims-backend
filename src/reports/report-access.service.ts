@@ -1,9 +1,10 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import type { ReportKind, ReportTemplate, ReviewerKind } from "@prisma/client";
+import type { ReportKind, ReviewerKind } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { can, canWithCapability } from "../common/permission-resolution";
 import { isAdminOrCeo } from "../common/is-admin-or-ceo";
 import { hasResourceGrant } from "../common/has-resource-grant";
+import { canReadCompanyProject, companyProjectRole } from "../common/project-access";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 
 export interface ReportSubject {
@@ -42,11 +43,7 @@ export class ReportAccessService {
     return !!head;
   }
 
-  async resolveSubject(
-    kind: ReportKind,
-    subjectId: string,
-    template: ReportTemplate,
-  ): Promise<ReportSubject> {
+  async resolveSubject(kind: ReportKind, subjectId: string): Promise<ReportSubject> {
     if (kind === "department") {
       const d = await this.prisma.department.findUnique({ where: { id: subjectId } });
       if (!d) throw new BadRequestException("Choose a department");
@@ -62,18 +59,17 @@ export class ReportAccessService {
     if (kind === "project") {
       const p = await this.prisma.project.findUnique({
         where: { id: subjectId },
-        select: { id: true, name: true, departmentId: true },
+        select: { id: true, name: true, departmentId: true, scope: true, leadId: true },
       });
       if (!p) throw new BadRequestException("Choose a project");
-      // Finishing a project is always the CEO's to sign off.
-      const byHead = template !== "project_completion" && (await this.headsDecide(p.departmentId));
+      // Project reports document the work for everyone on it; nobody approves them.
       return {
         kind,
         subjectId,
         departmentId: p.departmentId,
         subjectUserId: null,
         name: p.name,
-        reviewerKind: byHead ? "department_head" : "ceo",
+        reviewerKind: "none",
       };
     }
     const u = await this.prisma.user.findUnique({
@@ -112,6 +108,10 @@ export class ReportAccessService {
       include: { department: true },
     });
     if (!project) return false;
+    if (project.scope === "company") {
+      const role = await companyProjectRole(project, user, this.prisma);
+      return role === "admin" || role === "lead" || role === "member";
+    }
     if (await hasResourceGrant("project", projectId, user, "write", this.prisma)) return true;
     if (!project.department) return isAdminOrCeo(user);
     return can(user, project.department, "write", this.prisma);
@@ -133,6 +133,11 @@ export class ReportAccessService {
       return this.isDepartmentHead(report.departmentId, user);
     }
     if (report.kind === "project") {
+      const company = await this.prisma.project.findFirst({
+        where: { id: report.subjectId, scope: "company" },
+        select: { id: true, leadId: true },
+      });
+      if (company) return canReadCompanyProject(company, user, this.prisma);
       if (await hasResourceGrant("project", report.subjectId, user, "read", this.prisma)) {
         return true;
       }
@@ -157,13 +162,37 @@ export class ReportAccessService {
   }
 
   /** Whether this person is the one expected to approve or send it back. */
-  isReviewer(
-    report: { reviewerKind: ReviewerKind; departmentId: string | null },
+  async isReviewer(
+    report: { reviewerKind: ReviewerKind; departmentId: string | null; subjectId: string },
     user: AuthenticatedUser,
-  ): boolean {
+  ): Promise<boolean> {
+    if (report.reviewerKind === "none") return false;
     if (isAdminOrCeo(user)) return true;
     if (report.reviewerKind !== "department_head") return false;
     return this.isDepartmentHead(report.departmentId, user);
+  }
+
+  /** Everyone on a project's team, for telling them about a shared report. */
+  async projectTeamIds(projectId: string) {
+    const [project, team] = await Promise.all([
+      this.prisma.project.findUnique({ where: { id: projectId }, select: { leadId: true } }),
+      this.prisma.projectTeamMember.findMany({
+        where: { projectId, userId: { not: null } },
+        select: { userId: true },
+      }),
+    ]);
+    return [
+      ...new Set([project?.leadId, ...team.map((t) => t.userId)].filter(Boolean)),
+    ] as string[];
+  }
+
+  /** Company projects this person is on, for report lists. */
+  async companyProjectIds(userId: string) {
+    const rows = await this.prisma.project.findMany({
+      where: { scope: "company", OR: [{ leadId: userId }, { team: { some: { userId } } }] },
+      select: { id: true },
+    });
+    return rows.map((r) => r.id);
   }
 
   private isDepartmentHead(departmentId: string | null, user: AuthenticatedUser) {

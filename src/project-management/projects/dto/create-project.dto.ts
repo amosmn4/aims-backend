@@ -1,4 +1,15 @@
-import { IsArray, IsDateString, IsIn, IsNumber, IsOptional, IsString, Min } from "class-validator";
+import { Type } from "class-transformer";
+import {
+  IsArray,
+  IsDateString,
+  IsIn,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Min,
+  ValidateIf,
+  ValidateNested,
+} from "class-validator";
 
 const PROJECT_STATUSES = ["planning", "active", "on_hold", "completed", "cancelled"] as const;
 const DELIVERY_STAGES = [
@@ -13,6 +24,16 @@ const PROJECT_HEALTHS = ["green", "amber", "red"] as const;
 const PROJECT_VISIBILITIES = ["department", "restricted"] as const;
 const PROJECT_ENGAGEMENT_TYPES = ["one_off", "ongoing"] as const;
 const EXTENSION_ATTRIBUTIONS = ["client", "internal", "third_party", "other"] as const;
+export const PROJECT_SCOPES = ["department", "company"] as const;
+export const COMPANY_MEMBER_ACCESS = ["member", "viewer"] as const;
+
+export class CompanyMemberDto {
+  @IsString()
+  userId!: string;
+
+  @IsIn(COMPANY_MEMBER_ACCESS)
+  access!: (typeof COMPANY_MEMBER_ACCESS)[number];
+}
 export const SDLC_STAGES = [
   "requirements",
   "design",
@@ -38,8 +59,22 @@ export class CreateProjectDto {
   @IsString()
   contractId?: string;
 
+  // "company": no department; the creator leads it and only the team can see it.
+  @IsOptional()
+  @IsIn(PROJECT_SCOPES)
+  scope?: (typeof PROJECT_SCOPES)[number];
+
+  // Required for department projects; ignored for company projects.
+  @ValidateIf((o: CreateProjectDto) => o.scope !== "company")
   @IsString()
-  departmentId!: string;
+  departmentId?: string;
+
+  // Company projects only: the team, with what each person may do.
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CompanyMemberDto)
+  members?: CompanyMemberDto[];
 
   // Must be one of the project department's own service lines.
   @IsOptional()

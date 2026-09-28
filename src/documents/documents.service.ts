@@ -15,6 +15,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { StorageService } from "../storage/storage.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { assertDepartmentAccess } from "../common/assert-department-access";
+import { assertProjectWrite, companyProjectsOf } from "../common/project-access";
 import { assertModuleWrite } from "../common/module-access";
 import { hasResourceGrant } from "../common/has-resource-grant";
 import { viewerDepartmentCodes } from "../common/department-scope";
@@ -105,7 +106,7 @@ export class DocumentsService {
         where: { id: resourceId },
         include: { department: true },
       });
-      await assertDepartmentAccess(project.department, user, this.prisma);
+      await assertProjectWrite(project, user, this.prisma);
       return;
     }
 
@@ -115,7 +116,7 @@ export class DocumentsService {
         include: { project: { include: { department: true } } },
       });
       if (task.assigneeId === user.id) return;
-      await assertDepartmentAccess(task.project.department, user, this.prisma);
+      await assertProjectWrite(task.project, user, this.prisma);
       return;
     }
 
@@ -354,11 +355,17 @@ export class DocumentsService {
         const [projects, tasks, tenders, requests, deptReports, libraries, systems] =
           await Promise.all([
             this.prisma.project.findMany({
-              where: { department: { code: { in: deptCodes } } },
+              where: {
+                OR: [{ department: { code: { in: deptCodes } } }, companyProjectsOf(user.id)],
+              },
               select: { id: true },
             }),
             this.prisma.task.findMany({
-              where: { project: { department: { code: { in: deptCodes } } } },
+              where: {
+                project: {
+                  OR: [{ department: { code: { in: deptCodes } } }, companyProjectsOf(user.id)],
+                },
+              },
               select: { id: true },
             }),
             this.prisma.tender.findMany({

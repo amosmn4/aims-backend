@@ -37,7 +37,12 @@ const USER_REF = {
 } as const;
 
 const EDITABLE: ReportStatus[] = ["draft", "changes_requested"];
-const STATUSES: ReportStatus[] = ["draft", "submitted", "changes_requested", "approved"];
+const STATUSES: ReportStatus[] = ["draft", "submitted", "changes_requested", "approved", "shared"];
+
+/** A shared project report stays open to its author, so the record can be kept current. */
+const canStillEdit = (report: { status: ReportStatus; reviewerKind: string }) =>
+  EDITABLE.includes(report.status) ||
+  (report.reviewerKind === "none" && report.status === "shared");
 
 const TEMPLATE_FOR: Record<ReportKind, ReportTemplate> = {
   department: "department_monthly",
@@ -103,6 +108,7 @@ export class ReportsService {
       const scope: Prisma.ReportWhereInput[] = [
         { kind: { not: "individual" }, ...(codes && { department: { code: { in: codes } } }) },
         { kind: "individual", subjectUserId: user.id },
+        { kind: "project", subjectId: { in: await this.access.companyProjectIds(user.id) } },
       ];
       if (user.roles.includes("department_head") && user.departmentId) {
         scope.push({ kind: "individual", departmentId: user.departmentId });
@@ -153,7 +159,7 @@ export class ReportsService {
     });
 
     const canWrite = await this.access.canWrite(report, user);
-    const isReviewer = this.access.isReviewer(report, user);
+    const isReviewer = await this.access.isReviewer(report, user);
     // A draft belongs to whoever is writing it. Departments share theirs so two
     // people never start the same month; a person's own stays private.
     if (report.status === "draft" && report.createdBy !== user.id) {
@@ -171,7 +177,7 @@ export class ReportsService {
       subjectUser: report.subjectUser ? maskUserRef(report.subjectUser, user) : null,
       reviewer: report.reviewer ? maskUserRef(report.reviewer, user) : null,
       messages: report.messages.map((m) => ({ ...m, author: maskUserRef(m.author, user) })),
-      canEdit: EDITABLE.includes(report.status) && canWrite && report.createdBy === user.id,
+      canEdit: canStillEdit(report) && canWrite && report.createdBy === user.id,
       canReview: isReviewer && report.status === "submitted",
       missing: missingSections(sections),
       subjectName: base.department?.name ?? report.title,
@@ -190,7 +196,7 @@ export class ReportsService {
       throw new ForbiddenException("You can only write your own report");
     }
 
-    const subject = await this.access.resolveSubject(kind, subjectId, template);
+    const subject = await this.access.resolveSubject(kind, subjectId);
     if (
       !(await this.access.canWrite({ kind, subjectId, subjectUserId: subject.subjectUserId }, user))
     ) {
@@ -250,7 +256,7 @@ export class ReportsService {
   async update(id: string, dto: UpdateReportDto, user: AuthenticatedUser) {
     const report = await this.access.loadReadable(id, user);
     await this.assertCanEdit(report, user);
-    if (!EDITABLE.includes(report.status)) {
+    if (!canStillEdit(report)) {
       throw new BadRequestException(
         "This report is with its reviewer. You can edit it again if changes are asked for.",
       );
@@ -285,14 +291,19 @@ export class ReportsService {
         figures: dto.figures ? (dto.figures as unknown as Prisma.InputJsonValue) : undefined,
         sections: dto.sections ? (dto.sections as unknown as Prisma.InputJsonValue) : undefined,
         ...(dto.submit && {
-          status: "submitted" as const,
+          status: report.reviewerKind === "none" ? ("shared" as const) : ("submitted" as const),
           submittedBy: user.id,
-          submittedAt: new Date(),
+          submittedAt: report.status === "shared" ? undefined : new Date(),
           submissionCount: report.submissionCount + 1,
         }),
       },
     });
-    if (dto.submit) await this.recordSubmission(updated, user, wasSentBack, dto.note);
+    if (dto.submit && report.reviewerKind === "none") {
+      // Later edits to a shared report don't notify the team again.
+      if (report.status !== "shared") await this.recordShare(updated, user, dto.note);
+    } else if (dto.submit) {
+      await this.recordSubmission(updated, user, wasSentBack, dto.note);
+    }
     return updated;
   }
 
@@ -338,7 +349,7 @@ export class ReportsService {
 
   async review(id: string, dto: ReviewReportDto, user: AuthenticatedUser) {
     const report = await this.access.loadReadable(id, user);
-    if (!this.access.isReviewer(report, user)) {
+    if (!(await this.access.isReviewer(report, user))) {
       throw new ForbiddenException("This report isn't yours to decide on");
     }
     if (report.status !== "submitted") {
@@ -402,12 +413,12 @@ export class ReportsService {
       resourceId: id,
       actorId: user.id,
     };
-    if (this.access.isReviewer(report, user)) {
+    if (await this.access.isReviewer(report, user)) {
       await this.notifier.notify([report.createdBy, report.submittedBy], event);
     } else if (report.reviewerKind === "ceo") {
       await this.notifier.toCeo(event);
     } else {
-      await this.notifier.notify(await this.headIds(report.departmentId), event);
+      await this.notifier.notify(await this.reviewerIds(report), event);
     }
     return { ...message, author: maskUserRef(message.author, user) };
   }
@@ -492,6 +503,15 @@ export class ReportsService {
     return "Only people in this department can prepare its reports";
   }
 
+  private async reviewerIds(report: {
+    reviewerKind: string;
+    departmentId: string | null;
+    subjectId: string;
+  }) {
+    if (report.reviewerKind === "none") return this.access.projectTeamIds(report.subjectId);
+    return this.headIds(report.departmentId);
+  }
+
   private async headIds(departmentId: string | null) {
     if (!departmentId) return [];
     const heads = await this.prisma.user.findMany({
@@ -507,6 +527,7 @@ export class ReportsService {
       title: string;
       reviewerKind: string;
       departmentId: string | null;
+      subjectId: string;
     },
     user: AuthenticatedUser,
     resubmitted: boolean,
@@ -532,8 +553,31 @@ export class ReportsService {
     if (report.reviewerKind === "ceo") {
       await this.notifier.toCeo(event, `A report was ${verb}: ${report.title}`);
     } else {
-      await this.notifier.notify(await this.headIds(report.departmentId), event);
+      await this.notifier.notify(await this.reviewerIds(report), event);
     }
+  }
+
+  private async recordShare(
+    report: { id: string; title: string; subjectId: string },
+    user: AuthenticatedUser,
+    note?: string,
+  ) {
+    await this.prisma.reportMessage.create({
+      data: {
+        reportId: report.id,
+        authorId: user.id,
+        kind: "submitted",
+        body: note?.trim() || "Shared with the team.",
+      },
+    });
+    await this.notifier.notify(await this.access.projectTeamIds(report.subjectId), {
+      type: "report_submitted",
+      title: `New project report: ${report.title}`,
+      body: note?.trim(),
+      resourceType: "department_report",
+      resourceId: report.id,
+      actorId: user.id,
+    });
   }
 
   private assertPeriod(start: Date, end: Date) {
