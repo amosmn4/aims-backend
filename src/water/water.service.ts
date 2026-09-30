@@ -23,6 +23,17 @@ import {
 import type { CreateUsageUploadDto } from "./dto/create-usage-upload.dto";
 import { WATER_METER_TYPES, WATER_VENDING_SYSTEMS } from "./dto/create-meter.dto";
 import { endOfDay } from "../common/date-range";
+import {
+  HISTORY_DAYS,
+  assessGap,
+  estimateFromHistory,
+  gapNote,
+  riseNote,
+  wholeUnits,
+  type HouseholdSide,
+  type WaterVerdict,
+} from "./loss-assessment";
+import { dialFlow } from "./meter-flow";
 
 // undefined = leave unchanged; null or blank = clear; otherwise the trimmed value.
 function nullableText(value: string | null | undefined): string | null | undefined {
@@ -137,6 +148,28 @@ function groupBalanceReadings(
     map.set(r.meterId, list);
   }
   return map;
+}
+
+/** Meters in these zones. A null entry also takes meters that have no zone. */
+function inZones(zoneIds: (string | null)[]) {
+  const named = zoneIds.filter((id): id is string => id !== null);
+  return zoneIds.includes(null)
+    ? { OR: [{ zoneId: { in: named } }, { zoneId: null }] }
+    : { zoneId: { in: named } };
+}
+
+/** In use at some point in the period: installed before it ended, not retired before it began. */
+function meterActiveIn(
+  m: { isActive: boolean; installedAt: Date | null; deactivatedAt: Date | null },
+  start: Date,
+  end: Date,
+) {
+  if (m.installedAt && m.installedAt >= end) return false;
+  return m.isActive || (m.deactivatedAt !== null && m.deactivatedAt >= start);
+}
+
+function daysBetween(from: Date, to: Date): number {
+  return (to.getTime() - from.getTime()) / 86_400_000;
 }
 
 function monthKeyOf(d: Date): string {
@@ -1087,7 +1120,7 @@ export class WaterService {
     });
   }
 
-  listUsageRecords(
+  async listUsageRecords(
     filters: {
       meterId?: string;
       customerId?: string;
@@ -1097,13 +1130,15 @@ export class WaterService {
     },
     pagination: PaginationQueryDto = {},
   ) {
+    // The estate zone's own records include meters that have no zone.
+    const ownZones = filters.zoneId ? (await this.zoneTree()).ownIds(filters.zoneId) : undefined;
     return maybePaginate(
       this.prisma.waterUsageRecord,
       {
         where: {
           ...(filters.meterId && { meterId: filters.meterId }),
           ...(filters.customerId && { customerId: filters.customerId }),
-          ...(filters.zoneId && { meter: { zoneId: filters.zoneId } }),
+          ...(ownZones && { meter: inZones(ownZones) }),
           ...((filters.dateFrom || filters.dateTo) && {
             recordedAt: {
               ...(filters.dateFrom && { gte: new Date(filters.dateFrom) }),
@@ -1136,33 +1171,104 @@ export class WaterService {
     return [...result];
   }
 
+  /**
+   * The zone tree as sets. A single top-level zone is the whole estate: every
+   * meter is under it, and meters with no zone are on its main line.
+   */
+  private async zoneTree() {
+    const zones = await this.prisma.waterZone.findMany({
+      select: { id: true, name: true, parentZoneId: true },
+      orderBy: { name: "asc" },
+    });
+    const known = new Set(zones.map((z) => z.id));
+    const childrenOf = new Map<string, string[]>();
+    const roots: string[] = [];
+    for (const z of zones) {
+      if (z.parentZoneId && known.has(z.parentZoneId)) {
+        childrenOf.set(z.parentZoneId, [...(childrenOf.get(z.parentZoneId) ?? []), z.id]);
+      } else {
+        roots.push(z.id);
+      }
+    }
+    const estateId = roots.length === 1 ? roots[0] : null;
+    const children = (id: string) => childrenOf.get(id) ?? [];
+    const descendants = (id: string): string[] => [id, ...children(id).flatMap(descendants)];
+    /** The zone without the zones inside it. */
+    const ownIds = (id: string): (string | null)[] => (id === estateId ? [id, null] : [id]);
+    /** The zone together with every zone inside it. */
+    const wholeIds = (id: string): (string | null)[] =>
+      id === estateId ? [...descendants(id), null] : descendants(id);
+    return { zones, roots, estateId, children, ownIds, wholeIds };
+  }
+
   private async meterUsageInPeriod(meterId: string, start: Date, end: Date): Promise<number> {
     return (await this.meterUsageMeasured(meterId, start, end)) ?? 0;
   }
 
   /** How far the dial moved in the period, or null when two readings don't bound it. */
   private async meterUsageMeasured(meterId: string, start: Date, end: Date) {
-    const [baseline, latestInPeriod, earliestInPeriod] = await Promise.all([
+    return (await this.meterFlow(meterId, start, end))?.units ?? null;
+  }
+
+  /** Dial movement inside the period and the dates it covers, or null when not bounded. */
+  private async meterFlow(meterId: string, start: Date, end: Date) {
+    const select = { value: true, readingDate: true };
+    const inside = { meterId, readingDate: { gte: start, lt: end } };
+    const [before, first, last, after] = await Promise.all([
       this.prisma.waterMeterReading.findFirst({
         where: { meterId, readingDate: { lt: start } },
         orderBy: { readingDate: "desc" },
-        select: { value: true },
+        select,
       }),
       this.prisma.waterMeterReading.findFirst({
-        where: { meterId, readingDate: { gte: start, lt: end } },
-        orderBy: { readingDate: "desc" },
-        select: { id: true, value: true },
-      }),
-      this.prisma.waterMeterReading.findFirst({
-        where: { meterId, readingDate: { gte: start, lt: end } },
+        where: inside,
         orderBy: { readingDate: "asc" },
-        select: { id: true, value: true },
+        select,
+      }),
+      this.prisma.waterMeterReading.findFirst({
+        where: inside,
+        orderBy: { readingDate: "desc" },
+        select,
+      }),
+      this.prisma.waterMeterReading.findFirst({
+        where: { meterId, readingDate: { gte: end } },
+        orderBy: { readingDate: "asc" },
+        select,
       }),
     ]);
-    if (!latestInPeriod || !earliestInPeriod) return null;
-    const opening = baseline ?? earliestInPeriod;
-    if (!baseline && earliestInPeriod.id === latestInPeriod.id) return null;
-    return Math.max(0, Number(latestInPeriod.value) - Number(opening.value));
+    const dial = (r: { value: unknown; readingDate: Date } | null) =>
+      r && { at: r.readingDate, value: Number(r.value) };
+    return dialFlow(
+      { before: dial(before), first: dial(first), last: dial(last), after: dial(after) },
+      start,
+      end,
+    );
+  }
+
+  /** Bulk volume counted once: the outermost meters, not the inner zones again. */
+  private async outerBulkTotal(start: Date, end: Date, zoneId?: string) {
+    const ids = zoneId ? [zoneId] : (await this.zoneTree()).roots;
+    const flows = await Promise.all(ids.map((id) => this.zoneBulkFlow(id, start, end)));
+    return flows.reduce((sum, flow) => sum + flow.units, 0);
+  }
+
+  /** What a zone's bulk meters passed, and the reading dates that bound it. */
+  private async zoneBulkFlow(zoneId: string, start: Date, end: Date) {
+    const meters = await this.prisma.waterMeter.findMany({
+      where: { meterType: "bulk", zoneId },
+      select: { id: true },
+    });
+    const flows = (await Promise.all(meters.map((m) => this.meterFlow(m.id, start, end)))).filter(
+      (flow) => flow !== null,
+    );
+    const times = (pick: "from" | "to") => flows.map((flow) => flow[pick].getTime());
+    return {
+      hasMeter: meters.length > 0,
+      measured: flows.length > 0,
+      units: flows.reduce((sum, flow) => sum + flow.units, 0),
+      from: flows.length > 0 ? new Date(Math.min(...times("from"))) : null,
+      to: flows.length > 0 ? new Date(Math.max(...times("to"))) : null,
+    };
   }
 
   private async readingUsageForType(
@@ -1190,13 +1296,13 @@ export class WaterService {
   private async householdConsumption(
     start: Date,
     end: Date,
-    zoneIds?: string[],
+    zoneIds?: (string | null)[],
   ): Promise<{ units: number; basis: "readings" | "tokens"; metersRead: number }> {
     const lookback = addDays(start, -BALANCE_LOOKBACK_DAYS);
     const readings = await this.prisma.waterMeterReading.findMany({
       where: {
         readingDate: { gte: lookback, lt: end },
-        meter: { meterType: "household", ...(zoneIds && { zoneId: { in: zoneIds } }) },
+        meter: { meterType: "household", ...(zoneIds && inZones(zoneIds)) },
       },
       select: { id: true, meterId: true, readingDate: true, value: true },
     });
@@ -1328,11 +1434,11 @@ export class WaterService {
   }
 
   /** Water that left the network for a reason someone wrote down. */
-  private async adjustmentsInPeriod(start: Date, end: Date, zoneIds?: string[]) {
+  private async adjustmentsInPeriod(start: Date, end: Date, zoneIds?: (string | null)[]) {
     const rows = await this.prisma.waterNetworkAdjustment.findMany({
       where: {
         occurredAt: { gte: start, lt: end },
-        ...(zoneIds ? { zoneId: { in: zoneIds } } : {}),
+        ...(zoneIds ? inZones(zoneIds) : {}),
       },
       select: { units: true, kind: true },
     });
@@ -1386,8 +1492,8 @@ export class WaterService {
     return { id };
   }
 
-  private householdWhere(zoneIds?: string[]) {
-    return zoneIds ? { meter: { zoneId: { in: zoneIds } } } : {};
+  private householdWhere(zoneIds?: (string | null)[]) {
+    return zoneIds ? { meter: inZones(zoneIds) } : {};
   }
 
   private async mainMeterUsage(name: string, start: Date, end: Date): Promise<number> {
@@ -1402,10 +1508,116 @@ export class WaterService {
       where: { meterType: "main", OR: [{ mainStage: stage }, { mainStage: null, name }] },
       select: { id: true },
     });
-    const usages = await Promise.all(meters.map((m) => this.meterUsageMeasured(m.id, start, end)));
+    const flows = (await Promise.all(meters.map((m) => this.meterFlow(m.id, start, end)))).filter(
+      (flow) => flow !== null,
+    );
+    const times = (pick: "from" | "to") => flows.map((flow) => flow[pick].getTime());
     return {
-      units: usages.reduce<number>((sum, v) => sum + (v ?? 0), 0),
-      measured: usages.some((v) => v !== null),
+      units: flows.reduce((sum, flow) => sum + flow.units, 0),
+      measured: flows.length > 0,
+      from: flows.length > 0 ? new Date(Math.min(...times("from"))) : null,
+      to: flows.length > 0 ? new Date(Math.max(...times("to"))) : null,
+    };
+  }
+
+  /**
+   * What households took in a window, with typical use and carried credit from
+   * their earlier purchases, so a gap can be weighed before it is called a loss.
+   */
+  private async householdSide(
+    from: Date,
+    to: Date,
+    zoneIds?: (string | null)[],
+  ): Promise<HouseholdSide> {
+    const [consumption, history] = await Promise.all([
+      this.householdConsumption(from, to, zoneIds),
+      this.prisma.waterUsageRecord.findMany({
+        where: {
+          recordedAt: { gte: addDays(from, -HISTORY_DAYS), lt: from },
+          ...this.householdWhere(zoneIds),
+        },
+        select: { recordedAt: true, unitsSold: true },
+      }),
+    ]);
+    const purchases = history.map((p) => ({
+      recordedAt: p.recordedAt,
+      units: Number(p.unitsSold),
+    }));
+    return {
+      taken: consumption.units,
+      basis: consumption.basis,
+      ...estimateFromHistory(purchases, from, to),
+    };
+  }
+
+  /**
+   * Released water against what households took, over the dates the main meter
+   * was read. The tank outlet is the source once it is read; until then the borehole.
+   */
+  private async reconcile(
+    start: Date,
+    end: Date,
+    borehole: Awaited<ReturnType<WaterService["mainStageFlow"]>>,
+    tankOutlet: Awaited<ReturnType<WaterService["mainStageFlow"]>>,
+  ) {
+    const fromTank = tankOutlet.measured;
+    const source = fromTank ? tankOutlet : borehole;
+    const what = fromTank ? "the tank outlet meter" : "the main meter";
+    const from = source.from ?? start;
+    const to = source.to ? new Date(source.to.getTime() + 1) : end;
+    const prevStart = new Date(start.getTime() - (end.getTime() - start.getTime()));
+    const [household, adjustments, before] = await Promise.all([
+      this.householdSide(from, to),
+      this.adjustmentsInPeriod(from, to),
+      this.mainStageFlow(
+        fromTank ? MAIN_METER_TANK_TO_DISTRIBUTION : MAIN_METER_BOREHOLE_TO_TANK,
+        prevStart,
+        start,
+      ),
+    ]);
+    const assessment = assessGap({
+      measured: source.measured,
+      passed: source.units,
+      adjustments: adjustments.total,
+      household,
+    });
+    const takenBefore =
+      before.from && before.to
+        ? (await this.householdConsumption(before.from, new Date(before.to.getTime() + 1))).units
+        : 0;
+    return {
+      source: fromTank ? ("tank_outlet" as const) : ("borehole" as const),
+      measured: source.measured,
+      from: source.from,
+      to: source.to,
+      released: source.units,
+      householdUnits: household.taken,
+      basis: household.basis,
+      // What households typically use over these days, and credit bought earlier.
+      expectedUnits: household.expected,
+      carriedCredit: household.carried,
+      adjustments: adjustments.total,
+      ...assessment,
+      note: gapNote({
+        what,
+        from: source.from,
+        to: source.to,
+        passed: source.units,
+        household,
+        assessment,
+      }),
+      riseNote:
+        source.from && source.to && before.from && before.to
+          ? riseNote({
+              what,
+              now: { units: source.units, days: daysBetween(source.from, source.to) },
+              before: { units: before.units, days: daysBetween(before.from, before.to) },
+              taken: household.taken,
+              takenBefore,
+              basis: household.basis,
+              verdict: assessment.verdict,
+            })
+          : null,
     };
   }
 
@@ -1414,8 +1626,8 @@ export class WaterService {
    * spend, and the meters that bought the most.
    */
   private async householdUsageBreakdown(start: Date, end: Date) {
-    const [zones, meters, sales] = await Promise.all([
-      this.prisma.waterZone.findMany({ select: { id: true, name: true, parentZoneId: true } }),
+    const [{ zones, estateId }, allMeters, sales] = await Promise.all([
+      this.zoneTree(),
       this.prisma.waterMeter.findMany({
         where: { meterType: "household" },
         select: {
@@ -1424,6 +1636,8 @@ export class WaterService {
           plotNo: true,
           zoneId: true,
           isActive: true,
+          installedAt: true,
+          deactivatedAt: true,
           customer: { select: { id: true, name: true } },
         },
       }),
@@ -1434,6 +1648,8 @@ export class WaterService {
         _count: { _all: true },
       }),
     ]);
+    // A meter counts for the period it was in use, whatever its status today.
+    const meters = allMeters.map((m) => ({ ...m, isActive: meterActiveIn(m, start, end) }));
     const zoneById = new Map(zones.map((z) => [z.id, z]));
     const meterById = new Map(meters.map((m) => [m.id, m]));
     const bought = sales.flatMap((r) => {
@@ -1456,11 +1672,11 @@ export class WaterService {
       units: 0,
       revenue: 0,
     });
-    // A retired meter with no zone is not on the main line; it sits in its own row.
+    // With an estate zone, meters with no zone are on its main line.
     const MAIN_LINE = "main-line";
     const OUT_OF_USE = "out-of-use";
     const placeOf = (m: { zoneId: string | null; isActive: boolean }) =>
-      m.zoneId ?? (m.isActive ? MAIN_LINE : OUT_OF_USE);
+      m.zoneId ?? estateId ?? (m.isActive ? MAIN_LINE : OUT_OF_USE);
     const placeName = (place: string) =>
       place === MAIN_LINE
         ? "On the main line"
@@ -1570,7 +1786,14 @@ export class WaterService {
         timesTypical: typicalUnits && typicalUnits > 0 ? r.units / typicalUnits : null,
       }));
 
-    return { zoneUsage, highUsage, typicalUnits };
+    const byMeter = bought.map((r) => ({
+      meterId: r.meter.id,
+      meterNumber: r.meter.meterNumber,
+      customerName: r.meter.customer?.name ?? null,
+      plotNo: r.meter.plotNo,
+      units: r.units,
+    }));
+    return { zoneUsage, highUsage, typicalUnits, byMeter, totalUnits };
   }
 
   /* ---------------- One zone, opened ---------------- */
@@ -1582,47 +1805,28 @@ export class WaterService {
       include: { parent: { select: { id: true, name: true } } },
     });
     const { start, end } = monthRange(month);
-    const descendants = await this.zoneAndDescendantIds(zoneId);
-    const childIds = descendants.filter((id) => id !== zoneId);
+    const { ownIds } = await this.zoneTree();
+    const own = inZones(ownIds(zoneId));
 
-    const [
-      children,
-      meters,
-      customers,
-      bulkTotal,
-      childBulkTotal,
-      households,
-      revenue,
-      adjustments,
-    ] = await Promise.all([
+    const [children, meters, customers, breakdown, revenue] = await Promise.all([
       this.prisma.waterZone.findMany({
         where: { parentZoneId: zoneId },
         select: { id: true, name: true },
         orderBy: { name: "asc" },
       }),
       this.prisma.waterMeter.findMany({
-        where: { zoneId },
+        where: { OR: [{ zoneId }, { meterType: "household", ...own }] },
         include: { customer: { select: { id: true, name: true } } },
         orderBy: [{ meterType: "asc" }, { meterNumber: "asc" }],
       }),
-      this.prisma.waterCustomer.count({ where: { zoneId } }),
-      this.readingUsageForType("bulk", start, end, [zoneId]),
-      childIds.length ? this.readingUsageForType("bulk", start, end, childIds) : Promise.resolve(0),
-      this.householdConsumption(start, end, [zoneId]),
+      this.prisma.waterCustomer.count({ where: { meters: { some: own } } }),
+      this.zoneLossBreakdown(start, end),
       this.prisma.waterUsageRecord.aggregate({
-        where: { recordedAt: { gte: start, lt: end }, meter: { zoneId } },
+        where: { recordedAt: { gte: start, lt: end }, meter: own },
         _sum: { amountPaid: true },
       }),
-      this.adjustmentsInPeriod(start, end, [zoneId]),
     ]);
-
-    // A zone's own loss: its bulk meter, less the zones beneath it, its own plots and known losses.
-    const directHouseholdTotal = households.units;
-    const adjustmentTotal = adjustments.total;
-    const accounted = directHouseholdTotal + childBulkTotal + adjustmentTotal;
-    const lossUnits = bulkTotal > 0 ? bulkTotal - accounted : 0;
-    const lossPct = bulkTotal > 0 ? (lossUnits / bulkTotal) * 100 : null;
-
+    const row = breakdown.rows.find((r) => r.zoneId === zoneId)!;
     const bulkMeters = meters.filter((m) => m.meterType === "bulk");
     const householdMeters = meters.filter((m) => m.meterType === "household");
 
@@ -1634,16 +1838,8 @@ export class WaterService {
       householdMeters,
       customerCount: customers,
       activeHouseholdMeters: householdMeters.filter((m) => m.isActive).length,
-      hasBulkMeter: bulkMeters.length > 0,
-      bulkTotal,
-      childBulkTotal,
-      directHouseholdTotal,
-      adjustmentTotal,
-      consumptionBasis: households.basis,
-      provisional: households.basis === "tokens",
-      accountedTotal: accounted,
-      lossUnits,
-      lossPct,
+      ...row,
+      childBulkTotal: row.childZonesBulkTotal,
       revenue: Number(revenue._sum.amountPaid ?? 0),
     };
   }
@@ -1806,92 +2002,185 @@ export class WaterService {
     return counts;
   }
 
+  /**
+   * Each zone as two sets: the whole zone (with the zones inside it) and the zone
+   * only (whole minus the inner zones). Households are counted over the same
+   * dates the bulk meter was read, so both sides cover the same days.
+   */
   private async zoneLossBreakdown(start: Date, end: Date) {
-    const zones = await this.prisma.waterZone.findMany({
-      select: { id: true, name: true, parentZoneId: true },
-      orderBy: { name: "asc" },
-    });
-
-    const [bulkByZone, consumptionByZone, boughtByZone, adjustmentByZone] = await Promise.all([
-      Promise.all(zones.map((z) => this.readingUsageForType("bulk", start, end, [z.id]))),
-      Promise.all(zones.map((z) => this.householdConsumption(start, end, [z.id]))),
-      Promise.all(
-        zones.map(async (z) => {
-          const agg = await this.prisma.waterUsageRecord.aggregate({
-            where: { recordedAt: { gte: start, lt: end }, meter: { zoneId: z.id } },
-            _sum: { unitsSold: true },
-          });
-          return Number(agg._sum.unitsSold ?? 0);
-        }),
-      ),
-      Promise.all(zones.map((z) => this.adjustmentsInPeriod(start, end, [z.id]))),
+    const tree = await this.zoneTree();
+    const { zones, roots, estateId, children, ownIds, wholeIds } = tree;
+    const prevStart = new Date(start.getTime() - (end.getTime() - start.getTime()));
+    const [flows, prevFlows, meters] = await Promise.all([
+      Promise.all(zones.map((z) => this.zoneBulkFlow(z.id, start, end))),
+      Promise.all(zones.map((z) => this.zoneBulkFlow(z.id, prevStart, start))),
+      this.prisma.waterMeter.findMany({
+        where: { meterType: "household" },
+        select: { zoneId: true, isActive: true, installedAt: true, deactivatedAt: true },
+      }),
     ]);
-    const directHouseholdByZone = consumptionByZone.map((c) => c.units);
-    const bulkById = new Map(zones.map((z, i) => [z.id, bulkByZone[i]]));
-    const directHouseholdById = new Map(zones.map((z, i) => [z.id, directHouseholdByZone[i]]));
-    const basisById = new Map(zones.map((z, i) => [z.id, consumptionByZone[i].basis]));
-    const boughtById = new Map(zones.map((z, i) => [z.id, boughtByZone[i]]));
-    const adjustmentById = new Map(zones.map((z, i) => [z.id, adjustmentByZone[i].total]));
-    const childrenOf = new Map<string, string[]>();
-    for (const z of zones) {
-      if (z.parentZoneId) {
-        childrenOf.set(z.parentZoneId, [...(childrenOf.get(z.parentZoneId) ?? []), z.id]);
-      }
-    }
+    const flowById = new Map(zones.map((z, i) => [z.id, flows[i]]));
+    const prevFlowById = new Map(zones.map((z, i) => [z.id, prevFlows[i]]));
+    const metersIn = (ids: (string | null)[]) =>
+      meters.filter((m) => ids.includes(m.zoneId) && meterActiveIn(m, start, end)).length;
 
-    const rows = zones.map((zone) => {
-      const bulkTotal = bulkById.get(zone.id) ?? 0;
-      const directHouseholdTotal = directHouseholdById.get(zone.id) ?? 0;
-      const childZonesBulkTotal = (childrenOf.get(zone.id) ?? []).reduce(
-        (sum, childId) => sum + (bulkById.get(childId) ?? 0),
-        0,
-      );
-      const adjustmentTotal = adjustmentById.get(zone.id) ?? 0;
-      const boughtTotal = boughtById.get(zone.id) ?? 0;
-      const basis = basisById.get(zone.id) ?? "tokens";
-      // Known volumes are accounted for, so they never show up as unexplained.
-      const accountedTotal = directHouseholdTotal + childZonesBulkTotal + adjustmentTotal;
-      const lossUnits = bulkTotal - accountedTotal;
-      const lossPct = bulkTotal > 0 ? (lossUnits / bulkTotal) * 100 : null;
-      return {
-        zoneId: zone.id,
-        zoneName: zone.name,
-        parentZoneId: zone.parentZoneId,
-        bulkTotal,
-        directHouseholdTotal,
-        childZonesBulkTotal,
-        adjustmentTotal,
-        boughtTotal,
-        // "readings" is what was drawn; "tokens" is what was paid for, which may be
-        // used later — so a single period on tokens is provisional.
-        consumptionBasis: basis,
-        provisional: basis === "tokens",
-        accountedTotal,
-        lossUnits,
-        lossPct,
-      };
-    });
+    const rows = await Promise.all(
+      zones.map(async (zone) => {
+        const bulk = flowById.get(zone.id)!;
+        // Without two readings there is no window, so the whole period stands in.
+        const from = bulk.from ?? start;
+        const to = bulk.to ? new Date(bulk.to.getTime() + 1) : end;
+        const inner = children(zone.id);
+        const metered = inner.filter((id) => flowById.get(id)!.measured);
+        const unmetered = inner.filter((id) => !flowById.get(id)!.measured);
+        const hasInner = inner.length > 0 || zone.id === estateId;
 
-    const topLevelBulkTotal = rows
-      .filter((r) => !r.parentZoneId)
-      .reduce((sum, r) => sum + r.bulkTotal, 0);
-    const zoneLessHouseholdAgg = await this.prisma.waterUsageRecord.aggregate({
-      where: {
-        recordedAt: { gte: start, lt: end },
-        meter: { zoneId: null, meterType: "household" },
-      },
-      _sum: { unitsSold: true },
-    });
-    const zoneLessHouseholdTotal = Number(zoneLessHouseholdAgg._sum.unitsSold ?? 0);
+        const before = prevFlowById.get(zone.id)!;
+        const [own, whole, ownAdjust, wholeAdjust, boughtAgg, unmeteredUse, takenBefore] =
+          await Promise.all([
+            this.householdSide(from, to, ownIds(zone.id)),
+            hasInner ? this.householdSide(from, to, wholeIds(zone.id)) : null,
+            this.adjustmentsInPeriod(from, to, ownIds(zone.id)),
+            hasInner ? this.adjustmentsInPeriod(from, to, wholeIds(zone.id)) : null,
+            this.prisma.waterUsageRecord.aggregate({
+              where: { recordedAt: { gte: from, lt: to }, meter: inZones(ownIds(zone.id)) },
+              _sum: { unitsSold: true },
+            }),
+            // An inner zone with no bulk reading draws straight from this zone's pipes.
+            Promise.all(unmetered.map((id) => this.householdConsumption(from, to, wholeIds(id)))),
+            before.from && before.to
+              ? this.householdConsumption(
+                  before.from,
+                  new Date(before.to.getTime() + 1),
+                  ownIds(zone.id),
+                )
+              : null,
+          ]);
 
-    return { rows, topLevelBulkTotal, zoneLessHouseholdTotal };
+        const bulkTotal = bulk.units;
+        const childZonesBulkTotal = metered.reduce((sum, id) => sum + flowById.get(id)!.units, 0);
+        const ownPassed = bulkTotal - childZonesBulkTotal;
+        const directHouseholdTotal = own.taken;
+        const wholeHouseholdTotal = (whole ?? own).taken;
+        const adjustmentTotal = ownAdjust.total;
+        const unmeteredTotal = unmeteredUse.reduce((sum, u) => sum + u.units, 0);
+        // Known volumes are accounted for, so they never show up as unexplained.
+        const ownAccounted = directHouseholdTotal + unmeteredTotal + adjustmentTotal;
+        const ownAssessment = assessGap({
+          measured: bulk.measured,
+          passed: ownPassed,
+          adjustments: adjustmentTotal + unmeteredTotal,
+          household: own,
+        });
+        const wholeAssessment = assessGap({
+          measured: bulk.measured,
+          passed: bulkTotal,
+          adjustments: (wholeAdjust ?? ownAdjust).total,
+          household: whole ?? own,
+        });
+        const lossUnits = bulk.measured ? ownAssessment.gap : 0;
+        const wholeLossUnits = bulk.measured ? wholeAssessment.gap : 0;
+
+        const ownName = hasInner ? `${zone.name} only` : zone.name;
+        const what =
+          bulk.measured && childZonesBulkTotal > 0
+            ? `${ownName} (its bulk meter less the zones inside it)`
+            : `${bulk.measured ? ownName : zone.name}'s bulk meter`;
+        // The same meters less the same inner zones, one period back.
+        const prevOwnPassed =
+          before.units - metered.reduce((sum, id) => sum + prevFlowById.get(id)!.units, 0);
+        return {
+          zoneId: zone.id,
+          zoneName: zone.name,
+          parentZoneId: zone.parentZoneId,
+          isEstate: zone.id === estateId,
+          hasSubZones: inner.length > 0,
+          hasBulkMeter: bulk.hasMeter,
+          // False when the dial was not read twice: there is no figure, not a zero.
+          bulkMeasured: bulk.measured,
+          bulkFrom: bulk.from,
+          bulkTo: bulk.to,
+          ownMeters: metersIn(ownIds(zone.id)),
+          wholeMeters: metersIn(wholeIds(zone.id)),
+          bulkTotal,
+          childZonesBulkTotal,
+          ownPassed,
+          directHouseholdTotal,
+          wholeHouseholdTotal,
+          adjustmentTotal,
+          boughtTotal: Number(boughtAgg._sum.unitsSold ?? 0),
+          // "readings" is what was drawn; "tokens" is what was paid for, which may be
+          // used later — so a single period on tokens is provisional.
+          consumptionBasis: own.basis,
+          provisional: own.basis === "tokens",
+          accountedTotal: ownAccounted + childZonesBulkTotal,
+          lossUnits,
+          lossPct: ownAssessment.gapPct,
+          wholeLossUnits,
+          wholeLossPct: wholeAssessment.gapPct,
+          // Whether the gap is a loss, once typical use and carried credit are allowed for.
+          verdict: bulk.hasMeter ? ownAssessment.verdict : ("not_measured" as WaterVerdict),
+          wholeVerdict: bulk.hasMeter ? wholeAssessment.verdict : ("not_measured" as WaterVerdict),
+          expectedHouseholdTotal: own.expected,
+          carriedCredit: own.carried,
+          unexplainedUnits: bulk.measured ? ownAssessment.unexplained : 0,
+          note: gapNote({
+            brief: true,
+            what,
+            from: bulk.from,
+            to: bulk.to,
+            passed: ownPassed,
+            household: own,
+            assessment: ownAssessment,
+          }),
+          riseNote:
+            bulk.from && bulk.to && before.from && before.to
+              ? riseNote({
+                  what: ownName,
+                  now: { units: ownPassed, days: daysBetween(bulk.from, bulk.to) },
+                  before: { units: prevOwnPassed, days: daysBetween(before.from, before.to) },
+                  taken: own.taken,
+                  takenBefore: takenBefore?.units ?? 0,
+                  basis: own.basis,
+                  verdict: ownAssessment.verdict,
+                })
+              : null,
+        };
+      }),
+    );
+
+    const top = rows.filter((r) => roots.includes(r.zoneId));
+    // With an estate zone, meters with no zone already sit inside its figures.
+    const zoneLessHouseholdAgg = estateId
+      ? null
+      : await this.prisma.waterUsageRecord.aggregate({
+          where: {
+            recordedAt: { gte: start, lt: end },
+            meter: { zoneId: null, meterType: "household" },
+          },
+          _sum: { unitsSold: true },
+        });
+
+    return {
+      rows,
+      estateId,
+      topLevelBulkTotal: top.reduce((sum, r) => sum + r.bulkTotal, 0),
+      topLevelMeasured: top.some((r) => r.bulkMeasured),
+      zoneLessHouseholdTotal: Number(zoneLessHouseholdAgg?._sum.unitsSold ?? 0),
+      zoneLessMeters: estateId ? 0 : metersIn([null]),
+    };
   }
 
   async dashboard(filters: { zoneId?: string; month?: string }) {
     const { start, end } = monthRange(filters.month);
     const prevMonth = shiftMonth(filters.month, -1);
     const prevRange = monthRange(prevMonth);
-    const zoneIds = filters.zoneId ? await this.zoneAndDescendantIds(filters.zoneId) : undefined;
+    // The estate zone is everything, including meters with no zone.
+    const { estateId } = await this.zoneTree();
+    const zoneIds =
+      filters.zoneId && filters.zoneId !== estateId
+        ? await this.zoneAndDescendantIds(filters.zoneId)
+        : undefined;
     const hhWhere = this.householdWhere(zoneIds);
 
     const [
@@ -1918,7 +2207,7 @@ export class WaterService {
       }),
       this.mainStageFlow(MAIN_METER_BOREHOLE_TO_TANK, start, end),
       this.mainStageFlow(MAIN_METER_TANK_TO_DISTRIBUTION, start, end),
-      this.readingUsageForType("bulk", start, end, zoneIds),
+      this.outerBulkTotal(start, end, filters.zoneId),
       this.zoneLossBreakdown(start, end),
     ]);
     const boreholeToTankTotal = borehole.units;
@@ -1933,11 +2222,6 @@ export class WaterService {
     const unitsChangePct =
       unitsSoldPrev > 0 ? ((unitsSold - unitsSoldPrev) / unitsSoldPrev) * 100 : null;
 
-    const networkAccountedTotal = zoneLoss.topLevelBulkTotal + zoneLoss.zoneLessHouseholdTotal;
-    const nrwTankToNetwork =
-      tankToDistributionTotal > 0
-        ? ((tankToDistributionTotal - networkAccountedTotal) / tankToDistributionTotal) * 100
-        : null;
     const [consumption, adjustments, allBoughtAgg] = await Promise.all([
       this.householdConsumption(start, end),
       this.adjustmentsInPeriod(start, end),
@@ -1946,11 +2230,20 @@ export class WaterService {
         _sum: { unitsSold: true },
       }),
     ]);
-    const allHouseholdTotal = consumption.units + adjustments.total;
+    const networkAccountedTotal = zoneLoss.topLevelBulkTotal + zoneLoss.zoneLessHouseholdTotal;
+    // Only a figure when both the tank outlet and a top-level bulk meter were read.
+    const nrwTankToNetwork =
+      tankOutlet.measured && zoneLoss.topLevelMeasured && tankToDistributionTotal > 0
+        ? ((tankToDistributionTotal - networkAccountedTotal) / tankToDistributionTotal) * 100
+        : null;
     const allBoughtTotal = Number(allBoughtAgg._sum.unitsSold ?? 0);
+    const reconciliation = await this.reconcile(start, end, borehole, tankOutlet);
+    // A loss only when water is missing. Credit bought ahead is reported by the verdict.
     const nrwOverall =
-      boreholeToTankTotal > 0
-        ? ((boreholeToTankTotal - allHouseholdTotal) / boreholeToTankTotal) * 100
+      reconciliation.verdict === "within_limit" ||
+      reconciliation.verdict === "possible_loss" ||
+      reconciliation.verdict === "likely_loss"
+        ? reconciliation.gapPct
         : null;
 
     return {
@@ -1985,6 +2278,7 @@ export class WaterService {
       },
       nrwTankToNetworkPct: nrwTankToNetwork,
       nrwOverallPct: nrwOverall,
+      reconciliation,
       // Three different things, never added together:
       //   released — what the meters passed; bought — credit paid for;
       //   used — what households actually drew, when their dials have been read.
@@ -2000,6 +2294,7 @@ export class WaterService {
         // Tokens are bought before they are used, so one period never settles.
         provisional: consumption.basis === "tokens",
         unusedCredit: consumption.basis === "readings" ? allBoughtTotal - consumption.units : null,
+        reconciliation,
       },
     };
   }
@@ -2013,9 +2308,9 @@ export class WaterService {
     const from = monthRange(shiftMonth(undefined, -(months - 1))).start;
     const to = monthRange(shiftMonth(undefined, 0)).end;
 
-    const [released, intoNetwork, consumption, adjustments, boughtAgg] = await Promise.all([
-      this.mainMeterUsage(MAIN_METER_BOREHOLE_TO_TANK, from, to),
-      this.mainMeterUsage(MAIN_METER_TANK_TO_DISTRIBUTION, from, to),
+    const [borehole, tankOutlet, consumption, adjustments, boughtAgg] = await Promise.all([
+      this.mainStageFlow(MAIN_METER_BOREHOLE_TO_TANK, from, to),
+      this.mainStageFlow(MAIN_METER_TANK_TO_DISTRIBUTION, from, to),
       this.householdConsumption(from, to),
       this.adjustmentsInPeriod(from, to),
       this.prisma.waterUsageRecord.aggregate({
@@ -2024,22 +2319,23 @@ export class WaterService {
       }),
     ]);
     const bought = Number(boughtAgg._sum.unitsSold ?? 0);
-    const accounted = consumption.units + adjustments.total;
-    const unaccounted = released - accounted;
+    // Compared over the dates the main meter was read, not the whole window.
+    const reconciliation = await this.reconcile(from, to, borehole, tankOutlet);
 
     return {
       months,
       from,
       to,
-      released,
-      intoNetwork,
+      released: borehole.units,
+      intoNetwork: tankOutlet.units,
       used: consumption.units,
       bought,
       accountedAdjustments: adjustments.total,
       adjustmentsByKind: adjustments.byKind,
       consumptionBasis: consumption.basis,
-      unaccounted,
-      unaccountedPct: released > 0 ? (unaccounted / released) * 100 : null,
+      unaccounted: reconciliation.gap,
+      unaccountedPct: reconciliation.gapPct,
+      reconciliation,
       // Over a long window the two should converge; a wide gap means credit is
       // being banked, not that water went missing.
       boughtLessUsed: bought - consumption.units,
@@ -2082,7 +2378,7 @@ export class WaterService {
             _sum: { unitsSold: true },
           }),
           this.mainMeterUsage(MAIN_METER_BOREHOLE_TO_TANK, w.start, w.end),
-          this.readingUsageForType("bulk", w.start, w.end, zoneIds),
+          this.outerBulkTotal(w.start, w.end, filters.zoneId),
         ]);
         return {
           period: w.period,
@@ -2103,33 +2399,36 @@ export class WaterService {
       filters.dateFrom && filters.dateTo
         ? { start: filters.dateFrom, end: endOfDay(filters.dateTo) }
         : monthRange(filters.month);
-    const { rows, zoneLessHouseholdTotal } = await this.zoneLossBreakdown(start, end);
+    const { rows, zoneLessHouseholdTotal, zoneLessMeters } = await this.zoneLossBreakdown(
+      start,
+      end,
+    );
 
     const mapped = rows.map((r) => ({
+      ...r,
       zoneId: r.zoneId as string | null,
-      zoneName: r.zoneName,
-      parentZoneId: r.parentZoneId,
-      bulkTotal: r.bulkTotal,
       householdTotal: r.directHouseholdTotal,
-      directHouseholdTotal: r.directHouseholdTotal,
-      childZonesBulkTotal: r.childZonesBulkTotal,
-      accountedTotal: r.accountedTotal,
-      adjustmentTotal: r.adjustmentTotal,
-      boughtTotal: r.boughtTotal,
-      consumptionBasis: r.consumptionBasis,
-      provisional: r.provisional,
-      lossUnits: r.lossUnits,
-      lossPct: r.lossPct,
     }));
-    if (zoneLessHouseholdTotal > 0) {
+    // Only without an estate zone: nothing is above these meters to hold them.
+    if (zoneLessHouseholdTotal > 0 || zoneLessMeters > 0) {
       mapped.push({
         zoneId: null,
         zoneName: "On the main line",
         parentZoneId: null,
+        isEstate: false,
+        hasSubZones: false,
+        hasBulkMeter: false,
+        bulkMeasured: false,
+        bulkFrom: null,
+        bulkTo: null,
+        ownMeters: zoneLessMeters,
+        wholeMeters: zoneLessMeters,
         bulkTotal: 0,
+        childZonesBulkTotal: 0,
+        ownPassed: 0,
         householdTotal: zoneLessHouseholdTotal,
         directHouseholdTotal: zoneLessHouseholdTotal,
-        childZonesBulkTotal: 0,
+        wholeHouseholdTotal: zoneLessHouseholdTotal,
         accountedTotal: zoneLessHouseholdTotal,
         adjustmentTotal: 0,
         boughtTotal: zoneLessHouseholdTotal,
@@ -2137,6 +2436,15 @@ export class WaterService {
         provisional: true,
         lossUnits: 0,
         lossPct: null,
+        wholeLossUnits: 0,
+        wholeLossPct: null,
+        verdict: "not_measured",
+        wholeVerdict: "not_measured",
+        expectedHouseholdTotal: null,
+        carriedCredit: 0,
+        unexplainedUnits: 0,
+        note: "",
+        riseNote: null,
       });
     }
     return mapped;
@@ -2146,57 +2454,110 @@ export class WaterService {
     const month = filters.month ?? shiftMonth(undefined, 0);
     const prevMonth = shiftMonth(month, -1);
     const { start, end } = monthRange(month);
-    const [dashboard, prevDashboard, zoneStats, usage] = await Promise.all([
+    const prevRange = monthRange(prevMonth);
+    const [dashboard, prevDashboard, zoneStats, usage, prevUsage] = await Promise.all([
       this.dashboard({ month }),
       this.dashboard({ month: prevMonth }),
       this.zoneComparison({ month }),
       this.householdUsageBreakdown(start, end),
+      this.householdUsageBreakdown(prevRange.start, prevRange.end),
     ]);
-    const units = (n: number) => Math.round(n).toLocaleString("en-US");
-
+    const units = wholeUnits;
     const zoneLoss = [...zoneStats].sort(
       (a, b) => (b.lossPct ?? -Infinity) - (a.lossPct ?? -Infinity),
     );
-    const worstZone = zoneLoss.find((z) => z.lossPct !== null);
-    const bestZone = [...zoneLoss].reverse().find((z) => z.lossPct !== null);
-
     const insights: string[] = [];
-    if (worstZone) {
+
+    // 1. The network as a whole: released against what households took, same dates.
+    const { reconciliation, tank } = dashboard;
+    if (reconciliation.released > 0 || reconciliation.householdUnits > 0) {
+      insights.push(reconciliation.note);
+    }
+    if (reconciliation.riseNote) insights.push(reconciliation.riseNote);
+    if (reconciliation.basis === "tokens" && reconciliation.measured) {
       insights.push(
-        `${worstZone.zoneName} recorded the highest bulk-to-household loss this period at ${worstZone.lossPct!.toFixed(1)}% — the biggest gap between what its own bulk meter measured and what was actually accounted for (its households plus any of its own sub-zones).`,
+        "Household figures are water paid for, because household meter balances were not read. A gap is only called a likely loss when typical use and credit left from earlier purchases cannot explain it; until balances are read, one month's figures are provisional.",
       );
     }
-    if (bestZone && bestZone.zoneId !== worstZone?.zoneId) {
-      insights.push(
-        `${bestZone.zoneName} is the tightest-reconciled zone at ${bestZone.lossPct!.toFixed(1)}% loss.`,
-      );
-    }
-    if (dashboard.nrwOverallPct !== null) {
-      insights.push(
-        `Non-revenue water between the borehole and billed household consumption, network-wide, sits at ${dashboard.nrwOverallPct.toFixed(1)}% — the combined effect of network loss, unbilled use and metering gaps across the whole chain.`,
-      );
-    }
-    const { tank } = dashboard;
     if (tank.held !== null) {
       const stock =
         tank.held >= 0
           ? `${units(tank.held)} m³ is still in the tank`
           : `${units(-tank.held)} m³ came from water already stored in the tank`;
       insights.push(
-        `${units(tank.pumped)} m³ was pumped into the tank and ${units(tank.sentOut)} m³ left it, so ${stock}.`,
+        `${units(tank.pumped)} m³ was pumped into the tank and ${units(tank.sentOut)} m³ left it, so ${stock}. Water in the tank is stock, not loss.`,
       );
     } else if (tank.pumped > 0 && !tank.outletMeasured) {
       insights.push(
-        `${units(tank.pumped)} m³ was pumped into the tank. The tank outlet meter was not read this month, so what left the tank is not known yet.`,
+        `${units(tank.pumped)} m³ was pumped into the tank. The tank outlet meter was not read twice this month, so what left the tank is not known yet.`,
       );
     }
-    const busiestZone = usage.zoneUsage
-      .filter((z) => !z.includesSubZones && z.unitsPerMeter !== null && z.units > 0)
+
+    // 2. Each zone on its own: the zone only, without the zones inside it.
+    const zoneNotes = zoneStats.filter((z) => z.zoneId !== null && z.hasBulkMeter);
+    const byVerdict = (v: WaterVerdict) => zoneNotes.filter((z) => z.verdict === v);
+    const worstFirst = (a: { unexplainedUnits: number }, b: typeof a) =>
+      b.unexplainedUnits - a.unexplainedUnits;
+    for (const z of byVerdict("likely_loss").sort(worstFirst)) {
+      insights.push(z.note);
+      if (z.riseNote) insights.push(z.riseNote);
+    }
+    for (const z of byVerdict("over_read")) insights.push(z.note);
+    for (const z of byVerdict("possible_loss")) {
+      insights.push(z.note);
+      if (z.riseNote) insights.push(z.riseNote);
+    }
+    for (const z of byVerdict("bought_ahead")) insights.push(z.note);
+    for (const z of byVerdict("not_measured")) insights.push(z.note);
+
+    // 3. Why household water went up or down against the month before.
+    if (prevUsage.totalUnits > 0 && usage.totalUnits > 0) {
+      const changePct = ((usage.totalUnits - prevUsage.totalUnits) / prevUsage.totalUnits) * 100;
+      const reasons: string[] = [];
+      if (usage.byMeter.length !== prevUsage.byMeter.length) {
+        reasons.push(
+          `${plural(usage.byMeter.length, "meter")} bought water against ${prevUsage.byMeter.length} the month before`,
+        );
+      }
+      const prevByZone = new Map(prevUsage.zoneUsage.map((z) => [z.key, z.units]));
+      const zoneMove = usage.zoneUsage
+        .filter((z) => !z.includesSubZones)
+        .map((z) => ({ name: z.zoneName, change: z.units - (prevByZone.get(z.key) ?? 0) }))
+        .sort((a, b) => Math.abs(b.change) - Math.abs(a.change))[0];
+      if (zoneMove && Math.abs(zoneMove.change) >= 1) {
+        reasons.push(
+          `the biggest change was ${zoneMove.name}, ${zoneMove.change > 0 ? "up" : "down"} ${units(Math.abs(zoneMove.change))} m³`,
+        );
+      }
+      const because = reasons.length > 0 ? `: ${reasons.join("; ")}` : "";
+      insights.push(
+        Math.abs(changePct) < 0.5
+          ? `Households paid for ${units(usage.totalUnits)} m³, about the same as the month before.`
+          : `Households paid for ${units(usage.totalUnits)} m³, ${Math.abs(changePct).toFixed(1)}% ${changePct > 0 ? "more" : "less"} than the month before (${units(prevUsage.totalUnits)} m³)${because}.`,
+      );
+
+      // A meter that at least doubled, by a volume worth a visit.
+      const prevByMeter = new Map(prevUsage.byMeter.map((m) => [m.meterId, m.units]));
+      const jump = usage.byMeter
+        .map((m) => ({ ...m, before: prevByMeter.get(m.meterId) ?? 0 }))
+        .filter((m) => m.units >= 2 * m.before && m.units - m.before >= 10)
+        .sort((a, b) => b.units - b.before - (a.units - a.before))[0];
+      if (jump) {
+        const who = [jump.customerName, jump.plotNo && `plot ${jump.plotNo}`]
+          .filter(Boolean)
+          .join(", ");
+        insights.push(
+          `Meter ${jump.meterNumber}${who ? ` (${who})` : ""} rose the most: ${units(jump.units)} m³ against ${jump.before > 0 ? `${units(jump.before)} m³` : "nothing"} the month before. A sudden rise can be a leak after the meter, a shared connection or stocking up.`,
+        );
+      }
+    }
+
+    // 4. Who uses the most.
+    const zonesWithUse = usage.zoneUsage.filter((z) => !z.includesSubZones && z.units > 0);
+    const busiestZone = zonesWithUse
+      .filter((z) => z.unitsPerMeter !== null)
       .sort((a, b) => b.unitsPerMeter! - a.unitsPerMeter!)[0];
-    if (
-      busiestZone &&
-      usage.zoneUsage.filter((z) => !z.includesSubZones && z.units > 0).length > 1
-    ) {
+    if (busiestZone && zonesWithUse.length > 1) {
       insights.push(
         `${busiestZone.zoneName} used the most water per meter: ${busiestZone.unitsPerMeter!.toFixed(1)} m³ and KES ${units(busiestZone.revenuePerMeter!)} per meter across ${plural(busiestZone.activeMeters, "meter")} in use.`,
       );
@@ -2213,27 +2574,17 @@ export class WaterService {
       );
     }
     if (dashboard.nrwTankToNetworkPct !== null) {
+      const p = dashboard.nrwTankToNetworkPct;
       insights.push(
-        `${dashboard.nrwTankToNetworkPct >= 0 ? "Losses" : "A discrepancy"} between the tank and the distribution network ${dashboard.nrwTankToNetworkPct >= 0 ? "stand at" : "of"} ${Math.abs(dashboard.nrwTankToNetworkPct).toFixed(1)}% — before water even reaches a zone bulk meter or an unzoned household.`,
-      );
-    }
-    if (dashboard.unitsSoldChangePct !== null) {
-      insights.push(
-        `Metered household consumption ${dashboard.unitsSoldChangePct >= 0 ? "grew" : "fell"} ${Math.abs(dashboard.unitsSoldChangePct).toFixed(1)}% month-on-month.`,
+        p >= 0
+          ? `${p.toFixed(1)}% of the water leaving the tank did not reach the first bulk meter.`
+          : `The first bulk meter passed ${Math.abs(p).toFixed(1)}% more than the tank outlet meter. They sit on the same pipe, so one of them is misreading or was read on different days.`,
       );
     }
     if (dashboard.inactiveMeters > 0) {
       insights.push(
-        `${dashboard.inactiveMeters} meter${dashboard.inactiveMeters === 1 ? " is" : "s are"} inactive (not in use) and ${dashboard.activeMeters} active. Inactive meters are left out of active counts; their past readings and sales still count in the months they happened.`,
+        `${dashboard.activeMeters} meters are in use and ${dashboard.inactiveMeters} are out of use. Meters out of use still count in the months they were working.`,
       );
-    }
-    if (prevDashboard.nrwOverallPct !== null && dashboard.nrwOverallPct !== null) {
-      const delta = dashboard.nrwOverallPct - prevDashboard.nrwOverallPct;
-      if (Math.abs(delta) >= 1) {
-        insights.push(
-          `Non-revenue water ${delta > 0 ? "worsened" : "improved"} by ${Math.abs(delta).toFixed(1)} percentage points versus last month.`,
-        );
-      }
     }
 
     return {

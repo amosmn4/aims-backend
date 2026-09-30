@@ -111,12 +111,65 @@ buying water, unclear zones, notes written on the register) before applying.
 
 **Zones.** The register's Zone column is `1`, `2`, `3` or `Main`:
 
-- `Main` means the meter is on the main line, so it gets no zone.
+```
+Main Zone            the whole estate: every meter is under it
+├─ (main line)       meters in no inner zone = "Main Zone only"
+├─ Zone 1
+└─ Zone 2            Zone 2 and everything inside it
+   ├─ (Zone 2 only)  Zone 2 minus Zone 3
+   └─ Zone 3
+```
+
+- **Main Zone is the whole estate.** When there is exactly one top-level zone, every meter counts
+  under it. `Main` in the register means the meter is on the main line: it gets no zone, and the app
+  counts it as `Main Zone only`. The import creates `Main Zone` if it is missing.
 - **Zone 3 sits inside Zone 2.** Every Zone 3 meter is also under Zone 2, while some meters are under
-  Zone 2 only. The import keeps Zone 3 meters in Zone 3 and places Zone 3 inside Zone 2, so Zone 2's
-  figures cover both and reports show `Zone 2`, `Zone 2 only` and `Zone 3` on separate rows.
+  Zone 2 only. Zone 2 (whole) = Zone 2 only + Zone 3.
+- A zone with zones inside it is always shown twice: the whole zone, then the zone only. The zone
+  only is the whole zone less the zones inside it, for meters, water and loss alike.
 - The layout is set by `SUB_ZONES` at the top of `prisma/import-meter-register.ts`. Use
   `--inside "<zone>=<zone it is inside>"` for a one-off, or add the pair there to keep it.
+
+**How loss is worked out** (the same rule for the estate and for every zone):
+
+- A meter's figure is how far its dial moved between two readings. With fewer than two readings the
+  app shows "Not read", never zero.
+- Readings rarely fall on the 1st, so a gap between two readings that crosses a month end is split
+  by its days. Months then add up to the dial's total, and a reading taken on the 1st never hands
+  last month's water to this month (`src/water/meter-flow.ts`).
+- Households are counted over the same dates the bulk or main meter was read, so both sides cover
+  the same days. A meter read on the 10th and 20th is compared with households on the 10th to 20th.
+- Zone only = its bulk meter − the bulk meters of the zones inside it − its own households.
+- Household figures are water paid for until household balances are read. Water is paid for before
+  it is used, so when households bought more than the meter passed the app says "bought ahead", not
+  a negative loss. One month on paid-for water is provisional.
+
+**When a gap is called a loss** (`src/water/loss-assessment.ts`). Purchases are not use, so a gap
+between a meter and its households is weighed before it is named:
+
+| What the app says    | When                                                                                                    |
+| -------------------- | ------------------------------------------------------------------------------------------------------- |
+| Within the limit     | The gap is 8% or less. The 8% allows for water sitting in the short pipe runs and for dials that round. |
+| May be unused credit | The gap is over 8%, but typical use plus credit left from earlier purchases could cover it.             |
+| Likely loss          | Even with typical use and leftover credit allowed for, more than 8% is unexplained.                     |
+| Bought ahead         | Households bought more than the meter passed: credit on their meters, not a loss.                       |
+| Check the readings   | Balances were read and show more used than the meter passed.                                            |
+| Not read             | The meter has fewer than two readings.                                                                  |
+
+- **Typical use** is predicted from each zone's own purchases: the daily average over the 90 days
+  before the period, times the days in the period.
+- **Leftover credit** is what was bought in the 30 days before the period beyond that typical use.
+- Once household balances are read, actual use replaces both estimates and the verdict is firm.
+- A meter that **rises sharply** (30% or more per day against the period before) is called out with
+  whether household purchases rose with it, e.g. "Zone 2 only rose from 500 m³ to 900 m³, while its
+  households paid for 272 m³ against 368 m³ before".
+
+```bash
+npx jest --preset ts-jest src/water   # tests for the dial, balance and loss rules
+```
+
+- Meters count for a month if they were in use at any time in it, whatever their status today.
+- Water pumped into the tank but not yet sent out is stock in the tank, not loss.
 
 **Customers.** Meter numbers are unique. Customer names are not: two people can share a name, so
 each meter gets its own customer unless the name and plot both match.

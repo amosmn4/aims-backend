@@ -4,7 +4,8 @@
 //   npm run water:import-register                  apply (safe to re-run)
 //   npm run water:import-register -- --file <file> use another register
 //   npm run water:import-register -- --inside 5=1  also put Zone 5 inside Zone 1
-// Zone 3 sits inside Zone 2: its meters count under Zone 2 as well, next to Zone 2's own.
+// Layout: Main Zone is the whole estate. Zone 1 and Zone 2 sit inside it, Zone 3 inside Zone 2.
+// "Main" in the register means on the main line: under Main Zone, in none of the inner zones.
 // The register (Meter_Register*.xlsx) is read from backend/ or backend/prisma/seed-data/water/.
 import { Prisma, PrismaClient } from "@prisma/client";
 import * as fs from "fs";
@@ -43,10 +44,16 @@ const zoneKey = (name: string) =>
   name
     .trim()
     .toLowerCase()
-    .replace(/^zone\s*/, "");
+    .replace(/^zone\s*/, "")
+    .replace(/\s*zone$/, "");
 
 // Inner zone -> the zone it sits inside. Add more with --inside <zone>=<zone it is inside>.
-const SUB_ZONES = new Map<string, string>([["3", "2"]]);
+const ESTATE = "main";
+const SUB_ZONES = new Map<string, string>([
+  ["1", ESTATE],
+  ["2", ESTATE],
+  ["3", "2"],
+]);
 const stop = (message: string): never => {
   console.error(message);
   process.exit(1);
@@ -189,7 +196,8 @@ async function run(tx: Tx, rows: RegisterRow[]) {
   const zoneByKey = new Map<string, { id: string; name: string; parentZoneId: string | null }>();
   for (const z of zones) if (!zoneByKey.has(zoneKey(z.name))) zoneByKey.set(zoneKey(z.name), z);
   let draftIds = 0;
-  const zoneLabel = (key: string) => (/^\d+$/.test(key) ? `Zone ${key}` : key);
+  const zoneLabel = (key: string) =>
+    /^\d+$/.test(key) ? `Zone ${key}` : key === ESTATE ? "Main Zone" : key;
   // Finds or creates a zone and makes sure it sits inside its outer zone.
   const ensureZone = async (key: string, label: string): Promise<string> => {
     const outerKey = SUB_ZONES.get(key);
@@ -197,7 +205,7 @@ async function run(tx: Tx, rows: RegisterRow[]) {
     const outerName = outerKey ? zoneByKey.get(outerKey)!.name : null;
     const known = zoneByKey.get(key);
     if (!known) {
-      const name = /^\d+$/.test(key) ? `Zone ${key}` : label;
+      const name = /^\d+$/.test(key) || key === ESTATE ? zoneLabel(key) : label;
       const id = DRY_RUN
         ? `new-zone-${key}`
         : (await tx.waterZone.create({ data: { name, parentZoneId: outerId } })).id;
@@ -223,7 +231,10 @@ async function run(tx: Tx, rows: RegisterRow[]) {
   // Null is the main line. Undefined means the register does not say clearly.
   const resolveZone = async (row: RegisterRow): Promise<string | null | undefined> => {
     if (!row.zone) return undefined;
-    if (/^main/i.test(row.zone)) return null;
+    if (/^main/i.test(row.zone)) {
+      await ensureZone(ESTATE, "Main Zone");
+      return null;
+    }
     if (/[/&,]/.test(row.zone)) {
       report.unclearZones.push(
         `${row.meterNumber} (zone "${row.zone}", plot ${row.plotNo ?? "—"})`,
