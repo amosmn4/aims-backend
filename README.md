@@ -93,6 +93,46 @@ npm run water:seed                  # loads the new files (safe to re-run; dupli
 npm run water:seed -- --accounts    # also registers mPaya accounts that have no payments yet
 ```
 
+### Meter register
+
+`Meter_Register.xlsx` (Meter Number, Customer, Plot No, Zone, Status, Notes) matches each meter to
+its customer, plot and zone, and takes the meters marked "Not in use" out of use. It is git-ignored;
+copy it into `backend/` by hand. Payments and readings are never changed.
+
+```bash
+npm run water:import-register -- --dry-run   # shows what would change; changes nothing
+npm run water:import-register                # applies it (safe to re-run)
+npm run water:import-register -- --file "C:\path\to\Other_Register.xlsx"   # use another register file
+npm run water:import-register -- --inside "5=1"   # also put Zone 5 inside Zone 1
+```
+
+Run the dry run first and read the `CHECK` lists it prints (meters taken out of use that are still
+buying water, unclear zones, notes written on the register) before applying.
+
+**Zones.** The register's Zone column is `1`, `2`, `3` or `Main`:
+
+- `Main` means the meter is on the main line, so it gets no zone.
+- **Zone 3 sits inside Zone 2.** Every Zone 3 meter is also under Zone 2, while some meters are under
+  Zone 2 only. The import keeps Zone 3 meters in Zone 3 and places Zone 3 inside Zone 2, so Zone 2's
+  figures cover both and reports show `Zone 2`, `Zone 2 only` and `Zone 3` on separate rows.
+- The layout is set by `SUB_ZONES` at the top of `prisma/import-meter-register.ts`. Use
+  `--inside "<zone>=<zone it is inside>"` for a one-off, or add the pair there to keep it.
+
+**Customers.** Meter numbers are unique. Customer names are not: two people can share a name, so
+each meter gets its own customer unless the name and plot both match.
+
+**Meters not in use.** They are taken out of use, never deleted; their payments and readings stay
+in reports. If one turns out to be in use, edit the meter in the app and switch it back to Active.
+
+On the server, after copying the register into `backend/`:
+
+```bash
+cd backend
+npx prisma migrate deploy                    # only if the code was just updated
+npm run water:import-register -- --dry-run
+npm run water:import-register
+```
+
 If a command stops with `Property 'waterAiInsight' does not exist on type 'PrismaClient'` (or a
 similar unknown-table error), this server's Prisma client is older than the schema. Run steps 2
 and 3 of the deploy above first:

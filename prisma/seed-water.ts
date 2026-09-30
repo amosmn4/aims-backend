@@ -130,10 +130,8 @@ async function importFile(parsed: ParsedFile, registry: Map<string, Date | null>
     if (parsed.vendingSystem === "amsol") {
       const name = ownerName(rows);
       if (name) {
-        const customer =
-          (await prisma.waterCustomer.findFirst({ where: { name } })) ??
-          (await prisma.waterCustomer.create({ data: { name } }));
-        customerId = customer.id;
+        // Two people can share a name, so each new meter gets its own customer.
+        customerId = (await prisma.waterCustomer.create({ data: { name } })).id;
       }
     }
     const created = await prisma.waterMeter.create({
