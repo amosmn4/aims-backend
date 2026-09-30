@@ -157,9 +157,14 @@ export function gapNote(r: {
       }
       const allowed = [
         h.expected !== null && `typical use of about ${wholeUnits(h.expected)} m³`,
-        `about ${wholeUnits(h.carried)} m³ of credit left from earlier purchases`,
+        h.carried > GAP_TOLERANCE &&
+          `about ${wholeUnits(h.carried)} m³ of credit left from earlier purchases`,
       ].filter((part): part is string => !!part);
-      return `${opening}, a gap of ${gap}. Even allowing for ${allowed.join(" and ")}, ${wholeUnits(a.unexplained)} m³ (${a.unexplainedPct!.toFixed(1)}%) is not explained, so this is likely a loss.${r.brief ? "" : " Check for leaks, unregistered connections and stopped meters."}`;
+      const allowance =
+        allowed.length > 0
+          ? `Even allowing for ${allowed.join(" and ")}, `
+          : "With no earlier purchases to set against it, ";
+      return `${opening}, a gap of ${gap}. ${allowance}${wholeUnits(a.unexplained)} m³ (${a.unexplainedPct!.toFixed(1)}%) is not explained, so this is likely a loss.${r.brief ? "" : " Check for leaks, unregistered connections and stopped meters."}`;
     }
     default:
       return `${opening}, leaving ${gap} unaccounted for, within the ${LOSS_LIMIT_PCT}% allowed for water in the pipes and meter rounding.`;

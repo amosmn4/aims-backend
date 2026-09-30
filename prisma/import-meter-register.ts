@@ -5,7 +5,8 @@
 //   npm run water:import-register -- --file <file> use another register
 //   npm run water:import-register -- --inside 5=1  also put Zone 5 inside Zone 1
 // Layout: Main Zone is the whole estate. Zone 1 and Zone 2 sit inside it, Zone 3 inside Zone 2.
-// "Main" in the register means on the main line: under Main Zone, in none of the inner zones.
+// "Main" in the register means on the main line: placed in Main Zone itself, in no inner zone.
+// A blank zone means the meter is no longer in use; it gets no zone and is taken out of use.
 // The register (Meter_Register*.xlsx) is read from backend/ or backend/prisma/seed-data/water/.
 import { Prisma, PrismaClient } from "@prisma/client";
 import * as fs from "fs";
@@ -155,6 +156,7 @@ async function run(tx: Tx, rows: RegisterRow[]) {
     inactiveButInUse: [] as string[],
     followUp: [] as string[],
     paymentsLinked: 0,
+    datesCleared: 0,
     notInRegister: [] as string[],
   };
 
@@ -228,12 +230,11 @@ async function run(tx: Tx, rows: RegisterRow[]) {
     }
     return known.id;
   };
-  // Null is the main line. Undefined means the register does not say clearly.
-  const resolveZone = async (row: RegisterRow): Promise<string | null | undefined> => {
+  // Undefined means the register gives no zone, or not clearly: the meter's zone is left alone.
+  const resolveZone = async (row: RegisterRow): Promise<string | undefined> => {
     if (!row.zone) return undefined;
     if (/^main/i.test(row.zone)) {
-      await ensureZone(ESTATE, "Main Zone");
-      return null;
+      return ensureZone(ESTATE, "Main Zone");
     }
     if (/[/&,]/.test(row.zone)) {
       report.unclearZones.push(
@@ -307,7 +308,8 @@ async function run(tx: Tx, rows: RegisterRow[]) {
     const retirement = retire
       ? {
           isActive: false,
-          deactivatedAt: new Date(),
+          // The register does not say when, so no date is invented.
+          deactivatedAt: null,
           inactiveNote: ["Not in use on the meter register", row.notes].filter(Boolean).join(". "),
         }
       : {};
@@ -327,6 +329,14 @@ async function run(tx: Tx, rows: RegisterRow[]) {
     if (row.inUse && row.notes && !/^active$/i.test(row.notes)) {
       report.followUp.push(`${row.sn} ${row.meterNumber} ${row.customer ?? ""} — ${row.notes}`);
     }
+    // Earlier imports stamped the import day as the out-of-use date; clear that guess.
+    const undated =
+      !row.inUse &&
+      !!meter &&
+      !meter.isActive &&
+      !!meter.deactivatedAt &&
+      !!meter.inactiveNote?.startsWith("Not in use on the meter register");
+    if (undated) report.datesCleared++;
     if (DRY_RUN) continue;
 
     const data = {
@@ -334,6 +344,7 @@ async function run(tx: Tx, rows: RegisterRow[]) {
       ...(zoneId !== undefined && { zoneId }),
       ...(customerId && { customerId }),
       ...retirement,
+      ...(undated && { deactivatedAt: null }),
     };
     if (meter) await tx.waterMeter.update({ where: { id: meter.id }, data });
     else {
@@ -418,6 +429,9 @@ async function main() {
   console.log(`  place ${report.placed} meters in a zone`);
   console.log(`  take ${report.retired.length} meters out of use`);
   if (!DRY_RUN) console.log(`  link ${report.paymentsLinked} past payments to their customer`);
+  if (report.datesCleared > 0) {
+    console.log(`  clear the guessed out-of-use date on ${report.datesCleared} meters`);
+  }
 
   list("New zones", report.newZones);
   list("Zones placed inside another zone", report.nestedZones);

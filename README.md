@@ -121,14 +121,38 @@ Main Zone            the whole estate: every meter is under it
 ```
 
 - **Main Zone is the whole estate.** When there is exactly one top-level zone, every meter counts
-  under it. `Main` in the register means the meter is on the main line: it gets no zone, and the app
-  counts it as `Main Zone only`. The import creates `Main Zone` if it is missing.
+  under it. The import creates `Main Zone` if it is missing.
+- **`Main` in the register** means the meter is on the main line: under the main meter and in none
+  of Zones 1, 2 or 3. The import places it in `Main Zone` itself, and the app shows these as
+  `Main Zone only`.
+- **A blank zone in the register** means the meter is no longer in use. It is taken out of use and
+  given no zone. These meters show on their own line, `No zone recorded`, and are never counted as
+  in use. If any of them still buys water, the report says so. No out-of-use date is invented.
 - **Zone 3 sits inside Zone 2.** Every Zone 3 meter is also under Zone 2, while some meters are under
   Zone 2 only. Zone 2 (whole) = Zone 2 only + Zone 3.
 - A zone with zones inside it is always shown twice: the whole zone, then the zone only. The zone
   only is the whole zone less the zones inside it, for meters, water and loss alike.
 - The layout is set by `SUB_ZONES` at the top of `prisma/import-meter-register.ts`. Use
   `--inside "<zone>=<zone it is inside>"` for a one-off, or add the pair there to keep it.
+
+**The meters, in the order water reaches them:**
+
+| Meter                      | Type in the app            | What it measures                                     |
+| -------------------------- | -------------------------- | ---------------------------------------------------- |
+| Borehole meter             | Main (the only main meter) | Water pumped into the tanks.                         |
+| Main Zone bulk meter       | Bulk, zone = Main Zone     | Everything leaving the tanks into the estate.        |
+| Zone 1, Zone 2 bulk meters | Bulk                       | Everything entering that zone, inner zones included. |
+| Zone 3 bulk meter          | Bulk, inside Zone 2        | Everything entering Zone 3.                          |
+| Household meters           | Household                  | One plot each.                                       |
+
+- Borehole − Main Zone bulk meter = water still in the tanks (stock, not loss).
+- Main Zone bulk meter − (Zone 1 + Zone 2 bulk meters) = water for the main line, compared with the
+  household meters in no inner zone. Zone 3 is not subtracted again: it is already inside Zone 2.
+- Zone 2 bulk meter − Zone 3 bulk meter = water for Zone 2 only, compared with Zone 2's own meters.
+- Every table and chart keeps both sides on the same set: whole zone against all household meters
+  under it, or zone only against its own household meters. The two are never mixed.
+- Household meter counts and household averages use household meters only. Bulk and main meters
+  are listed separately and never added into a zone's or the estate's meter count.
 
 **How loss is worked out** (the same rule for the estate and for every zone):
 
