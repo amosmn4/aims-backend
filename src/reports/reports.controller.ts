@@ -5,6 +5,7 @@ import { ReportsAiService } from "./reports-ai.service";
 import { ReportsInboxService } from "./reports-inbox.service";
 import { ReportContentService } from "./report-content.service";
 import { ReportAccessService } from "./report-access.service";
+import { ExecutiveOverviewService } from "./executive-overview.service";
 import {
   ReportAssistDto,
   ReportEmailSubscriptionDto,
@@ -26,6 +27,7 @@ export class ReportsController {
     private readonly ai: ReportsAiService,
     private readonly content: ReportContentService,
     private readonly access: ReportAccessService,
+    private readonly executive: ExecutiveOverviewService,
   ) {}
 
   /* ---------------- The CEO's inbox and the email switches ---------------- */
@@ -33,6 +35,12 @@ export class ReportsController {
   @Get("reports-inbox")
   getInbox(@CurrentUser() user: AuthenticatedUser) {
     return this.inbox.inbox(user);
+  }
+
+  @Get("executive-overview")
+  @Roles("ceo", "system_admin")
+  executiveOverview(@CurrentUser() user: AuthenticatedUser) {
+    return this.executive.overview(user);
   }
 
   @Get("report-email-subscriptions")

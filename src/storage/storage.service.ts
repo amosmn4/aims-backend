@@ -48,10 +48,6 @@ export class StorageService {
     });
   }
 
-  isConfigured(): boolean {
-    return !!this.client;
-  }
-
   async write(key: string, buffer: Buffer): Promise<void> {
     if (this.client && this.bucket) {
       await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: buffer }));

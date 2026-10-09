@@ -1,13 +1,14 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
-  NotFoundException,
 } from "@nestjs/common";
-import type { Prisma, ReportKind, ReportStatus, ReportTemplate } from "@prisma/client";
+import { Prisma, type ReportKind, type ReportStatus, type ReportTemplate } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { DocumentsService } from "../documents/documents.service";
 import { viewerDepartmentCodes } from "../common/department-scope";
+import { readableProjectsWhere } from "../common/project-access";
 import { isAdminOrCeo } from "../common/is-admin-or-ceo";
 import { maskUserRef } from "../common/mask-user-ref";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
@@ -39,7 +40,7 @@ const USER_REF = {
 const EDITABLE: ReportStatus[] = ["draft", "changes_requested"];
 const STATUSES: ReportStatus[] = ["draft", "submitted", "changes_requested", "approved", "shared"];
 
-/** A shared project report stays open to its author, so the record can be kept current. */
+/** Reports can be edited while drafting or responding to feedback. */
 const canStillEdit = (report: { status: ReportStatus; reviewerKind: string }) =>
   EDITABLE.includes(report.status) ||
   (report.reviewerKind === "none" && report.status === "shared");
@@ -83,6 +84,8 @@ export class ReportsService {
       forReview?: boolean;
     },
   ) {
+    if (filters.forReview && !isAdminOrCeo(user) && !user.roles.includes("department_head"))
+      throw new ForbiddenException("Only reviewers can open the review queue");
     const codes = await viewerDepartmentCodes(user, this.prisma);
     const status = STATUSES.find((s) => s === filters.status);
     const kind = (["department", "project", "individual"] as const).find((k) => k === filters.kind);
@@ -93,6 +96,14 @@ export class ReportsService {
       ...(filters.departmentId && { departmentId: filters.departmentId }),
       ...(status && { status }),
     };
+
+    const visibleProjects = await this.prisma.project.findMany({
+      where: isAdminOrCeo(user)
+        ? { scope: "company" }
+        : await readableProjectsWhere(user, this.prisma),
+      select: { id: true, scope: true },
+    });
+    const teamProjectIds = visibleProjects.filter((p) => p.scope === "company").map((p) => p.id);
 
     if (filters.mine) {
       where.subjectUserId = user.id;
@@ -105,18 +116,24 @@ export class ReportsService {
       }
     } else {
       // A person's own report is theirs alone; everything else follows department scope.
+      const projects = visibleProjects;
       const scope: Prisma.ReportWhereInput[] = [
-        { kind: { not: "individual" }, ...(codes && { department: { code: { in: codes } } }) },
+        { kind: "department", ...(codes && { department: { code: { in: codes } } }) },
         { kind: "individual", subjectUserId: user.id },
-        { kind: "project", subjectId: { in: await this.access.companyProjectIds(user.id) } },
+        { kind: "project", subjectId: { in: projects.map((p) => p.id) } },
       ];
       if (user.roles.includes("department_head") && user.departmentId) {
         scope.push({ kind: "individual", departmentId: user.departmentId });
       }
       if (!isAdminOrCeo(user)) where.OR = scope;
-      // Nobody sees another person's unsent draft.
-      where.NOT = [{ status: "draft", createdBy: { not: user.id } }];
     }
+    where.NOT = [
+      {
+        status: "draft",
+        createdBy: { not: user.id },
+        OR: [{ kind: { not: "project" } }, { subjectId: { notIn: teamProjectIds } }],
+      },
+    ];
 
     const rows = await this.prisma.report.findMany({
       where,
@@ -136,6 +153,7 @@ export class ReportsService {
 
     return rows.map(({ messages, ...r }) => ({
       ...r,
+      isTeamReport: r.kind === "project" && teamProjectIds.includes(r.subjectId),
       figures: readFigures(r.figures),
       creator: maskUserRef(r.creator, user),
       subjectUser: r.subjectUser ? maskUserRef(r.subjectUser, user) : null,
@@ -160,13 +178,7 @@ export class ReportsService {
 
     const canWrite = await this.access.canWrite(report, user);
     const isReviewer = await this.access.isReviewer(report, user);
-    // A draft belongs to whoever is writing it. Departments share theirs so two
-    // people never start the same month; a person's own stays private.
-    if (report.status === "draft" && report.createdBy !== user.id) {
-      if (report.kind !== "department" || !canWrite) {
-        throw new NotFoundException("Report not found");
-      }
-    }
+    const isTeamReport = await this.access.isTeamReport(report);
 
     const sections = readSections(report.sections, report.template);
     return {
@@ -177,10 +189,14 @@ export class ReportsService {
       subjectUser: report.subjectUser ? maskUserRef(report.subjectUser, user) : null,
       reviewer: report.reviewer ? maskUserRef(report.reviewer, user) : null,
       messages: report.messages.map((m) => ({ ...m, author: maskUserRef(m.author, user) })),
-      canEdit: canStillEdit(report) && canWrite && report.createdBy === user.id,
+      reviewerKind: isTeamReport ? "ceo" : report.reviewerKind,
+      isTeamReport,
+      canEdit: canStillEdit(report) && canWrite && (isTeamReport || report.createdBy === user.id),
       canReview: isReviewer && report.status === "submitted",
       missing: missingSections(sections),
-      subjectName: base.department?.name ?? report.title,
+      subjectName: isTeamReport
+        ? (await this.access.resolveSubject(report.kind, report.subjectId)).name
+        : (base.department?.name ?? report.title),
     };
   }
 
@@ -212,6 +228,9 @@ export class ReportsService {
       where: { kind, subjectId, periodStart, periodEnd },
       include: { creator: { select: USER_REF } },
     });
+    const isTeamReport = await this.access.isTeamReport({ kind, subjectId });
+    if (existing && isTeamReport)
+      return { ...existing, creator: maskUserRef(existing.creator, user) };
     if (existing) {
       const who = existing.creator.fullName ?? existing.creator.email;
       throw new BadRequestException(
@@ -234,28 +253,55 @@ export class ReportsService {
       dto.title?.trim() ||
       `${subject.name} — ${TEMPLATES[template].title.toLowerCase()}, ${monthName(periodStart)}`;
 
-    return this.prisma.report.create({
-      data: {
-        kind,
-        template,
-        subjectId,
-        departmentId: subject.departmentId,
-        subjectUserId: subject.subjectUserId,
-        reviewerKind: subject.reviewerKind,
-        title,
-        periodType: dto.periodType ?? "monthly",
-        periodStart,
-        periodEnd,
-        figures: withPrevious(figures, previous) as unknown as Prisma.InputJsonValue,
-        sections: sections as unknown as Prisma.InputJsonValue,
-        createdBy: user.id,
-      },
-    });
+    try {
+      return await this.prisma.report.create({
+        data: {
+          kind,
+          template,
+          subjectId,
+          departmentId: subject.departmentId,
+          subjectUserId: subject.subjectUserId,
+          reviewerKind: subject.reviewerKind,
+          title,
+          periodType: dto.periodType ?? "monthly",
+          periodStart,
+          periodEnd,
+          figures: withPrevious(figures, previous) as unknown as Prisma.InputJsonValue,
+          sections: sections as unknown as Prisma.InputJsonValue,
+          createdBy: user.id,
+        },
+      });
+    } catch (error) {
+      if (
+        isTeamReport &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        const shared = await this.prisma.report.findFirst({
+          where: { kind, subjectId, periodStart, periodEnd },
+        });
+        if (shared) return shared;
+      }
+      throw error;
+    }
   }
 
   async update(id: string, dto: UpdateReportDto, user: AuthenticatedUser) {
     const report = await this.access.loadReadable(id, user);
     await this.assertCanEdit(report, user);
+    const isTeamReport = await this.access.isTeamReport(report);
+    if (isTeamReport && !dto.expectedUpdatedAt) {
+      throw new BadRequestException("Reload the team report before saving your changes.");
+    }
+    if (
+      dto.expectedUpdatedAt &&
+      new Date(dto.expectedUpdatedAt).getTime() !== report.updatedAt.getTime()
+    ) {
+      throw new ConflictException(
+        "A teammate updated this report. Your changes are still here; reload the latest report before saving.",
+      );
+    }
+    const reviewerKind = isTeamReport ? "ceo" : report.reviewerKind;
     if (!canStillEdit(report)) {
       throw new BadRequestException(
         "This report is with its reviewer. You can edit it again if changes are asked for.",
@@ -280,25 +326,23 @@ export class ReportsService {
     }
 
     const wasSentBack = report.status === "changes_requested";
-    const updated = await this.prisma.report.update({
-      where: { id },
-      data: {
-        title: dto.title?.trim(),
-        periodType: dto.periodType,
-        periodStart: dto.periodStart ? periodStart : undefined,
-        periodEnd: dto.periodEnd ? periodEnd : undefined,
-        summary: dto.summary === undefined ? undefined : dto.summary.trim() || null,
-        figures: dto.figures ? (dto.figures as unknown as Prisma.InputJsonValue) : undefined,
-        sections: dto.sections ? (dto.sections as unknown as Prisma.InputJsonValue) : undefined,
-        ...(dto.submit && {
-          status: report.reviewerKind === "none" ? ("shared" as const) : ("submitted" as const),
-          submittedBy: user.id,
-          submittedAt: report.status === "shared" ? undefined : new Date(),
-          submissionCount: report.submissionCount + 1,
-        }),
-      },
+    const updated = await this.saveReport(id, report.updatedAt, {
+      title: dto.title?.trim(),
+      periodType: dto.periodType,
+      periodStart: dto.periodStart ? periodStart : undefined,
+      periodEnd: dto.periodEnd ? periodEnd : undefined,
+      summary: dto.summary === undefined ? undefined : dto.summary.trim() || null,
+      figures: dto.figures ? (dto.figures as unknown as Prisma.InputJsonValue) : undefined,
+      sections: dto.sections ? (dto.sections as unknown as Prisma.InputJsonValue) : undefined,
+      ...(dto.submit && {
+        reviewerKind,
+        status: reviewerKind === "none" ? ("shared" as const) : ("submitted" as const),
+        submittedBy: user.id,
+        submittedAt: reviewerKind === "none" && report.status === "shared" ? undefined : new Date(),
+        submissionCount: report.submissionCount + 1,
+      }),
     });
-    if (dto.submit && report.reviewerKind === "none") {
+    if (dto.submit && reviewerKind === "none") {
       // Later edits to a shared report don't notify the team again.
       if (report.status !== "shared") await this.recordShare(updated, user, dto.note);
     } else if (dto.submit) {
@@ -311,6 +355,9 @@ export class ReportsService {
   async refreshFigures(id: string, user: AuthenticatedUser) {
     const report = await this.access.loadReadable(id, user);
     await this.assertCanEdit(report, user);
+    if (!canStillEdit(report)) {
+      throw new BadRequestException("This report is locked. It cannot be refreshed.");
+    }
     const { figures, lists } = await this.content.build(
       report.template,
       report.subjectId,
@@ -319,18 +366,21 @@ export class ReportsService {
     );
     const previous = await this.previousFigures(report.kind, report.subjectId, report.periodStart);
     const merged = withPrevious(mergeFigures(readFigures(report.figures), figures), previous);
-    const sections = this.fillSections(
-      readSections(report.sections, report.template),
-      merged,
-      lists,
-      true,
+    const storedSections = readSections(report.sections, report.template);
+    const updatesSection = templateSections(report.template).find(
+      (section) => section.id === "updates",
     );
-    return this.prisma.report.update({
-      where: { id },
-      data: {
-        figures: merged as unknown as Prisma.InputJsonValue,
-        sections: sections as unknown as Prisma.InputJsonValue,
-      },
+    if (
+      lists.updates?.length &&
+      updatesSection &&
+      !storedSections.some((section) => section.id === "updates")
+    ) {
+      storedSections.push(updatesSection);
+    }
+    const sections = this.fillSections(storedSections, merged, lists, true);
+    return this.saveReport(id, report.updatedAt, {
+      figures: merged as unknown as Prisma.InputJsonValue,
+      sections: sections as unknown as Prisma.InputJsonValue,
     });
   }
 
@@ -340,8 +390,18 @@ export class ReportsService {
     if (report.status !== "draft") {
       throw new BadRequestException("Only a report you haven't sent can be deleted");
     }
+    try {
+      await this.prisma.report.delete({
+        where: { id, updatedAt: report.updatedAt, status: "draft" },
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025")
+        throw new ConflictException(
+          "This report changed before deletion. Reload it and try again.",
+        );
+      throw error;
+    }
     await this.documents.deleteAllForResource("department_report", id);
-    await this.prisma.report.delete({ where: { id } });
     return { id };
   }
 
@@ -361,14 +421,11 @@ export class ReportsService {
       throw new BadRequestException("Say what needs to change before sending the report back");
     }
 
-    const updated = await this.prisma.report.update({
-      where: { id },
-      data: {
-        status: approve ? "approved" : "changes_requested",
-        reviewedBy: user.id,
-        reviewedAt: new Date(),
-        lastReviewNote: approve ? null : (note ?? null),
-      },
+    const updated = await this.saveReport(id, report.updatedAt, {
+      status: approve ? "approved" : "changes_requested",
+      reviewedBy: user.id,
+      reviewedAt: new Date(),
+      lastReviewNote: approve ? null : (note ?? null),
     });
     await this.prisma.reportMessage.create({
       data: {
@@ -378,7 +435,10 @@ export class ReportsService {
         body: note || "Approved.",
       },
     });
-    await this.notifier.notify([report.createdBy, report.submittedBy], {
+    const recipients = (await this.access.isTeamReport(report))
+      ? await this.access.projectTeamIds(report.subjectId)
+      : [report.createdBy, report.submittedBy];
+    await this.notifier.notify(recipients, {
       type: "report_reviewed",
       title: approve ? `Approved: ${report.title}` : `Changes asked for: ${report.title}`,
       body: note,
@@ -413,8 +473,12 @@ export class ReportsService {
       resourceId: id,
       actorId: user.id,
     };
+    const isTeamReport = await this.access.isTeamReport(report);
+    if (isTeamReport) {
+      await this.notifier.notify(await this.access.projectTeamIds(report.subjectId), event);
+    }
     if (await this.access.isReviewer(report, user)) {
-      await this.notifier.notify([report.createdBy, report.submittedBy], event);
+      if (!isTeamReport) await this.notifier.notify([report.createdBy, report.submittedBy], event);
     } else if (report.reviewerKind === "ceo") {
       await this.notifier.toCeo(event);
     } else {
@@ -469,8 +533,8 @@ export class ReportsService {
     return sections.map((s) => {
       if (s.type === "figures") return { ...s, figureKeys: figures.map((f) => f.key) };
       if (s.type !== "list" && s.type !== "risks") return s;
-      const pulled = (lists[s.id] ?? []) as ReportSection["items"];
-      if (!pulled || pulled.length === 0) return s;
+      const pulled = lists[s.id] as ReportSection["items"];
+      if (!pulled) return s;
       if (!keepEdits) return { ...s, items: pulled };
       // Keep what the person wrote or kept; add anything new AIMS found.
       const own = (s.items ?? []).filter((i) => i.source !== "aims");
@@ -490,7 +554,7 @@ export class ReportsService {
     if (!(await this.access.canWrite(report, user))) {
       throw new ForbiddenException(this.writeRefusal(report.kind));
     }
-    if (report.createdBy !== user.id) {
+    if (report.createdBy !== user.id && !(await this.access.isTeamReport(report))) {
       throw new ForbiddenException(
         "Someone else is writing this report. Add a comment instead, or ask them to hand it over.",
       );
@@ -578,6 +642,24 @@ export class ReportsService {
       resourceId: report.id,
       actorId: user.id,
     });
+  }
+
+  private async saveReport(id: string, updatedAt: Date, data: Prisma.ReportUncheckedUpdateInput) {
+    try {
+      return await this.prisma.report.update({ where: { id, updatedAt }, data });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === "P2025")
+          throw new ConflictException(
+            "This report changed. Reload the latest report and try again.",
+          );
+        if (error.code === "P2002")
+          throw new ConflictException(
+            "A report already exists for this project and period. Open that report instead.",
+          );
+      }
+      throw error;
+    }
   }
 
   private assertPeriod(start: Date, end: Date) {

@@ -31,8 +31,9 @@ export class CompanyMemberDto {
   @IsString()
   userId!: string;
 
+  @IsOptional()
   @IsIn(COMPANY_MEMBER_ACCESS)
-  access!: (typeof COMPANY_MEMBER_ACCESS)[number];
+  access?: (typeof COMPANY_MEMBER_ACCESS)[number];
 }
 export const SDLC_STAGES = [
   "requirements",
@@ -59,7 +60,7 @@ export class CreateProjectDto {
   @IsString()
   contractId?: string;
 
-  // "company": no department; the creator leads it and only the team can see it.
+  // "company": no department; every team member has equal access.
   @IsOptional()
   @IsIn(PROJECT_SCOPES)
   scope?: (typeof PROJECT_SCOPES)[number];

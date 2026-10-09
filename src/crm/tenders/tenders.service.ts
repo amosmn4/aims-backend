@@ -7,7 +7,6 @@ import {
 import type { Prisma, TenderStage } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { DocumentsService } from "../../documents/documents.service";
-import { assertDepartmentAccess } from "../../common/assert-department-access";
 import { canWriteModule } from "../../common/module-access";
 import { viewerDepartmentCodes } from "../../common/department-scope";
 import { hasResourceGrant } from "../../common/has-resource-grant";
@@ -31,7 +30,7 @@ import type { CreateTenderRequirementDto } from "./dto/create-tender-requirement
 import type { UpdateTenderRequirementDto } from "./dto/update-tender-requirement.dto";
 import type { SaveAsTemplateDto } from "./dto/save-as-template.dto";
 import { recordStageChange } from "../../common/stage-history";
-import { endOfDay, startOfDay } from "../../common/date-range";
+import { companyDateKey, endOfDay, startOfDay } from "../../common/date-range";
 import { ThreadsService } from "../../threads/threads.service";
 
 const ALL_STAGES: TenderStage[] = [
@@ -75,7 +74,24 @@ async function tenderDeptFilter(
 ): Promise<Prisma.TenderWhereInput> {
   const deptCodes = await viewerDepartmentCodes(viewer, prisma);
   if (deptCodes === null || deptCodes.includes("tender")) return {};
-  return { department: { code: { in: deptCodes } } };
+  const grants = await prisma.resourceAccessGrant.findMany({
+    where: {
+      resourceType: "tender",
+      OR: [
+        { userId: viewer.id },
+        ...(viewer.departmentId ? [{ departmentId: viewer.departmentId }] : []),
+      ],
+    },
+    select: { resourceId: true },
+  });
+  return {
+    OR: [
+      { department: { code: { in: deptCodes } } },
+      { accountManagerId: viewer.id },
+      { resources: { some: { userId: viewer.id } } },
+      { id: { in: grants.map((g) => g.resourceId) } },
+    ],
+  };
 }
 
 function buildWhere(filters: TenderFilters): Prisma.TenderWhereInput {
@@ -140,7 +156,7 @@ export class TendersService {
     const result = await maybePaginate(
       this.prisma.tender,
       {
-        where: { ...buildWhere(filters), ...(await tenderDeptFilter(viewer, this.prisma)) },
+        where: { AND: [buildWhere(filters), await tenderDeptFilter(viewer, this.prisma)] },
         include: {
           client: { select: { id: true, name: true } },
           department: { select: { id: true, name: true, code: true } },
@@ -175,16 +191,99 @@ export class TendersService {
     return Array.isArray(result) ? rows.map(mask) : { ...result, data: rows.map(mask) };
   }
 
-  // Real backend-side aggregation (Prisma groupBy), not client-side math — backs both the
-  // Tender module's own funnel and the CEO dashboard's fixed funnel widget. Cached for 30s per
-  // distinct filter set *and* viewer scope — the cache key includes the viewer's department
-  // codes so a department-scoped viewer can never be served a cached result computed for a
-  // different (wider) visibility scope.
+  async workQueue(viewer: AuthenticatedUser) {
+    const scope = await tenderDeptFilter(viewer, this.prisma);
+    const today = startOfDay(companyDateKey());
+    const weekEnd = new Date(today.getTime() + 7 * 86_400_000);
+    const preparing: Prisma.TenderWhereInput = {
+      AND: [scope],
+      stage: { in: ["identified", "applying"] },
+    };
+    const closing: Prisma.TenderWhereInput = { ...preparing, submissionDeadline: { not: null } };
+    const notReady: Prisma.TenderWhereInput = {
+      ...preparing,
+      OR: [
+        { accountManagerId: null },
+        { submissionDeadline: null },
+        { requirements: { none: {} } },
+        { requirements: { some: { status: { in: ["pending", "in_progress"] } } } },
+      ],
+    };
+    const handoff: Prisma.TenderWhereInput = { AND: [scope], stage: "won", project: null };
+    const include = {
+      department: { select: { id: true, name: true, code: true } },
+      client: { select: { id: true, name: true } },
+      requirements: { select: { status: true } },
+      accountManager: { select: USER_REF },
+    };
+    const [
+      closingRows,
+      notReadyRows,
+      handoffRows,
+      closingTotal,
+      notReadyTotal,
+      handoffTotal,
+      closingThisWeek,
+      pastDeadline,
+      noOwner,
+      noDocs,
+    ] = await Promise.all([
+      this.prisma.tender.findMany({
+        where: closing,
+        include,
+        orderBy: [{ submissionDeadline: "asc" }, { id: "asc" }],
+        take: 6,
+      }),
+      this.prisma.tender.findMany({
+        where: notReady,
+        include,
+        orderBy: [{ submissionDeadline: "asc" }, { id: "asc" }],
+        take: 6,
+      }),
+      this.prisma.tender.findMany({
+        where: handoff,
+        include,
+        orderBy: [{ wonAt: "asc" }, { id: "asc" }],
+        take: 6,
+      }),
+      this.prisma.tender.count({ where: closing }),
+      this.prisma.tender.count({ where: notReady }),
+      this.prisma.tender.count({ where: handoff }),
+      this.prisma.tender.count({
+        where: { ...preparing, submissionDeadline: { gte: today, lt: weekEnd } },
+      }),
+      this.prisma.tender.count({ where: { ...preparing, submissionDeadline: { lt: today } } }),
+      this.prisma.tender.count({ where: { ...preparing, accountManagerId: null } }),
+      this.prisma.tender.count({ where: { ...preparing, requirements: { none: {} } } }),
+    ]);
+    const mask = (rows: typeof closingRows) =>
+      rows.map((r) => ({
+        ...r,
+        accountManager: r.accountManager ? maskUserRef(r.accountManager, viewer) : null,
+      }));
+    return {
+      closing: mask(closingRows),
+      notReady: mask(notReadyRows),
+      handoff: mask(handoffRows),
+      totals: {
+        closingTotal,
+        notReadyTotal,
+        handoffTotal,
+        closingThisWeek,
+        pastDeadline,
+        noOwner,
+        noDocs,
+      },
+    };
+  }
+
+  // The summary uses database aggregation and a 30-second cache.
+  // Cache keys include filters and live record visibility.
   async pipelineSummary(filters: TenderFilters, viewer: AuthenticatedUser) {
-    const scope = await viewerDepartmentCodes(viewer, this.prisma);
+    const scope = await tenderDeptFilter(viewer, this.prisma);
     const cacheKey = JSON.stringify({ filters, scope });
     return this.pipelineSummaryCache.getOrSet(cacheKey, () =>
-      this.computePipelineSummary(filters, viewer),
+      this.computePipelineSummary(filters, scope),
     );
   }
 
@@ -201,8 +300,8 @@ export class TendersService {
   // new funnel-specific fields. A tender lost/withdrawn/cancelled from stage X reached X (and
   // everything before it) even though its current `stage` is "lost", so it's attributed via
   // `lostFromStage`, not the live `stage` column.
-  private async computePipelineSummary(filters: TenderFilters, viewer: AuthenticatedUser) {
-    const where = { ...buildWhere(filters), ...(await tenderDeptFilter(viewer, this.prisma)) };
+  private async computePipelineSummary(filters: TenderFilters, scope: Prisma.TenderWhereInput) {
+    const where = { AND: [buildWhere(filters), scope] };
     const [liveRows, lostRows] = await Promise.all([
       this.prisma.tender.groupBy({
         by: ["stage"],
@@ -262,7 +361,7 @@ export class TendersService {
   // right now" list is the actionable half of this metric.
   async timeMetrics(filters: TenderFilters, viewer: AuthenticatedUser) {
     const rows = await this.prisma.tender.findMany({
-      where: { ...buildWhere(filters), ...(await tenderDeptFilter(viewer, this.prisma)) },
+      where: { AND: [buildWhere(filters), await tenderDeptFilter(viewer, this.prisma)] },
       select: {
         id: true,
         title: true,
@@ -330,11 +429,18 @@ export class TendersService {
       !deptCodes.includes(tender.department.code) &&
       tender.accountManagerId !== viewer.id;
     if (outOfScope && !(await hasResourceGrant("tender", id, viewer, "read", this.prisma))) {
-      throw new NotFoundException("Tender not found");
+      const assigned = await this.prisma.tenderResource.findFirst({
+        where: { tenderId: id, userId: viewer.id },
+        select: { id: true },
+      });
+      if (!assigned) throw new NotFoundException("Tender not found");
     }
     return {
       ...tender,
       accountManager: tender.accountManager ? maskUserRef(tender.accountManager, viewer) : null,
+      canEdit:
+        (await canWriteModule("tender", viewer, this.prisma)) ||
+        (await hasResourceGrant("tender", id, viewer, "write", this.prisma)),
     };
   }
 
@@ -355,9 +461,12 @@ export class TendersService {
 
   async create(dto: CreateTenderDto, user: AuthenticatedUser) {
     await this.assertTenderWrite(user);
+    if (!dto.title?.trim()) throw new BadRequestException("Enter the tender title");
     return this.prisma.tender.create({
       data: {
         ...dto,
+        title: dto.title.trim(),
+        accountManagerId: dto.accountManagerId || user.id,
         submissionDeadline: dto.submissionDeadline ? new Date(dto.submissionDeadline) : undefined,
         createdBy: user.id,
       },
@@ -367,6 +476,8 @@ export class TendersService {
   async update(id: string, dto: UpdateTenderDto, user: AuthenticatedUser) {
     const existing = await this.prisma.tender.findUniqueOrThrow({ where: { id } });
     await this.assertTenderWrite(user, existing.id);
+    if (dto.title !== undefined && !dto.title?.trim())
+      throw new BadRequestException("Enter the tender title");
 
     // null clears a field; undefined leaves it untouched.
     const { submissionDeadline, ...rest } = dto;
@@ -401,11 +512,21 @@ export class TendersService {
           dto.stage === "won" ? dto.wonReason?.trim() || existing.wonReason : existing.wonReason,
         submittedAt:
           dto.stage === "submitted" ? (existing.submittedAt ?? now) : existing.submittedAt,
-        wonAt: dto.stage === "won" ? (dto.wonAt ? new Date(dto.wonAt) : now) : existing.wonAt,
-        lostAt: dto.stage === "lost" ? now : existing.lostAt,
-        withdrawnAt: dto.stage === "withdrawn" ? now : existing.withdrawnAt,
-        cancelledAt: dto.stage === "cancelled" ? now : existing.cancelledAt,
-        lostFromStage: movingToExit ? existing.stage : existing.lostFromStage,
+        wonAt:
+          dto.stage === "won"
+            ? dto.wonAt
+              ? new Date(dto.wonAt)
+              : (existing.wonAt ?? now)
+            : existing.wonAt,
+        lostAt: dto.stage === "lost" ? (existing.lostAt ?? now) : existing.lostAt,
+        withdrawnAt:
+          dto.stage === "withdrawn" ? (existing.withdrawnAt ?? now) : existing.withdrawnAt,
+        cancelledAt:
+          dto.stage === "cancelled" ? (existing.cancelledAt ?? now) : existing.cancelledAt,
+        lostFromStage:
+          movingToExit && changed && PROGRESS_STAGES.includes(existing.stage)
+            ? existing.stage
+            : existing.lostFromStage,
         lostReason: movingToExit ? dto.lostReason!.trim() : existing.lostReason,
       },
     });
@@ -428,6 +549,7 @@ export class TendersService {
   /* ---------- Access grants (share this tender outside its own department) ---------- */
 
   async listAccessGrants(tenderId: string, viewer: AuthenticatedUser) {
+    await this.findOne(tenderId, viewer);
     const grants = await this.prisma.resourceAccessGrant.findMany({
       where: { resourceType: "tender", resourceId: tenderId },
       include: {
@@ -593,6 +715,7 @@ export class TendersService {
   /* ---------- Resources ---------- */
 
   async listResources(tenderId: string, viewer: AuthenticatedUser) {
+    await this.findOne(tenderId, viewer);
     const resources = await this.prisma.tenderResource.findMany({
       where: { tenderId },
       include: {
@@ -651,6 +774,7 @@ export class TendersService {
   /* ---------- Time entries ---------- */
 
   async listTimeEntries(tenderId: string, viewer: AuthenticatedUser) {
+    await this.findOne(tenderId, viewer);
     const entries = await this.prisma.tenderTimeEntry.findMany({
       where: { tenderId },
       include: {
@@ -702,6 +826,7 @@ export class TendersService {
   // same user's hourlyRate; hours logged by a user with no TenderResource row (no rate on
   // record) are still counted and shown, just excluded from the cost figure.
   async getCostSummary(tenderId: string, viewer: AuthenticatedUser) {
+    await this.findOne(tenderId, viewer);
     const [resources, hoursByUser] = await Promise.all([
       this.prisma.tenderResource.findMany({
         where: { tenderId },
@@ -768,7 +893,8 @@ export class TendersService {
 
   /* ---------- Bonds ---------- */
 
-  listBonds(tenderId: string) {
+  async listBonds(tenderId: string, viewer: AuthenticatedUser) {
+    await this.findOne(tenderId, viewer);
     return this.prisma.tenderBond.findMany({ where: { tenderId }, orderBy: { createdAt: "asc" } });
   }
 
@@ -812,7 +938,8 @@ export class TendersService {
 
   /* ---------- Pricing items (bid price breakdown) ---------- */
 
-  listPricingItems(tenderId: string) {
+  async listPricingItems(tenderId: string, viewer: AuthenticatedUser) {
+    await this.findOne(tenderId, viewer);
     return this.prisma.tenderPricingItem.findMany({
       where: { tenderId },
       orderBy: { sortOrder: "asc" },
@@ -855,7 +982,8 @@ export class TendersService {
   // Live aggregation across all financial sub-resources — "cost to pursue" (human + non-staff
   // cost) is kept entirely separate from "bid price" (the pricing breakdown); nothing here
   // touches Tender.estimatedValue, which stays the quick manual figure used by the funnel.
-  async getFinancialsSummary(tenderId: string) {
+  async getFinancialsSummary(tenderId: string, viewer: AuthenticatedUser) {
+    await this.findOne(tenderId, viewer);
     const [humanCost, pricingItems, bonds] = await Promise.all([
       this.getCostSummaryTotalsOnly(tenderId),
       this.prisma.tenderPricingItem.findMany({ where: { tenderId } }),
@@ -889,7 +1017,8 @@ export class TendersService {
 
   /* ---------- Requirements ---------- */
 
-  listRequirements(tenderId: string) {
+  async listRequirements(tenderId: string, viewer: AuthenticatedUser) {
+    await this.findOne(tenderId, viewer);
     return this.prisma.tenderRequirement.findMany({
       where: { tenderId },
       orderBy: [{ category: "asc" }, { sortOrder: "asc" }],
@@ -943,7 +1072,7 @@ export class TendersService {
         sortOrder: existingCount + i,
       })),
     });
-    return this.listRequirements(tenderId);
+    return this.listRequirements(tenderId, user);
   }
 
   // Copies a document from the shared mandatory-documents library onto this tender: a new
@@ -1010,7 +1139,7 @@ export class TendersService {
         },
       });
     }
-    return this.listRequirements(tenderId);
+    return this.listRequirements(tenderId, user);
   }
 
   async saveRequirementsAsTemplate(
@@ -1049,6 +1178,7 @@ export class TendersService {
   /* ---------- Activity & Communication log ---------- */
 
   async listActivities(tenderId: string, viewer: AuthenticatedUser) {
+    await this.findOne(tenderId, viewer);
     const activities = await this.prisma.tenderActivity.findMany({
       where: { tenderId },
       include: {

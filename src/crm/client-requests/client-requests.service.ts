@@ -9,7 +9,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { DocumentsService } from "../../documents/documents.service";
 import { NotificationsService } from "../../notifications/notifications.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
-import { can, canWithCapability } from "../../common/permission-resolution";
+import { canWithCapability } from "../../common/permission-resolution";
 import { assertModuleWrite, canWriteModule } from "../../common/module-access";
 import { viewerDepartmentCodes } from "../../common/department-scope";
 import { hasResourceGrant } from "../../common/has-resource-grant";

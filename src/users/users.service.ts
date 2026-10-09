@@ -22,7 +22,7 @@ export class UsersService {
     private readonly config: ConfigService,
   ) {}
 
-  async findAll(viewer: AuthenticatedUser, pagination: PaginationQueryDto = {}) {
+  async findAll(_viewer: AuthenticatedUser, pagination: PaginationQueryDto = {}) {
     const result = await maybePaginate(
       this.prisma.user,
       {

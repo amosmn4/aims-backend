@@ -1,5 +1,51 @@
 # AIMS Backend
 
+## Shared company projects
+
+Any active staff member can create a company project and add colleagues from any department.
+Every team member can manage the project, tasks, team, updates and files, including historical
+members recorded as viewers. The creator has the same access as everyone else. At least one
+team member must remain; removing someone also removes their access to project work and files.
+The CEO and system administrators retain company oversight.
+
+A company project has one shared report per reporting period. All team members can open the
+draft, edit it and send it directly to the CEO. Saving requires `expectedUpdatedAt`; a competing
+edit returns HTTP 409. Existing legacy shared reports follow CEO review when next submitted.
+Project, task and report files inherit the project team audience; individual file sharing cannot
+restrict the team or grant outsiders access. Company work stays out of individual reports.
+These changes use the existing schema and require no additional migration.
+
+## Tender workflow, CEO overview and access checks
+
+The Tender home uses `GET /api/v1/tenders/work-queue` for bounded daily work lists.
+The default CEO dashboard uses `GET /api/v1/executive-overview` for aggregate counts,
+review decisions, department reporting coverage and recent work updates.
+Both endpoints enforce the signed-in user's server-side access.
+
+Run regression tests with `npm test -- --runInBand`. Use Node.js 20 or newer.
+See [the implementation and security review](docs/tender-ceo-review.md) for workflow,
+sharing rules, dependency findings and remaining rollout checks.
+
+## Work updates and completion dates
+
+HR delivers services to clients. Work updates stay on the relevant client or company project;
+department reports include dated updates from projects visible to the department. Personal reports
+include the author's own updates from department-visible projects. Restricted and company project
+updates remain in their project reports, whose audience follows the project's access.
+
+Apply the `20261008120000_work_completion_dates` migration before deploying the updated API,
+then regenerate Prisma using the deployment steps below. It adds nullable completion timestamps
+to tasks and milestones without changing existing records. Later edits preserve these timestamps;
+reopening work clears them and completing it again records a new timestamp.
+Report date ranges include the whole final calendar day.
+
+Older completed tasks and milestones have no reliable completion date and are excluded from
+period-specific completion lists. They still count towards overall progress and appear in
+whole-project completion reports. No historical dates are inferred from the last edit time.
+
+Recruitment application figures are labelled as totals recorded to date. Existing funnel data
+cannot establish how many applications arrived in a particular month.
+
 ## Before the reports migration (one time)
 
 The migration that turns `department_reports` into `reports` is the only one that

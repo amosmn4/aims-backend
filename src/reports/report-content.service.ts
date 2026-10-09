@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import type { ReportTemplate } from "@prisma/client";
+import type { Prisma, ReportTemplate } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { aimsFigure, share, type ReportFigure } from "./report-figures";
 import type { ReportListItem } from "./report-sections";
@@ -34,7 +34,9 @@ export class ReportContentService {
     from: Date,
     to: Date,
   ): Promise<ReportContent> {
-    const period: Period = { gte: from, lte: to };
+    const through = new Date(to);
+    through.setUTCHours(23, 59, 59, 999);
+    const period: Period = { gte: from, lte: through };
     switch (template) {
       case "department_monthly":
         return this.department(subjectId, period);
@@ -55,7 +57,15 @@ export class ReportContentService {
     const department = await this.prisma.department.findUnique({ where: { id: departmentId } });
     if (!department) return empty;
     const figures = await this.departmentFigures(department.code, departmentId, period);
-    const lists = { highlights: await this.departmentHighlights(departmentId, period) };
+    const [highlights, updates] = await Promise.all([
+      this.departmentHighlights(departmentId, period),
+      this.workUpdates({
+        project: { departmentId, visibility: "department" },
+        parentId: null,
+        occurredAt: period,
+      }),
+    ]);
+    const lists = { highlights, updates };
     return { figures, lists };
   }
 
@@ -122,7 +132,7 @@ export class ReportContentService {
         where: { project: { departmentId }, placedAt: period },
       }),
       this.prisma.recruitmentFunnel.aggregate({
-        where: { project: { departmentId }, updatedAt: period },
+        where: { project: { departmentId } },
         _sum: { applicationsReceived: true },
       }),
       this.prisma.project.findMany({
@@ -142,7 +152,7 @@ export class ReportContentService {
       aimsFigure("people_placed", "People placed", placements, "count"),
       aimsFigure(
         "applications_received",
-        "Applications received",
+        "Applications recorded to date",
         funnels._sum.applicationsReceived ?? 0,
         "count",
       ),
@@ -254,8 +264,8 @@ export class ReportContentService {
         take: 10,
       }),
       this.prisma.milestone.findMany({
-        where: { project: { departmentId }, isComplete: true, updatedAt: period },
-        select: { id: true, title: true, projectId: true, dueDate: true },
+        where: { project: { departmentId }, isComplete: true, completedAt: period },
+        select: { id: true, title: true, projectId: true, completedAt: true },
         take: 10,
       }),
     ]);
@@ -270,9 +280,32 @@ export class ReportContentService {
         text: `Milestone reached: ${m.title}`,
         source: "aims" as const,
         link: `/projects/${m.projectId}`,
-        when: day(m.dueDate),
+        when: day(m.completedAt),
       })),
     ];
+  }
+
+  private async workUpdates(where: Prisma.ProjectActivityWhereInput) {
+    const updates = await this.prisma.projectActivity.findMany({
+      where,
+      select: {
+        summary: true,
+        occurredAt: true,
+        projectId: true,
+        project: { select: { name: true, client: { select: { name: true } } } },
+      },
+      orderBy: { occurredAt: "desc" },
+      take: 30,
+    });
+    return updates.map((update) => ({
+      text: clip(
+        `${update.project.name}${update.project.client ? ` (${update.project.client.name})` : ""}: ${update.summary}`,
+        400,
+      ),
+      source: "aims" as const,
+      link: `/projects/${update.projectId}?view=discussions`,
+      when: day(update.occurredAt),
+    }));
   }
 
   /* ---------------- Projects ---------------- */
@@ -298,7 +331,7 @@ export class ReportContentService {
       await Promise.all([
         this.prisma.milestone.findMany({
           where: { projectId },
-          select: { id: true, title: true, dueDate: true, isComplete: true, updatedAt: true },
+          select: { id: true, title: true, dueDate: true, isComplete: true, completedAt: true },
           orderBy: { dueDate: "asc" },
         }),
         this.prisma.task.findMany({
@@ -308,7 +341,7 @@ export class ReportContentService {
             title: true,
             status: true,
             dueDate: true,
-            updatedAt: true,
+            completedAt: true,
             estimatedHours: true,
             actualHours: true,
           },
@@ -350,8 +383,8 @@ export class ReportContentService {
           orderBy: { occurredAt: "asc" },
         }),
         this.prisma.projectDeliverable.findMany({
-          where: { projectId, status: "delivered" },
-          select: { title: true, deliveredAt: true },
+          where: { projectId },
+          select: { title: true, status: true, deliveredAt: true },
         }),
       ]);
 
@@ -361,6 +394,7 @@ export class ReportContentService {
       (m) => !m.isComplete && m.dueDate && m.dueDate < new Date(),
     );
     const doneTasks = tasks.filter((t) => t.status === "completed");
+    const doneDeliverables = deliverables.filter((d) => d.status === "delivered");
     const openTasks = tasks.filter((t) => t.status !== "completed");
     const overdueTasks = openTasks.filter((t) => t.dueDate && t.dueDate < new Date());
     const budgeted = costs.reduce((s, c) => s + Number(c.budgetedAmount ?? 0), 0);
@@ -371,6 +405,10 @@ export class ReportContentService {
     const slipDays = extensions.reduce(
       (s, e) => s + Math.round((e.newDate.getTime() - e.previousDate.getTime()) / 86_400_000),
       0,
+    );
+    const workDone = share(
+      doneMilestones.length + doneTasks.length + doneDeliverables.length,
+      milestones.length + tasks.length + deliverables.length,
     );
 
     const figures: ReportFigure[] = [
@@ -383,7 +421,7 @@ export class ReportContentService {
       aimsFigure(
         "work_done_pct",
         "Work done",
-        share(doneMilestones.length, milestones.length),
+        workDone === null ? null : Math.round(workDone),
         "percent",
       ),
       aimsFigure("budget_planned", "Budget", plannedBudget, "money"),
@@ -406,13 +444,13 @@ export class ReportContentService {
     const lists: Record<string, ReportListItem[]> = {
       done: [
         ...doneMilestones
-          .filter((m) => inWindow(m.updatedAt))
+          .filter((m) => inWindow(m.completedAt))
           .map((m) => ({
             text: `Milestone: ${m.title}`,
             source: "aims" as const,
-            when: day(m.dueDate),
+            when: day(m.completedAt),
           })),
-        ...deliverables
+        ...doneDeliverables
           .filter((d) => inWindow(d.deliveredAt))
           .map((d) => ({
             text: `Delivered: ${d.title}`,
@@ -420,9 +458,9 @@ export class ReportContentService {
             when: day(d.deliveredAt),
           })),
         ...doneTasks
-          .filter((t) => inWindow(t.updatedAt))
+          .filter((t) => inWindow(t.completedAt))
           .slice(0, 20)
-          .map((t) => ({ text: t.title, source: "aims" as const, when: day(t.updatedAt) })),
+          .map((t) => ({ text: t.title, source: "aims" as const, when: day(t.completedAt) })),
       ],
       slipped: [
         ...lateMilestones.map((m) => ({
@@ -450,7 +488,7 @@ export class ReportContentService {
         .slice(0, 20)
         .map((t) => ({ text: t.title, source: "aims" as const, when: day(t.dueDate) })),
       delivered: [
-        ...deliverables.map((d) => ({
+        ...doneDeliverables.map((d) => ({
           text: d.title,
           source: "aims" as const,
           when: day(d.deliveredAt),
@@ -458,7 +496,7 @@ export class ReportContentService {
         ...doneMilestones.map((m) => ({
           text: `Milestone: ${m.title}`,
           source: "aims" as const,
-          when: day(m.dueDate),
+          when: day(m.completedAt),
         })),
       ],
       decided: posts
@@ -491,38 +529,49 @@ export class ReportContentService {
   /* ---------------- People ---------------- */
 
   private async individual(userId: string, period: Period): Promise<ReportContent> {
-    const [tasks, ticketsResolved, ticketsRaised, requests, memberships] = await Promise.all([
-      this.prisma.task.findMany({
-        where: { assigneeId: userId },
-        select: {
-          id: true,
-          title: true,
-          status: true,
-          dueDate: true,
-          updatedAt: true,
-          actualHours: true,
-          projectId: true,
-          project: { select: { name: true } },
-        },
-      }),
-      this.prisma.ticket.findMany({
-        where: { assigneeId: userId, OR: [{ resolvedAt: period }, { closedAt: period }] },
-        select: { id: true, title: true, resolvedAt: true, closedAt: true },
-      }),
-      this.prisma.ticket.count({ where: { requesterId: userId, createdAt: period } }),
-      this.prisma.clientRequest.findMany({
-        where: { assignedToId: userId, updatedAt: period },
-        select: { id: true, title: true, referenceNumber: true, stage: true },
-        take: 20,
-      }),
-      this.prisma.projectTeamMember.findMany({
-        where: { userId },
-        select: { projectId: true, hoursLogged: true, project: { select: { name: true } } },
-      }),
-    ]);
+    const [tasks, ticketsResolved, ticketsRaised, requests, memberships, updates] =
+      await Promise.all([
+        this.prisma.task.findMany({
+          where: { assigneeId: userId, project: { scope: "department" } },
+          select: {
+            id: true,
+            title: true,
+            status: true,
+            dueDate: true,
+            completedAt: true,
+            actualHours: true,
+            projectId: true,
+            project: { select: { name: true } },
+          },
+        }),
+        this.prisma.ticket.findMany({
+          where: { assigneeId: userId, OR: [{ resolvedAt: period }, { closedAt: period }] },
+          select: { id: true, title: true, resolvedAt: true, closedAt: true },
+        }),
+        this.prisma.ticket.count({ where: { requesterId: userId, createdAt: period } }),
+        this.prisma.clientRequest.findMany({
+          where: { assignedToId: userId, updatedAt: period },
+          select: { id: true, title: true, referenceNumber: true, stage: true },
+          take: 20,
+        }),
+        this.prisma.projectTeamMember.findMany({
+          where: { userId, project: { scope: "department" } },
+          select: { projectId: true, hoursLogged: true, project: { select: { name: true } } },
+        }),
+        this.workUpdates({
+          createdBy: userId,
+          project: { scope: "department", visibility: "department" },
+          parentId: null,
+          occurredAt: period,
+        }),
+      ]);
 
     const finished = tasks.filter(
-      (t) => t.status === "completed" && t.updatedAt >= period.gte && t.updatedAt <= period.lte,
+      (t) =>
+        t.status === "completed" &&
+        t.completedAt !== null &&
+        t.completedAt >= period.gte &&
+        t.completedAt <= period.lte,
     );
     const open = tasks.filter((t) => t.status !== "completed");
     const overdue = open.filter((t) => t.dueDate && t.dueDate < new Date());
@@ -531,7 +580,7 @@ export class ReportContentService {
 
     const figures: ReportFigure[] = [
       aimsFigure("tasks_finished", "Tasks finished", finished.length, "count"),
-      aimsFigure("tasks_open", "Still open at period end", open.length, "count"),
+      aimsFigure("tasks_open", "Tasks open now", open.length, "count"),
       aimsFigure("tasks_overdue", "Overdue right now", overdue.length, "count"),
       aimsFigure("tickets_resolved", "Tickets resolved", ticketsResolved.length, "count"),
       aimsFigure("tickets_raised", "Tickets you raised", ticketsRaised, "count"),
@@ -541,12 +590,13 @@ export class ReportContentService {
     ];
 
     const lists: Record<string, ReportListItem[]> = {
+      updates,
       done: [
         ...finished.slice(0, 20).map((t) => ({
           text: t.project?.name ? `${t.title} — ${t.project.name}` : t.title,
           source: "aims" as const,
           link: t.projectId ? `/projects/${t.projectId}` : null,
-          when: day(t.updatedAt),
+          when: day(t.completedAt),
         })),
         ...ticketsResolved.slice(0, 10).map((t) => ({
           text: `Resolved: ${t.title}`,

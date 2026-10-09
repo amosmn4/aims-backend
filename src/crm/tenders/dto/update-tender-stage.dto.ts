@@ -1,4 +1,4 @@
-import { IsIn, IsOptional, IsString } from "class-validator";
+import { IsDateString, IsIn, IsOptional, IsString } from "class-validator";
 
 const TENDER_STAGES = [
   "identified",
@@ -21,7 +21,7 @@ export class UpdateTenderStageDto {
   // Lets the awarded date be backdated (e.g. entering a tender that was actually won last week)
   // instead of always stamping "now" — only read when stage is being set to "won".
   @IsOptional()
-  @IsString()
+  @IsDateString()
   wonAt?: string;
 
   // Why the bid was won, captured when marking it awarded.

@@ -161,6 +161,10 @@ export class StartReportDto {
 
 export class UpdateReportDto {
   @IsOptional()
+  @IsDateString()
+  expectedUpdatedAt?: string;
+
+  @IsOptional()
   @IsString()
   @Length(3, 160)
   title?: string;

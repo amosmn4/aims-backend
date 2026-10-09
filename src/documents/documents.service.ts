@@ -14,8 +14,14 @@ import type {
 import { PrismaService } from "../prisma/prisma.service";
 import { StorageService } from "../storage/storage.service";
 import { NotificationsService } from "../notifications/notifications.service";
+import { ReportAccessService } from "../reports/report-access.service";
 import { assertDepartmentAccess } from "../common/assert-department-access";
-import { assertProjectWrite, companyProjectsOf } from "../common/project-access";
+import {
+  assertProjectWrite,
+  canReadCompanyProject,
+  canReadDepartmentProject,
+  readableProjectsWhere,
+} from "../common/project-access";
 import { assertModuleWrite } from "../common/module-access";
 import { hasResourceGrant } from "../common/has-resource-grant";
 import { viewerDepartmentCodes } from "../common/department-scope";
@@ -71,6 +77,7 @@ type SerializedDocument = Omit<Document, "resourceType"> & {
   resourceType: "contract" | DocumentResourceType;
   latestVersion: SerializedVersion | null;
   accessGrants: DocumentAccessGrant[];
+  teamShared?: boolean;
 };
 
 function serializeDocument(doc: DocumentWithRelations): SerializedDocument {
@@ -90,6 +97,7 @@ export class DocumentsService {
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
     private readonly notificationsService: NotificationsService,
+    private readonly reportAccess: ReportAccessService,
   ) {}
 
   /**
@@ -115,7 +123,7 @@ export class DocumentsService {
         where: { id: resourceId },
         include: { project: { include: { department: true } } },
       });
-      if (task.assigneeId === user.id) return;
+      if (task.project.scope !== "company" && task.assigneeId === user.id) return;
       await assertProjectWrite(task.project, user, this.prisma);
       return;
     }
@@ -164,14 +172,9 @@ export class DocumentsService {
     }
 
     if (resourceType === "department_report") {
-      const report = await this.prisma.report.findUniqueOrThrow({
-        where: { id: resourceId },
-        include: { department: true },
-      });
-      if (isAdminOrCeo(user)) return;
-      if (!report.department || !(await can(user, report.department, "write", this.prisma))) {
-        throw new ForbiddenException("Only people in this department can manage its report files");
-      }
+      const report = await this.reportAccess.loadReadable(resourceId, user);
+      if (!(await this.reportAccess.canWrite(report, user)))
+        throw new ForbiddenException("You cannot add files to this report");
       return;
     }
 
@@ -212,7 +215,7 @@ export class DocumentsService {
     this.departmentCodesAt = Date.now();
   }
 
-  /** Zero grants = visible to everyone; otherwise a match on the grant set is required. */
+  /** Files without grants inherit record access; explicit shares require a matching grant. */
   private canView(
     doc: { createdBy: string | null; accessGrants: DocumentAccessGrant[] },
     user: AuthenticatedUser,
@@ -232,6 +235,74 @@ export class DocumentsService {
       if (g.accessType === "user") return g.userId === user.id;
       return false;
     });
+  }
+
+  private async companyDocumentAccess(
+    documents: Pick<Document, "id" | "resourceType" | "resourceId">[],
+    user: AuthenticatedUser,
+  ) {
+    const idsFor = (type: DocumentResourceType) =>
+      documents.filter((doc) => doc.resourceType === type).map((doc) => doc.resourceId);
+    const taskIds = idsFor("task");
+    const reportIds = idsFor("department_report");
+    const [tasks, reports] = await Promise.all([
+      taskIds.length
+        ? this.prisma.task.findMany({
+            where: { id: { in: taskIds } },
+            select: { id: true, projectId: true },
+          })
+        : [],
+      reportIds.length
+        ? this.prisma.report.findMany({
+            where: { id: { in: reportIds }, kind: "project" },
+            select: { id: true, subjectId: true },
+          })
+        : [],
+    ]);
+    const projectIds = [
+      ...new Set([
+        ...idsFor("project"),
+        ...tasks.map((t) => t.projectId),
+        ...reports.map((r) => r.subjectId),
+      ]),
+    ];
+    if (!projectIds.length) return new Map<string, boolean>();
+    const projects = await this.prisma.project.findMany({
+      where: { id: { in: projectIds }, scope: "company" },
+      select: { id: true, team: { where: { userId: user.id }, select: { id: true } } },
+    });
+    const access = new Map(projects.map((p) => [p.id, isAdminOrCeo(user) || p.team.length > 0]));
+    const taskProjects = new Map(tasks.map((t) => [t.id, t.projectId]));
+    const reportProjects = new Map(reports.map((r) => [r.id, r.subjectId]));
+    const result = new Map<string, boolean>();
+    for (const doc of documents) {
+      const projectId =
+        doc.resourceType === "project"
+          ? doc.resourceId
+          : doc.resourceType === "task"
+            ? taskProjects.get(doc.resourceId)
+            : doc.resourceType === "department_report"
+              ? reportProjects.get(doc.resourceId)
+              : undefined;
+      if (projectId && access.has(projectId)) result.set(doc.id, access.get(projectId)!);
+    }
+    return result;
+  }
+
+  private async assertDocumentRead(
+    doc: DocumentWithRelations | (Document & { accessGrants: DocumentAccessGrant[] }),
+    user: AuthenticatedUser,
+  ) {
+    const companyAccess = await this.companyDocumentAccess([doc], user);
+    if (companyAccess.has(doc.id)) {
+      if (!companyAccess.get(doc.id)) throw new NotFoundException("Document not found");
+      if (doc.resourceType === "department_report")
+        await this.reportAccess.loadReadable(doc.resourceId, user);
+      return true;
+    }
+    if (!this.canView(doc, user))
+      throw new ForbiddenException("You do not have access to this document");
+    await this.assertImplicitDocumentRead(doc, user);
   }
 
   async findAll(
@@ -275,9 +346,16 @@ export class DocumentsService {
             orderBy: { createdAt: "desc" },
           });
 
+    const companyAccess = await this.companyDocumentAccess(documents, user);
     let entries: LibraryEntry[] = documents
-      .filter((doc) => this.canView(doc, user))
-      .map((doc) => ({ ...serializeDocument(doc), resourceType: doc.resourceType }))
+      .filter((doc) =>
+        companyAccess.has(doc.id) ? companyAccess.get(doc.id) : this.canView(doc, user),
+      )
+      .map((doc) => ({
+        ...serializeDocument(doc),
+        resourceType: doc.resourceType,
+        teamShared: companyAccess.has(doc.id),
+      }))
       .filter(
         (doc) =>
           !filters.tag ||
@@ -350,44 +428,98 @@ export class DocumentsService {
     if (!filters.mine && !filters.sharedWithMe) {
       const deptCodes = await viewerDepartmentCodes(user, this.prisma);
       if (deptCodes !== null) {
+        const projectWhere = await readableProjectsWhere(user, this.prisma);
+        const projects = await this.prisma.project.findMany({
+          where: projectWhere,
+          select: { id: true, scope: true },
+        });
+        const recordGrants = await this.prisma.resourceAccessGrant.findMany({
+          where: {
+            resourceType: { in: ["tender", "client_request"] },
+            OR: [
+              { userId: user.id },
+              ...(user.departmentId ? [{ departmentId: user.departmentId }] : []),
+            ],
+          },
+          select: { resourceId: true, resourceType: true },
+        });
         const seesTenderPipeline = deptCodes.includes("tender");
         const seesIntakeQueue = seesTenderPipeline || deptCodes.includes("operations");
-        const [projects, tasks, tenders, requests, deptReports, libraries, systems] =
-          await Promise.all([
-            this.prisma.project.findMany({
-              where: {
-                OR: [{ department: { code: { in: deptCodes } } }, companyProjectsOf(user.id)],
-              },
-              select: { id: true },
-            }),
-            this.prisma.task.findMany({
-              where: {
-                project: {
-                  OR: [{ department: { code: { in: deptCodes } } }, companyProjectsOf(user.id)],
+        const [tasks, tenders, requests, deptReports, libraries, systems] = await Promise.all([
+          this.prisma.task.findMany({
+            where: { OR: [{ project: projectWhere }, { assigneeId: user.id }] },
+            select: { id: true },
+          }),
+          this.prisma.tender.findMany({
+            where: seesTenderPipeline
+              ? {}
+              : {
+                  OR: [
+                    { department: { code: { in: deptCodes } } },
+                    { accountManagerId: user.id },
+                    { resources: { some: { userId: user.id } } },
+                    {
+                      id: {
+                        in: recordGrants
+                          .filter((g) => g.resourceType === "tender")
+                          .map((g) => g.resourceId),
+                      },
+                    },
+                  ],
                 },
+            select: { id: true },
+          }),
+          this.prisma.clientRequest.findMany({
+            where: seesIntakeQueue
+              ? {}
+              : {
+                  OR: [
+                    { department: { code: { in: deptCodes } } },
+                    { assignedToId: user.id },
+                    {
+                      id: {
+                        in: recordGrants
+                          .filter((g) => g.resourceType === "client_request")
+                          .map((g) => g.resourceId),
+                      },
+                    },
+                  ],
+                },
+            select: { id: true },
+          }),
+          this.prisma.report.findMany({
+            where: {
+              OR: [
+                { kind: "department", department: { code: { in: deptCodes } } },
+                { kind: "individual", subjectUserId: user.id },
+                ...(user.roles.includes("department_head") && user.departmentId
+                  ? [{ kind: "individual" as const, departmentId: user.departmentId }]
+                  : []),
+                { kind: "project", subjectId: { in: projects.map((p) => p.id) } },
+              ],
+              NOT: {
+                status: "draft",
+                createdBy: { not: user.id },
+                OR: [
+                  { kind: { not: "project" } },
+                  {
+                    subjectId: {
+                      notIn: projects.filter((p) => p.scope === "company").map((p) => p.id),
+                    },
+                  },
+                ],
               },
-              select: { id: true },
-            }),
-            this.prisma.tender.findMany({
-              where: seesTenderPipeline ? {} : { department: { code: { in: deptCodes } } },
-              select: { id: true },
-            }),
-            this.prisma.clientRequest.findMany({
-              where: seesIntakeQueue ? {} : { department: { code: { in: deptCodes } } },
-              select: { id: true },
-            }),
-            this.prisma.report.findMany({
-              where: { department: { code: { in: deptCodes } } },
-              select: { id: true },
-            }),
-            this.prisma.department.findMany({
-              where: { code: { in: deptCodes } },
-              select: { id: true },
-            }),
-            deptCodes.includes("it")
-              ? this.prisma.itSystem.findMany({ select: { id: true } })
-              : Promise.resolve([]),
-          ]);
+            },
+            select: { id: true },
+          }),
+          this.prisma.department.findMany({
+            where: { code: { in: deptCodes } },
+            select: { id: true },
+          }),
+          deptCodes.includes("it")
+            ? this.prisma.itSystem.findMany({ select: { id: true } })
+            : Promise.resolve([]),
+        ]);
         const allowedByType: Record<string, Set<string>> = {
           project: new Set(projects.map((p) => p.id)),
           task: new Set(tasks.map((t) => t.id)),
@@ -398,8 +530,9 @@ export class DocumentsService {
           it_system: new Set(systems.map((sys) => sys.id)),
         };
         entries = entries.filter((doc) => {
-          if (doc.resourceType === "finance_report") return deptCodes.includes("finance");
-          return allowedByType[doc.resourceType]?.has(doc.resourceId) ?? true;
+          if (doc.resourceType === "finance_report") return user.roles.includes("finance");
+          if (doc.resourceType === "tender_document_library") return seesTenderPipeline;
+          return allowedByType[doc.resourceType]?.has(doc.resourceId) ?? false;
         });
       }
     }
@@ -469,10 +602,89 @@ export class DocumentsService {
       include: { latestVersion: true, accessGrants: true },
     });
     await this.loadDepartmentCodes();
-    if (!this.canView(doc, user)) {
-      throw new ForbiddenException("You do not have access to this document");
+    const teamShared = await this.assertDocumentRead(doc, user);
+    return { ...serializeDocument(doc), teamShared: !!teamShared };
+  }
+
+  private async assertProjectDocumentRead(projectId: string, user: AuthenticatedUser) {
+    const project = await this.prisma.project.findUniqueOrThrow({
+      where: { id: projectId },
+      include: { department: true },
+    });
+    const allowed =
+      project.scope === "company"
+        ? await canReadCompanyProject(project, user, this.prisma)
+        : await canReadDepartmentProject(project, user, this.prisma);
+    if (!allowed) throw new NotFoundException("Document not found");
+  }
+
+  private async assertImplicitDocumentRead(
+    doc: Pick<DocumentWithRelations, "resourceType" | "resourceId" | "createdBy" | "accessGrants">,
+    user: AuthenticatedUser,
+  ) {
+    if (doc.accessGrants.length > 0 || doc.createdBy === user.id) return;
+    if (doc.resourceType === "project") return this.assertProjectDocumentRead(doc.resourceId, user);
+    if (doc.resourceType === "task") {
+      const task = await this.prisma.task.findUniqueOrThrow({
+        where: { id: doc.resourceId },
+        select: { assigneeId: true, projectId: true },
+      });
+      if (task.assigneeId !== user.id) await this.assertProjectDocumentRead(task.projectId, user);
+      return;
     }
-    return serializeDocument(doc);
+    if (doc.resourceType === "department_report") {
+      await this.reportAccess.loadReadable(doc.resourceId, user);
+      return;
+    }
+    if (isAdminOrCeo(user)) return;
+    if (doc.resourceType === "finance_report") {
+      if (!user.roles.includes("finance")) throw new NotFoundException("Document not found");
+      return;
+    }
+    const codes = await viewerDepartmentCodes(user, this.prisma);
+    if (doc.resourceType === "department") {
+      const department = await this.prisma.department.findUniqueOrThrow({
+        where: { id: doc.resourceId },
+      });
+      if (!(await can(user, department, "read", this.prisma)))
+        throw new NotFoundException("Document not found");
+      return;
+    }
+    if (doc.resourceType === "tender") {
+      if (codes?.includes("tender")) return;
+      const tender = await this.prisma.tender.findUniqueOrThrow({
+        where: { id: doc.resourceId },
+        include: {
+          department: true,
+          resources: { where: { userId: user.id }, select: { userId: true } },
+        },
+      });
+      if (
+        codes?.includes(tender.department.code) ||
+        tender.accountManagerId === user.id ||
+        tender.resources.length ||
+        (await hasResourceGrant("tender", doc.resourceId, user, "read", this.prisma))
+      )
+        return;
+      throw new NotFoundException("Document not found");
+    }
+    if (doc.resourceType === "client_request") {
+      if (codes?.includes("operations") || codes?.includes("tender")) return;
+      const request = await this.prisma.clientRequest.findUniqueOrThrow({
+        where: { id: doc.resourceId },
+        include: { department: true },
+      });
+      if (
+        (request.department && codes?.includes(request.department.code)) ||
+        request.assignedToId === user.id ||
+        (await hasResourceGrant("client_request", doc.resourceId, user, "read", this.prisma))
+      )
+        return;
+      throw new NotFoundException("Document not found");
+    }
+    if (doc.resourceType === "it_system" && codes?.includes("it")) return;
+    if (doc.resourceType === "tender_document_library" && codes?.includes("tender")) return;
+    throw new NotFoundException("Document not found");
   }
 
   private validateFile(file: Express.Multer.File) {
@@ -502,6 +714,15 @@ export class DocumentsService {
   async upload(file: Express.Multer.File, dto: UploadDocumentDto, user: AuthenticatedUser) {
     this.validateFile(file);
     await this.assertCanAttach(dto.resourceType, dto.resourceId, user);
+    const grants = this.parseAccessGrants(dto.access);
+    const companyAccess = await this.companyDocumentAccess(
+      [{ id: "upload", resourceType: dto.resourceType, resourceId: dto.resourceId }],
+      user,
+    );
+    if (companyAccess.has("upload") && grants.length)
+      throw new BadRequestException(
+        "Company project files are shared with the whole team. Manage access through the project team.",
+      );
 
     const doc = await this.prisma.document.create({
       data: {
@@ -544,10 +765,7 @@ export class DocumentsService {
       data: { latestVersionId: version.id },
     });
 
-    // Omitted/empty `dto.access` means no grants at all, which canView() already treats as
-    // "everyone" — the same default as before this field existed, so a caller that doesn't send
-    // it (or an older client) behaves exactly as it always has.
-    await this.applyAccessGrants(doc.id, this.parseAccessGrants(dto.access), user, doc.title);
+    await this.applyAccessGrants(doc.id, grants, user, doc.title);
 
     const final = await this.prisma.document.findUniqueOrThrow({
       where: { id: doc.id },
@@ -691,9 +909,7 @@ export class DocumentsService {
       include: { accessGrants: true },
     });
     await this.loadDepartmentCodes();
-    if (!this.canView(doc, user)) {
-      throw new ForbiddenException("You do not have access to this document");
-    }
+    await this.assertDocumentRead(doc, user);
     const versions = await this.prisma.documentVersion.findMany({
       where: { documentId },
       orderBy: { versionNo: "desc" },
@@ -711,14 +927,16 @@ export class DocumentsService {
       include: { accessGrants: true },
     });
     await this.loadDepartmentCodes();
-    if (!this.canView(doc, user)) {
-      throw new ForbiddenException("You do not have access to this document");
-    }
+    await this.assertDocumentRead(doc, user);
 
+    if (!versionId && !doc.latestVersionId)
+      throw new NotFoundException("Document version not found");
     const version = versionId
-      ? await this.prisma.documentVersion.findUniqueOrThrow({ where: { id: versionId } })
+      ? await this.prisma.documentVersion.findUniqueOrThrow({
+          where: { id: versionId, documentId },
+        })
       : await this.prisma.documentVersion.findUniqueOrThrow({
-          where: { id: doc.latestVersionId! },
+          where: { id: doc.latestVersionId!, documentId },
         });
 
     return {
@@ -799,6 +1017,9 @@ export class DocumentsService {
     const doc = await this.prisma.document.findUniqueOrThrow({ where: { id: documentId } });
     await this.assertCanAttach(doc.resourceType, doc.resourceId, user);
 
+    const companyAccess = await this.companyDocumentAccess([doc], user);
+    if (companyAccess.has(doc.id) && dto.grants.length)
+      throw new BadRequestException("Company project files inherit access from the project team.");
     await this.applyAccessGrants(documentId, dto.grants, user, doc.title);
 
     return this.prisma.documentAccessGrant.findMany({ where: { documentId } });

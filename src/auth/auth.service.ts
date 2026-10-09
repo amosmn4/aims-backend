@@ -11,8 +11,8 @@ import * as crypto from "crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import type { AuthenticatedUser } from "./types/authenticated-user";
 import { parseTtlToMs, type TtlString } from "./ttl.util";
-import { viewerDepartmentCodes } from "../common/department-scope";
-import { can } from "../common/permission-resolution";
+import { roleGrantsDefault } from "../common/permission-resolution";
+import { canWriteModule } from "../common/module-access";
 import { isSystemAdmin } from "../common/is-system-admin";
 import { effectiveCapabilities } from "../common/capabilities";
 
@@ -289,6 +289,10 @@ export class AuthService {
     return {
       ...rest,
       roles: roleList,
+      moduleWriteAccess: {
+        tender: await canWriteModule("tender", viewer, this.prisma),
+        operations: await canWriteModule("operations", viewer, this.prisma),
+      },
       departmentAccess: await this.departmentAccess({
         id: user.id,
         email: user.email,
@@ -307,11 +311,26 @@ export class AuthService {
 
   // Department codes this user can read/write (roles + overrides); null means every department.
   private async departmentAccess(user: AuthenticatedUser) {
-    const read = await viewerDepartmentCodes(user, this.prisma);
-    if (read === null) return { read: null, write: null };
-    const departments = await this.prisma.department.findMany({ select: { id: true, code: true } });
-    const write: string[] = [];
-    for (const d of departments) if (await can(user, d, "write", this.prisma)) write.push(d.code);
-    return { read, write };
+    if (user.roles.includes("ceo") || user.roles.includes("system_admin"))
+      return { read: null, write: null };
+    const [departments, overrides] = await Promise.all([
+      this.prisma.department.findMany({ select: { id: true, code: true } }),
+      this.prisma.userPermissionOverride.findMany({ where: { userId: user.id } }),
+    ]);
+    const effects = new Map(overrides.map((o) => [`${o.departmentId}:${o.action}`, o.effect]));
+    const allowed = (department: (typeof departments)[number], action: "read" | "write") => {
+      const effect = effects.get(`${department.id}:${action}`);
+      return effect ? effect === "grant" : roleGrantsDefault(user, department, action);
+    };
+    return {
+      read: departments
+        .filter(
+          (d) =>
+            ["operations", "finance", "hr", "it", "marketing", "tender"].includes(d.code) &&
+            allowed(d, "read"),
+        )
+        .map((d) => d.code),
+      write: departments.filter((d) => allowed(d, "write")).map((d) => d.code),
+    };
   }
 }

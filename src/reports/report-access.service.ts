@@ -4,7 +4,11 @@ import { PrismaService } from "../prisma/prisma.service";
 import { can, canWithCapability } from "../common/permission-resolution";
 import { isAdminOrCeo } from "../common/is-admin-or-ceo";
 import { hasResourceGrant } from "../common/has-resource-grant";
-import { canReadCompanyProject, companyProjectRole } from "../common/project-access";
+import {
+  canReadCompanyProject,
+  canReadDepartmentProject,
+  companyProjectRole,
+} from "../common/project-access";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 
 export interface ReportSubject {
@@ -62,14 +66,13 @@ export class ReportAccessService {
         select: { id: true, name: true, departmentId: true, scope: true, leadId: true },
       });
       if (!p) throw new BadRequestException("Choose a project");
-      // Project reports document the work for everyone on it; nobody approves them.
       return {
         kind,
         subjectId,
         departmentId: p.departmentId,
         subjectUserId: null,
         name: p.name,
-        reviewerKind: "none",
+        reviewerKind: p.scope === "company" ? "ceo" : "none",
       };
     }
     const u = await this.prisma.user.findUnique({
@@ -110,10 +113,11 @@ export class ReportAccessService {
     if (!project) return false;
     if (project.scope === "company") {
       const role = await companyProjectRole(project, user, this.prisma);
-      return role === "admin" || role === "lead" || role === "member";
+      return role !== null;
     }
     if (await hasResourceGrant("project", projectId, user, "write", this.prisma)) return true;
     if (!project.department) return isAdminOrCeo(user);
+    if (!(await canReadDepartmentProject(project, user, this.prisma))) return false;
     return can(user, project.department, "write", this.prisma);
   }
 
@@ -145,13 +149,7 @@ export class ReportAccessService {
         where: { id: report.subjectId },
         include: { department: true },
       });
-      if (!project?.department) return false;
-      if (await can(user, project.department, "read", this.prisma)) return true;
-      const member = await this.prisma.projectTeamMember.findFirst({
-        where: { projectId: report.subjectId, userId: user.id },
-        select: { id: true },
-      });
-      return !!member;
+      return !!project && canReadDepartmentProject(project, user, this.prisma);
     }
     const department = await this.prisma.department.findUnique({
       where: { id: report.subjectId },
@@ -174,25 +172,20 @@ export class ReportAccessService {
 
   /** Everyone on a project's team, for telling them about a shared report. */
   async projectTeamIds(projectId: string) {
-    const [project, team] = await Promise.all([
-      this.prisma.project.findUnique({ where: { id: projectId }, select: { leadId: true } }),
-      this.prisma.projectTeamMember.findMany({
-        where: { projectId, userId: { not: null } },
-        select: { userId: true },
-      }),
-    ]);
-    return [
-      ...new Set([project?.leadId, ...team.map((t) => t.userId)].filter(Boolean)),
-    ] as string[];
+    const team = await this.prisma.projectTeamMember.findMany({
+      where: { projectId, userId: { not: null } },
+      select: { userId: true },
+    });
+    return [...new Set(team.map((t) => t.userId).filter(Boolean))] as string[];
   }
 
-  /** Company projects this person is on, for report lists. */
-  async companyProjectIds(userId: string) {
-    const rows = await this.prisma.project.findMany({
-      where: { scope: "company", OR: [{ leadId: userId }, { team: { some: { userId } } }] },
-      select: { id: true },
+  async isTeamReport(report: { kind: ReportKind; subjectId: string }) {
+    if (report.kind !== "project") return false;
+    const project = await this.prisma.project.findUnique({
+      where: { id: report.subjectId },
+      select: { scope: true },
     });
-    return rows.map((r) => r.id);
+    return project?.scope === "company";
   }
 
   private isDepartmentHead(departmentId: string | null, user: AuthenticatedUser) {
@@ -208,6 +201,13 @@ export class ReportAccessService {
     });
     if (!report) throw new NotFoundException("Report not found");
     if (!(await this.canRead(report, user))) throw new NotFoundException("Report not found");
+    if (
+      report.status === "draft" &&
+      report.createdBy !== user.id &&
+      !(await this.isTeamReport(report)) &&
+      (report.kind !== "department" || !(await this.canWrite(report, user)))
+    )
+      throw new NotFoundException("Report not found");
     return report;
   }
 }

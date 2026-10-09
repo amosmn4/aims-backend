@@ -69,6 +69,12 @@ export const TEMPLATES: Record<ReportTemplate, { title: string; sections: Templa
         hint: "Work that closed in the period. Remove anything not worth the CEO's time.",
       },
       {
+        id: "updates",
+        type: "list",
+        title: "Work handled",
+        hint: "Updates from department projects in this period. Open a project for the full detail.",
+      },
+      {
         id: "risks",
         type: "risks",
         title: "What is at risk",
@@ -98,13 +104,13 @@ export const TEMPLATES: Record<ReportTemplate, { title: string; sections: Templa
         id: "decided",
         type: "list",
         title: "Decisions made",
-        hint: "AIMS lists what the team marked as decided in Discussions this period.",
+        hint: "AIMS lists what the team marked as decided in Updates & discussion this period.",
       },
       {
         id: "discussed",
         type: "list",
-        title: "Discussed",
-        hint: "AIMS lists what the team talked through this period. Keep what matters.",
+        title: "Work updates and discussion",
+        hint: "AIMS lists dated updates and discussions from this period. Keep what matters.",
       },
       { id: "slipped", type: "list", title: "Missed or pushed back" },
       { id: "risks", type: "risks", title: "Risks and issues still open" },
@@ -168,6 +174,12 @@ export const TEMPLATES: Record<ReportTemplate, { title: string; sections: Templa
         title: "What I'm carrying into next month",
         hint: "What is still open, and why.",
         required: true,
+      },
+      {
+        id: "updates",
+        type: "list",
+        title: "Work handled",
+        hint: "Your updates from department-visible projects, including progress, blockers and next steps.",
       },
       {
         id: "blocked",

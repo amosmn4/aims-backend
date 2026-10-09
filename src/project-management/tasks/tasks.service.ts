@@ -1,13 +1,12 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import type { TaskStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
-import { assertDepartmentAccess } from "../../common/assert-department-access";
 import {
   assertProjectWrite,
+  canReadDepartmentProject,
   canReadCompanyProject,
-  companyProjectsOf,
+  readableProjectsWhere,
 } from "../../common/project-access";
-import { viewerDepartmentCodes } from "../../common/department-scope";
 import { maskUserRef } from "../../common/mask-user-ref";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import { DocumentsService } from "../../documents/documents.service";
@@ -47,8 +46,7 @@ export class TasksService {
     pagination: PaginationQueryDto = {},
     viewer: AuthenticatedUser,
   ) {
-    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
-    const isOwnAssigneeFilter = !!filters.assigneeId && filters.assigneeId === viewer.id;
+    const readable = await readableProjectsWhere(viewer, this.prisma);
     const projectWhere: Record<string, unknown> = {};
     if (filters.departmentId) projectWhere.departmentId = filters.departmentId;
 
@@ -60,21 +58,14 @@ export class TasksService {
           ...(filters.assigneeId && { assigneeId: filters.assigneeId }),
           ...(filters.status && { status: filters.status }),
           ...(Object.keys(projectWhere).length > 0 && { project: projectWhere }),
-          ...(!isOwnAssigneeFilter &&
-            deptCodes && {
+          AND: [
+            {
               OR: [
-                {
-                  project: { department: { code: { in: deptCodes } } },
-                  OR: [
-                    { project: { visibility: "department" } },
-                    { project: { createdBy: viewer.id } },
-                    { project: { team: { some: { userId: viewer.id } } } },
-                    { assigneeId: viewer.id },
-                  ],
-                },
-                { project: companyProjectsOf(viewer.id) },
+                { project: readable },
+                { assigneeId: viewer.id, project: { scope: "department" } },
               ],
-            }),
+            },
+          ],
         },
         include: {
           project: { select: { id: true, name: true, departmentId: true, scope: true } },
@@ -98,25 +89,15 @@ export class TasksService {
       },
     });
     if (task.project.scope === "company") {
-      const allowed =
-        task.assigneeId === viewer.id ||
-        (await canReadCompanyProject(task.project, viewer, this.prisma));
+      const allowed = await canReadCompanyProject(task.project, viewer, this.prisma);
       if (!allowed) throw new NotFoundException("Task not found");
       return task;
     }
-    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
-    const needsMembershipCheck =
-      !!deptCodes &&
-      (!deptCodes.includes(task.project.department!.code) ||
-        (task.project.visibility === "restricted" && task.project.createdBy !== viewer.id)) &&
-      task.assigneeId !== viewer.id;
-    if (needsMembershipCheck) {
-      const isTeamMember = await this.prisma.projectTeamMember.findFirst({
-        where: { projectId: task.projectId, userId: viewer.id },
-        select: { id: true },
-      });
-      if (!isTeamMember) throw new NotFoundException("Task not found");
-    }
+    if (
+      task.assigneeId !== viewer.id &&
+      !(await canReadDepartmentProject(task.project, viewer, this.prisma))
+    )
+      throw new NotFoundException("Task not found");
     return task;
   }
 
@@ -150,13 +131,19 @@ export class TasksService {
       where: { id: taskId },
       include: { project: { include: { department: true } } },
     });
-    if (task.assigneeId === user.id) return task;
-    if (task.project.scope === "company") {
-      await assertProjectWrite(task.project, user, this.prisma);
-    } else {
-      await assertDepartmentAccess(task.project.department!, user, this.prisma);
-    }
+    if (task.project.scope !== "company" && task.assigneeId === user.id) return task;
+    await assertProjectWrite(task.project, user, this.prisma);
     return task;
+  }
+
+  private async assertCompanyAssignee(projectId: string, assigneeId: string | null | undefined) {
+    if (!assigneeId) return;
+    const member = await this.prisma.projectTeamMember.findFirst({
+      where: { projectId, userId: assigneeId, user: { isActive: true } },
+      select: { id: true },
+    });
+    if (!member)
+      throw new ForbiddenException("Choose someone on the project team to handle this task.");
   }
 
   async create(dto: CreateTaskDto, user: AuthenticatedUser) {
@@ -164,8 +151,8 @@ export class TasksService {
       where: { id: dto.projectId },
       include: { department: true },
     });
-    // The create route is open to everyone signed in, so department projects keep their old roles.
-    await assertProjectWrite(project, user, this.prisma, { checkRole: true });
+    await assertProjectWrite(project, user, this.prisma);
+    if (project.scope === "company") await this.assertCompanyAssignee(project.id, dto.assigneeId);
 
     const task = await this.prisma.task.create({
       data: {
@@ -173,6 +160,7 @@ export class TasksService {
         title: dto.title,
         description: dto.description,
         status: dto.status,
+        completedAt: dto.status === "completed" ? new Date() : undefined,
         priority: dto.priority,
         assigneeId: dto.assigneeId,
         startDate: dto.startDate ? new Date(dto.startDate) : undefined,
@@ -196,11 +184,17 @@ export class TasksService {
 
   async update(id: string, dto: UpdateTaskDto, user: AuthenticatedUser) {
     const existing = await this.assertTaskAccess(id, user);
+    if (existing.project.scope === "company" && dto.assigneeId !== undefined)
+      await this.assertCompanyAssignee(existing.projectId, dto.assigneeId);
     const { extensionReason, extensionAttribution, ...rest } = dto;
     const updated = await this.prisma.task.update({
       where: { id },
       data: {
         ...rest,
+        ...(dto.status !== undefined &&
+          dto.status !== existing.status && {
+            completedAt: dto.status === "completed" ? new Date() : null,
+          }),
         startDate: dto.startDate ? new Date(dto.startDate) : undefined,
         dueDate: dto.dueDate ? new Date(dto.dueDate) : undefined,
       },
@@ -305,6 +299,7 @@ export class TasksService {
   // access alone isn't enough here, since anyone on the task can read but not rewrite history.
   private async assertCommentOwnership(commentId: string, user: AuthenticatedUser) {
     const comment = await this.prisma.taskComment.findUniqueOrThrow({ where: { id: commentId } });
+    await this.findOne(comment.taskId, user);
     const isAdminOrCeo = user.roles.includes("system_admin") || user.roles.includes("ceo");
     if (comment.authorId !== user.id && !isAdminOrCeo) {
       throw new ForbiddenException("You can only edit or delete your own comments");

@@ -4,6 +4,8 @@ import { isAdminOrCeo } from "../common/is-admin-or-ceo";
 import { maskUserRef } from "../common/mask-user-ref";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import { REPORT_EMAIL_DEFAULTS, REPORT_EMAIL_KEYS, type ReportEmailKey } from "./report-email.util";
+import { readFigures, type ReportFigure } from "./report-figures";
+import { readSections, type ReportSection } from "./report-sections";
 
 const USER_REF = {
   id: true,
@@ -49,7 +51,8 @@ export interface InboxItem {
   updatedAt: Date;
   author: { id: string; fullName: string | null; email: string } | null;
   lastMessage: { body: string; kind: string; createdAt: Date; authorName: string | null } | null;
-  figures: { label: string; value: string }[];
+  figures: ReportFigure[];
+  sections?: ReportSection[];
   summary: string | null;
 }
 
@@ -68,18 +71,39 @@ export class ReportsInboxService {
           department: { select: { id: true, name: true, code: true } },
           subjectUser: { select: { id: true, fullName: true, email: true } },
           creator: { select: USER_REF },
-          messages: { orderBy: { createdAt: "desc" }, include: { author: { select: USER_REF } } },
+          messages: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            include: { author: { select: USER_REF } },
+          },
         },
+        orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
       }),
       this.prisma.financeReport.findMany({
         where: { NOT: { status: "draft" } },
         include: {
           creator: { select: USER_REF },
-          comments: { orderBy: { createdAt: "desc" }, include: { author: { select: USER_REF } } },
+          _count: { select: { comments: { where: { kind: "resubmitted" } } } },
+          comments: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            include: { author: { select: USER_REF } },
+          },
         },
+        orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
       }),
     ]);
 
+    const projectIds = [
+      ...new Set(deptReports.filter((r) => r.kind === "project").map((r) => r.subjectId)),
+    ];
+    const projects = projectIds.length
+      ? await this.prisma.project.findMany({
+          where: { id: { in: projectIds } },
+          select: { id: true, name: true },
+        })
+      : [];
+    const projectNames = new Map(projects.map((p) => [p.id, p.name]));
     const items: InboxItem[] = [
       ...deptReports.map((r) => {
         const last = r.messages[0];
@@ -88,16 +112,19 @@ export class ReportsInboxService {
           reportKind: r.kind,
           // Says whether this one is the CEO's to decide or a head's.
           decidedBy: r.reviewerKind,
-          subjectName: r.subjectUser
-            ? (r.subjectUser.fullName ?? r.subjectUser.email)
-            : (r.department?.name ?? null),
+          subjectName:
+            r.kind === "project"
+              ? (projectNames.get(r.subjectId) ?? r.title)
+              : r.subjectUser
+                ? (r.subjectUser.fullName ?? r.subjectUser.email)
+                : (r.department?.name ?? null),
           id: r.id,
           title: r.title,
           department: r.department ?? null,
           periodStart: r.periodStart,
           periodEnd: r.periodEnd,
           status: r.status,
-          resubmitted: r.status === "submitted" && r.messages.some((m) => m.kind === "resubmitted"),
+          resubmitted: r.status === "submitted" && r.submissionCount > 1,
           submittedAt: r.submittedAt,
           updatedAt: last?.createdAt ?? r.updatedAt,
           author: maskUserRef(r.creator, user),
@@ -109,7 +136,8 @@ export class ReportsInboxService {
                 authorName: maskUserRef(last.author, user).fullName,
               }
             : null,
-          figures: r.figures as { label: string; value: string }[],
+          figures: readFigures(r.figures),
+          sections: readSections(r.sections, r.template),
           summary: r.summary,
         };
       }),
@@ -117,6 +145,8 @@ export class ReportsInboxService {
         const last = r.comments[0];
         return {
           kind: "finance_report" as const,
+          decidedBy: "ceo" as const,
+          reportKind: "department" as const,
           id: r.id,
           title: r.title,
           department: {
@@ -127,7 +157,7 @@ export class ReportsInboxService {
           periodStart: r.periodStart,
           periodEnd: r.periodEnd,
           status: r.status,
-          resubmitted: r.status === "submitted" && r.comments.some((c) => c.kind === "resubmitted"),
+          resubmitted: r.status === "submitted" && r._count.comments > 0,
           submittedAt: r.submittedAt,
           updatedAt: last?.createdAt ?? r.updatedAt,
           author: maskUserRef(r.creator, user),
@@ -139,7 +169,7 @@ export class ReportsInboxService {
                 authorName: maskUserRef(last.author, user).fullName,
               }
             : null,
-          figures: financeFigures(r.snapshot),
+          figures: readFigures(financeFigures(r.snapshot)),
           summary: r.narrative,
         };
       }),

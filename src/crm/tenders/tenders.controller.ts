@@ -63,6 +63,12 @@ export class TendersController {
     );
   }
 
+  @Get("work-queue")
+  @Roles()
+  workQueue(@CurrentUser() user: AuthenticatedUser) {
+    return this.tendersService.workQueue(user);
+  }
+
   @Get("pipeline-summary")
   @Roles()
   pipelineSummary(
@@ -249,8 +255,8 @@ export class TendersController {
 
   @Get(":id/bonds")
   @Roles()
-  listBonds(@Param("id") id: string) {
-    return this.tendersService.listBonds(id);
+  listBonds(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.tendersService.listBonds(id, user);
   }
 
   @Post(":id/bonds")
@@ -283,8 +289,8 @@ export class TendersController {
 
   @Get(":id/pricing-items")
   @Roles()
-  listPricingItems(@Param("id") id: string) {
-    return this.tendersService.listPricingItems(id);
+  listPricingItems(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.tendersService.listPricingItems(id, user);
   }
 
   @Post(":id/pricing-items")
@@ -315,16 +321,16 @@ export class TendersController {
 
   @Get(":id/financials-summary")
   @Roles()
-  getFinancialsSummary(@Param("id") id: string) {
-    return this.tendersService.getFinancialsSummary(id);
+  getFinancialsSummary(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.tendersService.getFinancialsSummary(id, user);
   }
 
   /* ---------- Requirements ---------- */
 
   @Get(":id/requirements")
   @Roles()
-  listRequirements(@Param("id") id: string) {
-    return this.tendersService.listRequirements(id);
+  listRequirements(@Param("id") id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.tendersService.listRequirements(id, user);
   }
 
   @Post(":id/requirements")

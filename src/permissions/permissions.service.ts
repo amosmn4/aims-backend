@@ -44,6 +44,7 @@ export class PermissionsService {
 
     const staffWithCapabilities = staff.map((user) => {
       const roles = user.roles.map((r) => r.role);
+      const protectedAccess = isAdminOrCeo({ roles });
       const capabilities = Object.fromEntries(
         ACTIONS.map((action) => {
           const override = overrideByUserAction.get(`${user.id}:${action}`);
@@ -55,8 +56,8 @@ export class PermissionsService {
           return [
             action,
             {
-              effective: override ? override === "grant" : roleDefault,
-              source: override ? "override" : "role",
+              effective: protectedAccess || (override ? override === "grant" : roleDefault),
+              source: protectedAccess ? "role" : override ? "override" : "role",
             },
           ];
         }),

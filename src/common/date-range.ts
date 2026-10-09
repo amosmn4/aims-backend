@@ -2,6 +2,10 @@
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 const COMPANY_OFFSET = "+03:00";
 
+export function companyDateKey(date = new Date()): string {
+  return new Date(date.getTime() + 3 * 60 * 60_000).toISOString().slice(0, 10);
+}
+
 /** Start of a date-only filter's day in company time; full timestamps pass through. */
 export function startOfDay(value: string | Date): Date {
   if (typeof value === "string" && DATE_ONLY.test(value))

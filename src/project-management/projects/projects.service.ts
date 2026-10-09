@@ -7,7 +7,6 @@ import {
 import type { ClientRequestActivityType, ProjectStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { assertDepartmentAccess } from "../../common/assert-department-access";
-import { viewerDepartmentCodes } from "../../common/department-scope";
 import { maskUserRef } from "../../common/mask-user-ref";
 import { maybePaginate, type PaginationQueryDto } from "../../common/pagination";
 import { DocumentsService } from "../../documents/documents.service";
@@ -33,11 +32,10 @@ import { hasResourceGrant } from "../../common/has-resource-grant";
 import {
   assertProjectManage,
   assertProjectWrite,
+  canReadDepartmentProject,
+  readableProjectsWhere,
   canReadCompanyProject,
-  companyProjectRole,
-  companyProjectsOf,
 } from "../../common/project-access";
-import { isAdminOrCeo as userIsAdminOrCeo } from "../../common/is-admin-or-ceo";
 import { ThreadsService } from "../../threads/threads.service";
 
 const userSelect = { id: true, fullName: true, email: true, roles: { select: { role: true } } };
@@ -82,12 +80,13 @@ export class ProjectsService {
     pagination: PaginationQueryDto = {},
     viewer: AuthenticatedUser,
   ) {
-    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
-    const sharedIds = await this.sharedProjectIds(viewer);
+    const sharedIds = filters.sharedWithMe ? await this.sharedProjectIds(viewer) : [];
+    const readable = await readableProjectsWhere(viewer, this.prisma);
     return maybePaginate(
       this.prisma.project,
       {
         where: {
+          AND: [readable],
           ...(filters.departmentId && { departmentId: filters.departmentId }),
           ...(filters.status && { status: filters.status }),
           ...(filters.clientId && { clientId: filters.clientId }),
@@ -103,20 +102,7 @@ export class ProjectsService {
                   { id: { in: sharedIds } },
                 ],
               }
-            : deptCodes && {
-                OR: [
-                  {
-                    department: { code: { in: deptCodes } },
-                    OR: [
-                      { visibility: "department" },
-                      { createdBy: viewer.id },
-                      { team: { some: { userId: viewer.id } } },
-                    ],
-                  },
-                  { id: { in: sharedIds } },
-                  companyProjectsOf(viewer.id),
-                ],
-              }),
+            : {}),
         },
         include: {
           department: true,
@@ -159,20 +145,8 @@ export class ProjectsService {
       }
       return project;
     }
-    const deptCodes = await viewerDepartmentCodes(viewer, this.prisma);
-    const needsMembershipCheck = deptCodes
-      ? !deptCodes.includes(project.department!.code) ||
-        (project.visibility === "restricted" && project.createdBy !== viewer.id)
-      : false; // admin/CEO (deptCodes === null) always see everything
-    if (needsMembershipCheck) {
-      const isTeamMember = await this.prisma.projectTeamMember.findFirst({
-        where: { projectId: id, userId: viewer.id },
-        select: { id: true },
-      });
-      const shared =
-        !isTeamMember && (await hasResourceGrant("project", id, viewer, "read", this.prisma));
-      if (!isTeamMember && !shared) throw new NotFoundException("Project not found");
-    }
+    if (!(await canReadDepartmentProject(project, viewer, this.prisma)))
+      throw new NotFoundException("Project not found");
     return project;
   }
 
@@ -307,19 +281,22 @@ export class ProjectsService {
     return project;
   }
 
-  /** A project owned by its creator and team, not a department. CEO and department heads only. */
+  /** Company projects belong to their whole team. */
   private async createCompanyProject(dto: CreateProjectDto, user: AuthenticatedUser) {
-    if (!userIsAdminOrCeo(user) && !user.roles.includes("department_head")) {
-      throw new ForbiddenException(
-        "Only the CEO and department heads can set up company projects.",
-      );
-    }
-    const members = (dto.members ?? []).filter((m) => m.userId !== user.id);
+    const memberIds = [...new Set((dto.members ?? []).map((m) => m.userId))].filter(
+      (id) => id !== user.id,
+    );
     const people = await this.prisma.user.findMany({
-      where: { id: { in: [user.id, ...members.map((m) => m.userId)] } },
+      where: { id: { in: [user.id, ...memberIds] }, isActive: true },
       select: { id: true, fullName: true, email: true },
     });
     const nameOf = new Map(people.map((p) => [p.id, p.fullName ?? p.email]));
+    if (!nameOf.has(user.id) || memberIds.some((id) => !nameOf.has(id))) {
+      throw new BadRequestException("Choose active staff members for the project team.");
+    }
+    if (dto.startDate && dto.endDate && new Date(dto.endDate) < new Date(dto.startDate)) {
+      throw new BadRequestException("The end date cannot be before the start date.");
+    }
     const project = await this.prisma.project.create({
       data: {
         scope: "company",
@@ -334,32 +311,27 @@ export class ProjectsService {
         createdBy: user.id,
         team: {
           create: [
-            { userId: user.id, name: nameOf.get(user.id) ?? "Lead", role: "Lead", access: "lead" },
-            ...members
-              .filter((m) => nameOf.has(m.userId))
-              .map((m) => ({
-                userId: m.userId,
-                name: nameOf.get(m.userId)!,
-                role: m.access === "viewer" ? "Viewer" : "Member",
-                access: m.access,
-              })),
+            ...[user.id, ...memberIds].map((userId) => ({
+              userId,
+              name: nameOf.get(userId)!,
+              role: "Member",
+              access: "member" as const,
+            })),
           ],
         },
       },
     });
     await Promise.all(
-      members
-        .filter((m) => nameOf.has(m.userId))
-        .map((m) =>
-          this.notificationsService.notify({
-            userId: m.userId,
-            type: "project_shared",
-            title: `You were added to: ${project.name}`,
-            resourceType: "project",
-            resourceId: project.id,
-            createdBy: user.id,
-          }),
-        ),
+      memberIds.map((userId) =>
+        this.notificationsService.notify({
+          userId,
+          type: "project_shared",
+          title: `You were added to: ${project.name}`,
+          resourceType: "project",
+          resourceId: project.id,
+          createdBy: user.id,
+        }),
+      ),
     );
     return project;
   }
@@ -425,6 +397,16 @@ export class ProjectsService {
     const project = await this.loadAccessTarget(id);
     if (project.scope === "company") {
       await assertProjectManage(project, user, this.prisma);
+      const start =
+        dto.startDate === undefined
+          ? project.startDate
+          : dto.startDate
+            ? new Date(dto.startDate)
+            : null;
+      const end =
+        dto.endDate === undefined ? project.endDate : dto.endDate ? new Date(dto.endDate) : null;
+      if (start && end && end < start)
+        throw new BadRequestException("The end date cannot be before the start date.");
     } else {
       await this.assertProjectAccess(id, user);
     }
@@ -461,6 +443,7 @@ export class ProjectsService {
     if (project.scope === "company") {
       delete rest.departmentId;
       delete rest.serviceLineId;
+      delete rest.visibility;
     }
     const stageMoved =
       dto.deliveryStage !== undefined && dto.deliveryStage !== project.deliveryStage;
@@ -485,7 +468,8 @@ export class ProjectsService {
         userId: user.id,
       });
     }
-    if (memberIds?.length) await this.grantTeamAccess(id, updated.name, memberIds, user);
+    if (project.scope !== "company" && memberIds?.length)
+      await this.grantTeamAccess(id, updated.name, memberIds, user);
 
     // A timeline extension is only meaningful when a real previous end date got pushed later —
     // first-time-set isn't an extension, and a date moving earlier isn't either.
@@ -558,6 +542,10 @@ export class ProjectsService {
       where: { id: milestoneId },
       data: {
         ...dto,
+        ...(dto.isComplete !== undefined &&
+          dto.isComplete !== milestone.isComplete && {
+            completedAt: dto.isComplete ? new Date() : null,
+          }),
         dueDate: dto.dueDate ? new Date(dto.dueDate) : undefined,
       },
     });
@@ -580,7 +568,7 @@ export class ProjectsService {
   }
 
   async createDeliverable(projectId: string, dto: CreateDeliverableDto, user: AuthenticatedUser) {
-    await this.assertProjectAccess(projectId, user, { checkRole: true });
+    await this.assertProjectAccess(projectId, user);
     return this.prisma.projectDeliverable.create({
       data: {
         projectId,
@@ -596,7 +584,7 @@ export class ProjectsService {
 
   async updateDeliverable(id: string, dto: UpdateDeliverableDto, user: AuthenticatedUser) {
     const existing = await this.prisma.projectDeliverable.findUniqueOrThrow({ where: { id } });
-    await this.assertProjectAccess(existing.projectId, user, { checkRole: true });
+    await this.assertProjectAccess(existing.projectId, user);
     const statusChanged = dto.status !== undefined && dto.status !== existing.status;
     return this.prisma.projectDeliverable.update({
       where: { id },
@@ -612,13 +600,14 @@ export class ProjectsService {
 
   async removeDeliverable(id: string, user: AuthenticatedUser) {
     const existing = await this.prisma.projectDeliverable.findUniqueOrThrow({ where: { id } });
-    await this.assertProjectAccess(existing.projectId, user, { checkRole: true });
+    await this.assertProjectAccess(existing.projectId, user);
     return this.prisma.projectDeliverable.delete({ where: { id } });
   }
 
   // Financials are read live from Budget/Invoice via the project's linked contract —
   // no separate project-financials table, so there's nothing to keep in sync.
-  async getFinancials(projectId: string) {
+  async getFinancials(projectId: string, viewer: AuthenticatedUser) {
+    await this.assertCanRead(projectId, viewer);
     const project = await this.prisma.project.findUniqueOrThrow({ where: { id: projectId } });
     if (!project.contractId) {
       return { hasContract: false as const };
@@ -705,15 +694,7 @@ export class ProjectsService {
     },
     user: AuthenticatedUser,
   ) {
-    const target = await this.loadAccessTarget(projectId);
-    // Viewers of a company project may reply, but not start a discussion.
-    const replyingViewer =
-      target.scope === "company" &&
-      !!dto.parentId &&
-      (await companyProjectRole(target, user, this.prisma)) === "viewer";
-    const project = replyingViewer
-      ? target
-      : await this.assertProjectAccess(projectId, user, { checkRole: true });
+    const project = await this.assertProjectAccess(projectId, user);
     const parent = dto.parentId
       ? await this.prisma.projectActivity.findUnique({
           where: { id: dto.parentId },
@@ -805,6 +786,11 @@ export class ProjectsService {
     const activity = await this.prisma.projectActivity.findUniqueOrThrow({
       where: { id: activityId },
     });
+    const project = await this.loadAccessTarget(activity.projectId);
+    if (project.scope === "company") {
+      await assertProjectWrite(project, user, this.prisma);
+      return this.prisma.projectActivity.delete({ where: { id: activityId } });
+    }
     const isAdminOrCeo = user.roles.includes("system_admin") || user.roles.includes("ceo");
     if (activity.createdBy !== user.id && !isAdminOrCeo) {
       throw new ForbiddenException("You can only delete your own activity entries");
@@ -815,16 +801,12 @@ export class ProjectsService {
   /** Shared by every Project Workspace sub-resource (cost items, team, RACI, RAID) — fetch the
    * parent project with its department and assert access once instead of repeating the
    * findUniqueOrThrow + assertDepartmentAccess pair at every call site. */
-  private async assertProjectAccess(
-    projectId: string,
-    user: AuthenticatedUser,
-    options: { checkRole?: boolean } = {},
-  ) {
+  private async assertProjectAccess(projectId: string, user: AuthenticatedUser) {
     const project = await this.loadAccessTarget(projectId);
     if (project.scope === "department") {
       if (await hasResourceGrant("project", projectId, user, "write", this.prisma)) return project;
     }
-    await assertProjectWrite(project, user, this.prisma, options);
+    await assertProjectWrite(project, user, this.prisma);
     return project;
   }
 
@@ -835,23 +817,29 @@ export class ProjectsService {
     });
   }
 
-  /** Company projects are team-only; department projects keep their open reads. */
   private async assertCanRead(projectId: string, viewer: AuthenticatedUser) {
     const project = await this.prisma.project.findUniqueOrThrow({
       where: { id: projectId },
-      select: { id: true, scope: true, leadId: true },
+      select: {
+        id: true,
+        scope: true,
+        leadId: true,
+        visibility: true,
+        createdBy: true,
+        department: { select: { id: true, code: true } },
+      },
     });
-    if (
-      project.scope === "company" &&
-      !(await canReadCompanyProject(project, viewer, this.prisma))
-    ) {
-      throw new NotFoundException("Project not found");
-    }
+    const allowed =
+      project.scope === "company"
+        ? await canReadCompanyProject(project, viewer, this.prisma)
+        : await canReadDepartmentProject(project, viewer, this.prisma);
+    if (!allowed) throw new NotFoundException("Project not found");
   }
 
   /* ---------- Cost items (Financials tab: budget vs actual by category) ---------- */
 
-  listCostItems(projectId: string) {
+  async listCostItems(projectId: string, viewer: AuthenticatedUser) {
+    await this.assertCanRead(projectId, viewer);
     return this.prisma.projectCostItem.findMany({
       where: { projectId },
       orderBy: { createdAt: "asc" },
@@ -898,6 +886,7 @@ export class ProjectsService {
 
   async createTeamMember(projectId: string, dto: CreateTeamMemberDto, user: AuthenticatedUser) {
     const project = await this.loadAccessTarget(projectId);
+    let data = dto;
     if (project.scope === "company") {
       await assertProjectManage(project, user, this.prisma);
       if (!dto.userId) throw new BadRequestException("Choose a person to add.");
@@ -906,11 +895,17 @@ export class ProjectsService {
         select: { id: true },
       });
       if (already) throw new BadRequestException("That person is already on this project.");
+      const person = await this.prisma.user.findFirst({
+        where: { id: dto.userId, isActive: true },
+        select: { fullName: true, email: true },
+      });
+      if (!person) throw new BadRequestException("Choose an active staff member.");
+      data = { ...dto, name: person.fullName ?? person.email, role: "Member", access: "member" };
     } else {
       await this.assertProjectAccess(projectId, user);
     }
     const member = await this.prisma.projectTeamMember.create({
-      data: { projectId, ...dto },
+      data: { projectId, ...data },
       include: { user: { select: userSelect } },
     });
     if (dto.userId && dto.userId !== user.id) {
@@ -933,14 +928,14 @@ export class ProjectsService {
     const project = await this.loadAccessTarget(member.projectId);
     if (project.scope === "company") {
       await assertProjectManage(project, user, this.prisma);
-      if (member.access === "lead")
-        throw new BadRequestException("The lead's access can't change.");
+      if (dto.userId !== undefined && dto.userId !== member.userId)
+        throw new BadRequestException("Remove the person and add their replacement instead.");
     } else {
       await this.assertProjectAccess(member.projectId, user);
     }
     const updated = await this.prisma.projectTeamMember.update({
       where: { id: memberId },
-      data: dto,
+      data: project.scope === "company" ? { access: "member", role: "Member" } : dto,
       include: { user: { select: userSelect } },
     });
     return { ...updated, user: updated.user ? maskUserRef(updated.user, user) : null };
@@ -953,7 +948,17 @@ export class ProjectsService {
     const project = await this.loadAccessTarget(member.projectId);
     if (project.scope === "company") {
       await assertProjectManage(project, user, this.prisma);
-      if (member.access === "lead") throw new BadRequestException("The lead can't be removed.");
+      return this.prisma.$transaction(
+        async (tx) => {
+          const count = await tx.projectTeamMember.count({
+            where: { projectId: project.id, userId: { not: null } },
+          });
+          if (member.userId && count <= 1)
+            throw new BadRequestException("Keep at least one person on the project team.");
+          return tx.projectTeamMember.delete({ where: { id: memberId } });
+        },
+        { isolationLevel: "Serializable" },
+      );
     } else {
       await this.assertProjectAccess(member.projectId, user);
     }
@@ -962,7 +967,8 @@ export class ProjectsService {
 
   /* ---------- RACI matrix ---------- */
 
-  listRaci(projectId: string) {
+  async listRaci(projectId: string, viewer: AuthenticatedUser) {
+    await this.assertCanRead(projectId, viewer);
     return this.prisma.projectRaciEntry.findMany({
       where: { projectId },
       orderBy: { sortOrder: "asc" },
@@ -989,7 +995,8 @@ export class ProjectsService {
 
   /* ---------- RAID log ---------- */
 
-  listRaid(projectId: string) {
+  async listRaid(projectId: string, viewer: AuthenticatedUser) {
+    await this.assertCanRead(projectId, viewer);
     return this.prisma.projectRaidEntry.findMany({
       where: { projectId },
       orderBy: { createdAt: "desc" },

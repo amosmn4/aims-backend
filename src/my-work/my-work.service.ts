@@ -18,6 +18,14 @@ export class MyWorkService {
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const soon = new Date(today.getTime() + 7 * DAY);
     const reviewer = isAdminOrCeo(user);
+    const taskScope = reviewer
+      ? {}
+      : {
+          OR: [
+            { project: { scope: "department" as const } },
+            { project: { scope: "company" as const, team: { some: { userId: user.id } } } },
+          ],
+        };
 
     const [
       tasks,
@@ -33,7 +41,7 @@ export class MyWorkService {
       reports,
     ] = await Promise.all([
       this.prisma.task.findMany({
-        where: { assigneeId: user.id, status: { not: "completed" } },
+        where: { ...taskScope, assigneeId: user.id, status: { not: "completed" } },
         select: {
           id: true,
           title: true,
@@ -45,16 +53,24 @@ export class MyWorkService {
         take: 8,
       }),
       this.prisma.task.count({
-        where: { assigneeId: user.id, status: { not: "completed" }, dueDate: { lt: today } },
+        where: {
+          ...taskScope,
+          assigneeId: user.id,
+          status: { not: "completed" },
+          dueDate: { lt: today },
+        },
       }),
       this.prisma.task.count({
         where: {
+          ...taskScope,
           assigneeId: user.id,
           status: { not: "completed" },
           dueDate: { gte: today, lte: soon },
         },
       }),
-      this.prisma.task.count({ where: { assigneeId: user.id, status: { not: "completed" } } }),
+      this.prisma.task.count({
+        where: { ...taskScope, assigneeId: user.id, status: { not: "completed" } },
+      }),
       this.prisma.clientRequest.findMany({
         where: { assignedToId: user.id, stage: { notIn: [...CLOSED_REQUEST_STAGES] } },
         select: {
@@ -71,7 +87,10 @@ export class MyWorkService {
       }),
       this.prisma.project.findMany({
         where: {
-          OR: [{ createdBy: user.id }, { team: { some: { userId: user.id } } }],
+          OR: [
+            { scope: "department", createdBy: user.id },
+            { team: { some: { userId: user.id } } },
+          ],
           status: { notIn: ["completed", "cancelled"] },
           AND: [{ OR: [{ health: { in: ["amber", "red"] } }, { endDate: { lt: today } }] }],
         },

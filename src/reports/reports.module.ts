@@ -4,19 +4,20 @@ import { DocumentsModule } from "../documents/documents.module";
 import { AiModule } from "../ai/ai.module";
 import { ReportsController } from "./reports.controller";
 import { ReportsService } from "./reports.service";
-import { ReportAccessService } from "./report-access.service";
+import { ReportAccessModule } from "./report-access.module";
 import { ReportContentService } from "./report-content.service";
 import { ReportsAiService } from "./reports-ai.service";
 import { ReportNotifierService } from "./report-notifier.service";
 import { ReportsInboxService } from "./reports-inbox.service";
 import { ReportSchedulesService } from "./report-schedules.service";
+import { ExecutiveOverviewService } from "./executive-overview.service";
 
 @Module({
-  imports: [NotificationsModule, DocumentsModule, AiModule],
+  imports: [NotificationsModule, DocumentsModule, AiModule, ReportAccessModule],
   controllers: [ReportsController],
   providers: [
     ReportsService,
-    ReportAccessService,
+    ExecutiveOverviewService,
     ReportContentService,
     ReportsAiService,
     ReportNotifierService,

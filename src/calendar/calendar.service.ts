@@ -104,6 +104,12 @@ export class CalendarService {
         }),
         this.prisma.task.findMany({
           where: {
+            ...(!admin && {
+              OR: [
+                { project: { scope: "department" as const } },
+                { project: companyProjectsOf(viewer.id) },
+              ],
+            }),
             status: { not: "completed" },
             dueDate: { gte: from, lte: to },
             ...(departmentId && { project: { departmentId } }),
