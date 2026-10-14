@@ -37,7 +37,7 @@ describe("report list scope", () => {
       prisma as unknown as PrismaService,
       {} as DocumentsService,
       {} as ReportNotifierService,
-      {} as ReportAccessService,
+      { sharedDepartmentIds: jest.fn(async () => ["hr"]) } as unknown as ReportAccessService,
       {} as ReportContentService,
     );
     return { prisma, service };
@@ -122,6 +122,7 @@ function fixture(status: ReportStatus = "draft", template: ReportTemplate = "dep
     canWrite: jest.fn(async () => true),
     isTeamReport: jest.fn(async () => false),
     projectTeamIds: jest.fn(async () => ["author", "marketing", "operations"]),
+    reportTeamIds: jest.fn(async (_report: unknown) => ["author", "marketing", "operations"]),
     isReviewer: jest.fn(async () => true),
   };
   const content = {
@@ -471,5 +472,95 @@ describe("shared company reports", () => {
     const again = await service.start(dto, { ...user, id: "operations" });
     expect(again.id).toBe("shared");
     expect(prisma.report.create).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("shared department report editing", () => {
+  function departmentFixture(status: ReportStatus = "draft") {
+    const result = fixture(status);
+    result.report.createdBy = "a-colleague";
+    result.access.isTeamReport.mockResolvedValue(true);
+    return result;
+  }
+
+  it("lets a teammate save another author's department draft with its version", async () => {
+    const { service, report } = departmentFixture();
+    await expect(
+      service.update(
+        report.id,
+        { expectedUpdatedAt: report.updatedAt.toISOString(), summary: "Department progress" },
+        user,
+      ),
+    ).resolves.toMatchObject({ summary: "Department progress" });
+  });
+
+  it("prevents read-only colleagues from editing a shared department draft", async () => {
+    const { service, access, report, prisma } = departmentFixture();
+    access.canWrite.mockResolvedValue(false);
+    await expect(
+      service.update(report.id, { expectedUpdatedAt: report.updatedAt.toISOString() }, user),
+    ).rejects.toThrow(ForbiddenException);
+    expect(prisma.report.update).not.toHaveBeenCalled();
+  });
+
+  it("requires a version before saving a department draft", async () => {
+    const { service, report, prisma } = departmentFixture();
+    await expect(
+      service.update(report.id, { summary: "An unversioned edit" }, user),
+    ).rejects.toThrow(BadRequestException);
+    expect(prisma.report.update).not.toHaveBeenCalled();
+  });
+
+  it("sends department feedback to the authorised team", async () => {
+    const { service, report, notifier, access } = departmentFixture("submitted");
+    await service.review(
+      report.id,
+      { decision: "request_changes", note: "Add the client outcomes" },
+      { ...user, roles: ["ceo"] },
+    );
+    expect(access.reportTeamIds).toHaveBeenCalledWith(report);
+    expect(notifier.notify).toHaveBeenCalledWith(
+      ["author", "marketing", "operations"],
+      expect.objectContaining({ type: "report_reviewed" }),
+    );
+  });
+});
+
+describe("opening a department report already started by a teammate", () => {
+  it("opens the same period without creating another report", async () => {
+    const existing = {
+      id: "department-draft",
+      createdBy: "colleague",
+      creator: { fullName: "Colleague", email: "colleague@example.test", roles: [] },
+    };
+    const prisma = {
+      report: { findFirst: jest.fn(async () => existing), create: jest.fn(async () => ({})) },
+    };
+    const access = {
+      resolveSubject: jest.fn(async () => ({
+        name: "HR",
+        departmentId: "hr",
+        subjectUserId: null,
+        reviewerKind: "ceo",
+      })),
+      canWrite: jest.fn(async () => true),
+      isTeamReport: jest.fn(async () => true),
+    };
+    const content = { build: jest.fn(async () => ({ figures: [], lists: {} })) };
+    const service = new ReportsService(
+      prisma as unknown as PrismaService,
+      {} as DocumentsService,
+      {} as ReportNotifierService,
+      access as unknown as ReportAccessService,
+      content as unknown as ReportContentService,
+    );
+    expect(
+      await service.start(
+        { kind: "department", subjectId: "hr", periodStart: "2026-09-01", periodEnd: "2026-09-30" },
+        user,
+      ),
+    ).toMatchObject({ id: "department-draft" });
+    expect(prisma.report.create).not.toHaveBeenCalled();
+    expect(content.build).not.toHaveBeenCalled();
   });
 });

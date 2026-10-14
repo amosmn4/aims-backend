@@ -1,5 +1,5 @@
 import { describe, expect, it, jest } from "@jest/globals";
-import { BadRequestException, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, NotFoundException } from "@nestjs/common";
 import { DocumentsService } from "./documents.service";
 import { ReportAccessService } from "../reports/report-access.service";
 import type { PrismaService } from "../prisma/prisma.service";
@@ -414,5 +414,84 @@ describe("company file sharing controls", () => {
     expect(prisma.documentAccessGrant.deleteMany).toHaveBeenCalledWith({
       where: { documentId: "file" },
     });
+  });
+});
+
+describe("shared department report files", () => {
+  function departmentFile(status = "draft", allowed = true, writable = true) {
+    const report = {
+      id: "report",
+      kind: "department",
+      subjectId: "hr",
+      subjectUserId: null,
+      departmentId: "hr",
+      status,
+      createdBy: "a-colleague",
+      department: { code: "hr" },
+    };
+    const doc = {
+      id: "file",
+      resourceType: "department_report",
+      resourceId: "report",
+      createdBy: "a-colleague",
+      latestVersion: null,
+      accessGrants: [{ accessType: "user", userId: "outsider" }],
+    };
+    const prisma = {
+      department: { findMany: jest.fn(async () => []) },
+      report: { findMany: jest.fn(async () => [report]) },
+      userPermissionOverride: {
+        findMany: jest.fn(async () => [
+          ...(allowed ? [] : [{ departmentId: "hr", action: "read", effect: "deny" }]),
+          ...(writable ? [] : [{ departmentId: "hr", action: "write", effect: "deny" }]),
+        ]),
+      },
+      document: {
+        findUniqueOrThrow: jest.fn(async () => doc),
+        update: jest.fn(async (_query: unknown) => ({})),
+      },
+    };
+    const access = {
+      isTeamReport: jest.fn(async () => true),
+      canRead: jest.fn(async () => allowed),
+      canWrite: jest.fn(async () => writable),
+      loadReadable: jest.fn(async () => report),
+    };
+    return {
+      prisma,
+      service: new DocumentsService(
+        prisma as unknown as PrismaService,
+        {} as StorageService,
+        {} as NotificationsService,
+        access as unknown as ReportAccessService,
+      ),
+    };
+  }
+
+  it("shares a colleague's files despite old private document grants", async () => {
+    await expect(departmentFile().service.findOne("file", user)).resolves.toMatchObject({
+      id: "file",
+      teamShared: true,
+    });
+  });
+
+  it("rejects a grant to someone outside the report's department", async () => {
+    await expect(
+      departmentFile("draft", false).service.findOne("file", { ...user, id: "outsider" }),
+    ).rejects.toThrow(NotFoundException);
+  });
+
+  it("keeps a department draft's files private from read-only staff", async () => {
+    await expect(
+      departmentFile("draft", true, false).service.findOne("file", user),
+    ).rejects.toThrow(NotFoundException);
+  });
+
+  it.each(["submitted", "approved"])("keeps %s report attachments locked", async (status) => {
+    const { service, prisma } = departmentFile(status);
+    await expect(
+      service.update("file", { title: "Changed after submission" }, user),
+    ).rejects.toThrow(ForbiddenException);
+    expect(prisma.document.update).not.toHaveBeenCalled();
   });
 });

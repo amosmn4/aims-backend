@@ -134,3 +134,109 @@ describe("shared team report visibility", () => {
     });
   });
 });
+
+describe("shared department report boundaries", () => {
+  it("lets the CEO open the department's shared draft", async () => {
+    await expect(
+      fixture("department", "draft").service.loadReadable("report", { ...user, roles: ["ceo"] }),
+    ).resolves.toMatchObject({ id: "report" });
+  });
+
+  it("keeps shared department drafts hidden from read-only staff", async () => {
+    await expect(
+      fixture("department", "draft").service.loadReadable("report", {
+        ...user,
+        roles: ["general_staff"],
+      }),
+    ).rejects.toThrow(NotFoundException);
+  });
+
+  it("denies unrelated departments access to a department draft", async () => {
+    await expect(
+      fixture("department", "draft").service.loadReadable("report", {
+        ...user,
+        roles: ["marketing"],
+        departmentId: "marketing",
+      }),
+    ).rejects.toThrow(NotFoundException);
+  });
+
+  it("excludes denied, read-only and inactive candidates from feedback recipients", async () => {
+    const prisma = {
+      department: { findUnique: jest.fn(async () => ({ id: "hr", code: "hr" })) },
+      user: {
+        findMany: jest.fn(async (_query: unknown) => [
+          { id: "writer", departmentId: "hr", roles: [{ role: "hr" }], permissionOverrides: [] },
+          {
+            id: "denied",
+            departmentId: "hr",
+            roles: [{ role: "hr" }],
+            permissionOverrides: [{ action: "write", effect: "deny" }],
+          },
+          {
+            id: "read-only",
+            departmentId: "hr",
+            roles: [{ role: "general_staff" }],
+            permissionOverrides: [],
+          },
+          {
+            id: "granted",
+            departmentId: "other",
+            roles: [{ role: "general_staff" }],
+            permissionOverrides: [
+              { action: "write", effect: "grant" },
+              { action: "read", effect: "grant" },
+            ],
+          },
+        ]),
+      },
+    };
+    const service = new ReportAccessService(prisma as unknown as PrismaService);
+    expect(await service.reportTeamIds({ kind: "department", subjectId: "hr" })).toEqual([
+      "writer",
+      "granted",
+    ]);
+    expect(prisma.user.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ isActive: true }) }),
+    );
+  });
+
+  it("requires read access as well as a write grant for a shared department report", async () => {
+    const prisma = {
+      department: {
+        findUnique: jest.fn(async () => ({ id: "hr", code: "hr" })),
+        findMany: jest.fn(async () => [{ id: "hr", code: "hr" }]),
+      },
+      userPermissionOverride: {
+        findUnique: jest.fn(
+          async (query: { where: { userId_departmentId_action: { action: string } } }) => ({
+            effect: query.where.userId_departmentId_action.action === "read" ? "deny" : "grant",
+          }),
+        ),
+        findMany: jest.fn(async () => [
+          { departmentId: "hr", action: "read", effect: "deny" },
+          { departmentId: "hr", action: "write", effect: "grant" },
+        ]),
+      },
+    };
+    const service = new ReportAccessService(prisma as unknown as PrismaService);
+    expect(
+      await service.canWrite({ kind: "department", subjectId: "hr", subjectUserId: null }, user),
+    ).toBe(false);
+    expect(await service.sharedDepartmentIds(user)).toEqual([]);
+  });
+
+  it("includes only departments where the viewer can prepare reports", async () => {
+    const prisma = {
+      department: {
+        findMany: jest.fn(async () => [
+          { id: "hr", code: "hr" },
+          { id: "it", code: "it" },
+        ]),
+      },
+      userPermissionOverride: { findMany: jest.fn(async () => []) },
+    };
+    const service = new ReportAccessService(prisma as unknown as PrismaService);
+    expect(await service.sharedDepartmentIds(user)).toEqual(["hr"]);
+  });
+});

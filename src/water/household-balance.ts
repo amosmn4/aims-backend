@@ -1,9 +1,17 @@
+import { dialFlow } from "./meter-flow";
+
 // Prepaid household meters: a reading is the credit balance left, so
 // used = previous balance + units bought since − balance now.
 
-export type BalanceReading = { id: string; readingDate: Date; value: number };
+export type BalanceReading = {
+  id: string;
+  readingDate: Date;
+  value: number;
+  cumulativeUsage?: number | null;
+};
 export type BalancePurchase = { recordedAt: Date; units: number };
-export type BalanceFlag = "balance_too_high" | "no_use" | "high_use";
+export type BalanceFlag =
+  "balance_too_high" | "counter_decreased" | "usage_mismatch" | "no_use" | "high_use";
 
 export type BalancePeriod = {
   readingId: string;
@@ -12,7 +20,11 @@ export type BalancePeriod = {
   openingBalance: number;
   purchased: number;
   closingBalance: number;
-  /** Negative means the balance rose more than purchases explain. */
+  openingCumulativeUsage: number | null;
+  closingCumulativeUsage: number | null;
+  measuredUsed: number | null;
+  creditUsed: number;
+  difference: number | null;
   used: number;
   days: number;
   perDay: number | null;
@@ -53,11 +65,19 @@ export function balancePeriods(
 ): BalancePeriod[] {
   const sorted = [...readings].sort((a, b) => a.readingDate.getTime() - b.readingDate.getTime());
   const periods: BalancePeriod[] = [];
+  let lastKnownCounter = sorted[0]?.cumulativeUsage ?? null;
   for (let i = 1; i < sorted.length; i++) {
     const prev = sorted[i - 1];
     const cur = sorted[i];
     const purchased = purchasedBetween(purchases, prev.readingDate, cur.readingDate);
-    const used = prev.value + purchased - cur.value;
+    const creditUsed = prev.value + purchased - cur.value;
+    const counterDelta =
+      prev.cumulativeUsage != null && cur.cumulativeUsage != null
+        ? cur.cumulativeUsage - prev.cumulativeUsage
+        : null;
+    const measuredUsed = counterDelta !== null && counterDelta >= 0 ? counterDelta : null;
+    const used = measuredUsed ?? creditUsed;
+    const difference = measuredUsed === null ? null : measuredUsed - creditUsed;
     const days = (cur.readingDate.getTime() - prev.readingDate.getTime()) / DAY_MS;
     const perDay = days >= 1 ? used / days : null;
 
@@ -68,9 +88,24 @@ export function balancePeriods(
     const baselinePerDay = history.length >= BASELINE_MIN_PERIODS ? median(history) : null;
 
     const flags: BalanceFlag[] = [];
-    if (used < -BALANCE_TOLERANCE) flags.push("balance_too_high");
-    else if (days >= NO_USE_MIN_DAYS && used <= BALANCE_TOLERANCE) flags.push("no_use");
-    else if (baselinePerDay && perDay != null && perDay > HIGH_USE_FACTOR * baselinePerDay) {
+    if (
+      cur.cumulativeUsage != null &&
+      lastKnownCounter !== null &&
+      cur.cumulativeUsage < lastKnownCounter
+    )
+      flags.push("counter_decreased");
+    if (cur.cumulativeUsage != null) lastKnownCounter = cur.cumulativeUsage;
+    if (creditUsed < -BALANCE_TOLERANCE) flags.push("balance_too_high");
+    if (difference !== null && Math.abs(difference) > BALANCE_TOLERANCE)
+      flags.push("usage_mismatch");
+    if (flags.length === 0 && days >= NO_USE_MIN_DAYS && used <= BALANCE_TOLERANCE)
+      flags.push("no_use");
+    else if (
+      flags.length === 0 &&
+      baselinePerDay &&
+      perDay != null &&
+      perDay > HIGH_USE_FACTOR * baselinePerDay
+    ) {
       flags.push("high_use");
     }
 
@@ -81,6 +116,11 @@ export function balancePeriods(
       openingBalance: prev.value,
       purchased: round2(purchased),
       closingBalance: cur.value,
+      openingCumulativeUsage: prev.cumulativeUsage ?? null,
+      closingCumulativeUsage: cur.cumulativeUsage ?? null,
+      measuredUsed: measuredUsed === null ? null : round2(measuredUsed),
+      creditUsed: round2(creditUsed),
+      difference: difference === null ? null : round2(difference),
       used: round2(used),
       days: round2(days),
       perDay: perDay == null ? null : round2(perDay),
@@ -91,26 +131,111 @@ export function balancePeriods(
   return periods;
 }
 
-/**
- * Units used in [start, end): opening is the last reading before `start`
- * (else the first inside), closing the last inside. Null when not measurable.
- */
 export function balanceUsageInWindow(
   readings: BalanceReading[],
   purchases: BalancePurchase[],
   start: Date,
   end: Date,
-): { used: number; openedAt: Date } | null {
-  const sorted = [...readings].sort((a, b) => a.readingDate.getTime() - b.readingDate.getTime());
-  const before = sorted.filter((r) => r.readingDate < start);
-  const inside = sorted.filter((r) => r.readingDate >= start && r.readingDate < end);
-  if (inside.length === 0) return null;
-  const opening = before.length > 0 ? before[before.length - 1] : inside[0];
-  const closing = inside[inside.length - 1];
-  if (opening === closing) return null;
-  const used =
-    opening.value +
-    purchasedBetween(purchases, opening.readingDate, closing.readingDate) -
-    closing.value;
-  return { used: Math.max(0, used), openedAt: opening.readingDate };
+) {
+  const periods = balancePeriods(readings, purchases);
+  const matching = periods.filter(
+    (period) => period.to > start && period.from < end && period.to > period.from,
+  );
+  if (matching.length === 0) return null;
+  const slices = matching.map((period) => {
+    const from = new Date(Math.max(start.getTime(), period.from.getTime()));
+    const to = new Date(Math.min(end.getTime(), period.to.getTime()));
+    const span = period.to.getTime() - period.from.getTime();
+    const fraction = (to.getTime() - from.getTime()) / span;
+    const balanceAt = (at: Date) =>
+      period.openingBalance +
+      purchasedBetween(purchases, period.from, at) -
+      (period.creditUsed * (at.getTime() - period.from.getTime())) / span;
+    return {
+      period,
+      from,
+      to,
+      fraction,
+      openingBalance:
+        balanceAt(from) -
+        (from.getTime() === start.getTime()
+          ? purchases
+              .filter((purchase) => purchase.recordedAt.getTime() === from.getTime())
+              .reduce((sum, purchase) => sum + purchase.units, 0)
+          : 0),
+      closingBalance:
+        balanceAt(to) -
+        (to.getTime() === end.getTime()
+          ? purchases
+              .filter((purchase) => purchase.recordedAt.getTime() === to.getTime())
+              .reduce((sum, purchase) => sum + purchase.units, 0)
+          : 0),
+    };
+  });
+  if (slices.some(({ period }) => period.flags.includes("counter_decreased"))) return null;
+  const from = slices[0].from;
+  const to = slices[slices.length - 1].to;
+  const counters = readings
+    .filter((reading) => reading.cumulativeUsage != null)
+    .sort((a, b) => a.readingDate.getTime() - b.readingDate.getTime());
+  const before = counters.filter((reading) => reading.readingDate < from).at(-1) ?? null;
+  const inside = counters.filter(
+    (reading) => reading.readingDate >= from && reading.readingDate < to,
+  );
+  const after = counters.find((reading) => reading.readingDate >= to) ?? null;
+  const counter = (reading: BalanceReading | null) =>
+    reading && { at: reading.readingDate, value: reading.cumulativeUsage! };
+  const flow = dialFlow(
+    {
+      before: counter(before),
+      first: counter(inside[0] ?? null),
+      last: counter(inside.at(-1) ?? null),
+      after: counter(after),
+    },
+    from,
+    to,
+  );
+  const comparable =
+    flow && flow.from.getTime() <= from.getTime() + 1 && flow.to.getTime() >= to.getTime() - 1;
+  const measuredUsed = comparable ? round2(flow.units) : null;
+  if (measuredUsed === null && slices.some(({ period }) => period.used < 0)) return null;
+  const counterEstimated =
+    measuredUsed !== null &&
+    (!counters.some((reading) => reading.readingDate.getTime() === from.getTime()) ||
+      !counters.some((reading) => reading.readingDate.getTime() === to.getTime()));
+  const creditUsed = round2(
+    slices.reduce((sum, slice) => sum + slice.period.creditUsed * slice.fraction, 0),
+  );
+  const intervalIssues = slices.filter(
+    ({ period }) =>
+      period.flags.includes("usage_mismatch") || period.flags.includes("balance_too_high"),
+  ).length;
+  return {
+    used:
+      measuredUsed ??
+      round2(slices.reduce((sum, slice) => sum + slice.period.used * slice.fraction, 0)),
+    openedAt: from,
+    closedAt: to,
+    complete: from.getTime() <= start.getTime() + 1 && to.getTime() >= end.getTime() - 1,
+    estimated: counterEstimated || slices.some((slice) => slice.fraction !== 1),
+    openingBalance: round2(slices[0].openingBalance),
+    closingBalance: round2(slices[slices.length - 1].closingBalance),
+    purchased: round2(
+      purchases
+        .filter(
+          (purchase) =>
+            (from.getTime() === start.getTime()
+              ? purchase.recordedAt >= from
+              : purchase.recordedAt > from) &&
+            (to.getTime() === end.getTime() ? purchase.recordedAt < to : purchase.recordedAt <= to),
+        )
+        .reduce((sum, purchase) => sum + purchase.units, 0),
+    ),
+    measuredUsed,
+    creditUsed,
+    difference: measuredUsed === null ? null : round2(measuredUsed - creditUsed),
+    issues:
+      intervalIssues ||
+      (measuredUsed !== null && Math.abs(measuredUsed - creditUsed) > BALANCE_TOLERANCE ? 1 : 0),
+  };
 }

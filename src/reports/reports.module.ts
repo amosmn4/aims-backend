@@ -11,9 +11,18 @@ import { ReportNotifierService } from "./report-notifier.service";
 import { ReportsInboxService } from "./reports-inbox.service";
 import { ReportSchedulesService } from "./report-schedules.service";
 import { ExecutiveOverviewService } from "./executive-overview.service";
+import { WaterModule } from "../water/water.module";
+import { WaterExpensesModule } from "../water/water-expenses.module";
 
 @Module({
-  imports: [NotificationsModule, DocumentsModule, AiModule, ReportAccessModule],
+  imports: [
+    NotificationsModule,
+    DocumentsModule,
+    AiModule,
+    ReportAccessModule,
+    WaterExpensesModule,
+    WaterModule,
+  ],
   controllers: [ReportsController],
   providers: [
     ReportsService,

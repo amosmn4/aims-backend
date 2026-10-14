@@ -20,6 +20,7 @@ function fixture() {
       ]),
     },
     project: {
+      count: jest.fn(async (_query: unknown) => 2),
       groupBy: jest.fn(async ({ by, where }: { by: string[]; where: { endDate?: unknown } }) =>
         by.length === 2
           ? [
@@ -63,6 +64,7 @@ function fixture() {
     projectActivity: {
       findMany: jest.fn(async (_query: unknown) => [{ summary: "a".repeat(300) }]),
     },
+    task: { count: jest.fn(async (_query: unknown) => 7) },
     tender: { count: jest.fn(async (_query: unknown) => 4) },
     companySettings: { findUnique: jest.fn(async () => ({ reportDueDay: 7 })) },
   };
@@ -74,6 +76,39 @@ afterEach(() => {
 });
 
 describe("CEO overview", () => {
+  it("builds chart figures from all scoped counts and counts dated completion and overdue work", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-10-12T09:00:00Z"));
+    const { service, prisma } = fixture();
+    const result = await service.overview(ceo);
+    expect(result.charts.projectStatuses).toContainEqual({ status: "completed", count: 4 });
+    expect(result.charts.workByTeam).toContainEqual({
+      id: "company",
+      name: "Company teams",
+      count: 2,
+    });
+    expect(result.charts.reporting).toContainEqual({ status: "not_sent", count: 2 });
+    expect(result.totals).toMatchObject({ completedInPeriod: 2, overdueTasks: 7 });
+    expect(prisma.project.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: "completed",
+          completedAt: {
+            gte: new Date("2026-08-31T21:00:00Z"),
+            lt: new Date("2026-09-30T21:00:00Z"),
+          },
+        }),
+      }),
+    );
+    expect(prisma.task.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: { not: "completed" },
+          project: expect.objectContaining({ status: { notIn: ["completed", "cancelled"] } }),
+        }),
+      }),
+    );
+  });
+
   it("refuses ordinary staff before reading company data", async () => {
     const { service, prisma } = fixture();
     await expect(service.overview({ ...ceo, roles: ["hr"] })).rejects.toThrow(ForbiddenException);

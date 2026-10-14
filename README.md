@@ -1,5 +1,63 @@
 # AIMS Backend
 
+## Household usage and prepaid reconciliation
+
+Household readings capture two separate values at one timestamp: `value` is prepaid units
+remaining, and `cumulativeUsage` is the lifetime usage counter. Counter movement measures
+consumption; opening prepaid balance plus purchases minus closing balance cross-checks it.
+For example, 519 to 525 measures 6 m³ used, while a balance of 10 falling to 4 confirms 6 m³.
+
+Apply `20261013160000_water_cumulative_usage` and regenerate Prisma before deploying this
+release. The migration adds a nullable column only. Existing balances are preserved and older
+captures have no invented counter value. Add historical counter readings only when they are known.
+
+`GET /water/household-reconciliation?month=YYYY-MM` returns counter usage, usage from credit,
+opening and closing balances, purchases for the matched meters, differences and reading coverage.
+It follows the existing Water role permissions. Readings also feed the overview, zone loss
+assessment, monthly reports, downloads and subscribed CEO monthly emails.
+
+Monthly reading and purchase windows use Nairobi time. Date-only expense dates remain calendar
+dates. Periods crossing a month boundary are allocated by elapsed time and marked as estimates.
+Purchases outside the captured intervals remain purchase-based estimates rather than measured
+usage. Partial coverage is provisional; a single capture cannot establish consumption. Counter
+decreases and mismatches with prepaid credit are flagged for checking. Meter replacement keeps
+the old meter's ending counter and the new meter's starting counter separate.
+
+## Water operating expenses
+
+Water expenses use the existing Finance expense records with an optional `waterCategory`.
+Apply the additive `20261013120000_water_expenses` migration and regenerate Prisma before
+deploying this release. No existing expenses are automatically classified as Water costs.
+
+The `/water/expenses` API supports monthly paginated lists, creation, editing and marking bills
+paid. `/water/expenses/summary?month=YYYY-MM` returns collections, recorded costs, paid costs,
+unpaid bills and category totals. Access follows the Water role, CEO and administrator rules;
+View As remains read-only. Water records are in KES and cannot be switched to another currency
+through Finance.
+
+Recorded costs use the expense date; payments use the payment date, including older bills.
+Unpaid amounts are bills recorded in the selected month that are currently unpaid. Collections
+less paid expenses is a cash movement figure before opening balances and unrecorded costs.
+The overview, monthly Water reports, PDF/Word exports and subscribed CEO monthly emails use
+these totals. Costs belong to the whole Water project and are not allocated to individual zones.
+
+## Shared department reports and CEO dashboard figures
+
+Department monthly reports are shared drafts for authorised report writers. Starting an existing
+period opens the same report; editing, refresh and submission follow department write permission
+and retain optimistic version checks. CEO feedback reaches active authorised teammates, including
+staff with explicit write grants. Read-only users cannot see another person's draft. Personal
+reports retain their existing privacy rules; Water report behaviour is preserved.
+
+Department report attachments inherit the report audience, including legacy files with private
+grants. Submitted and approved report attachments cannot be modified. No schema migration or data
+backfill is needed for these rules.
+
+GET /api/v1/executive-overview adds chart counts for project status, open work by team and monthly
+report coverage. Completed projects use recorded completion timestamps in the reporting month,
+with Nairobi calendar boundaries. Overdue tasks exclude completed tasks and closed projects.
+The overview keeps bounded review, risk and update previews and excludes Water from work figures.
+
 ## Shared company projects
 
 Any active staff member can create a company project and add colleagues from any department.

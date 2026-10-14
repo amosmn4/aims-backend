@@ -4,6 +4,9 @@ import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { EmailService } from "../notifications/email/email.service";
+import { WaterService } from "../water/water.service";
+import { WaterExpensesService } from "../water/water-expenses.service";
+import { WATER_EXPENSE_CATEGORY_LABELS } from "../water/dto/water-expense.dto";
 import {
   REPORT_EMAIL_DEFAULTS,
   emailTable,
@@ -14,6 +17,8 @@ import {
 const TIME_ZONE = "Africa/Nairobi";
 const monthName = (d: Date) => d.toLocaleString("en-GB", { month: "long", year: "numeric" });
 const money = (n: number) => `KES ${Math.round(n).toLocaleString("en-KE")}`;
+const waterMoney = (n: number) =>
+  `KES ${n.toLocaleString("en-KE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 function previousMonth(today = new Date()) {
   const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
@@ -29,6 +34,8 @@ export class ReportSchedulesService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly email: EmailService,
+    private readonly waterExpenses: WaterExpensesService,
+    private readonly water: WaterService,
   ) {}
 
   /** Reminds departments before the due day and tells the CEO about late reports. */
@@ -167,7 +174,7 @@ export class ReportSchedulesService {
     await this.sendTo(
       "water_monthly",
       `Water Project — ${monthName(start)}`,
-      await this.waterHtml(start, end),
+      await this.waterHtml(start),
     );
   }
 
@@ -334,18 +341,78 @@ export class ReportSchedulesService {
     ])}`;
   }
 
-  private async waterHtml(start: Date, end: Date) {
-    const [usage, active, inactive] = await Promise.all([
-      this.prisma.waterUsageRecord.aggregate({
-        where: { recordedAt: { gte: start, lte: end } },
-        _sum: { unitsSold: true, amountPaid: true },
-      }),
+  private async waterHtml(start: Date) {
+    const month = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, "0")}`;
+    const [summary, active, inactive, household] = await Promise.all([
+      this.waterExpenses.summary(month),
       this.prisma.waterMeter.count({ where: { isActive: true } }),
       this.prisma.waterMeter.count({ where: { isActive: false } }),
+      this.water.householdReconciliation(month),
     ]);
     return `<p>Water Project for ${monthName(start)}:</p>${emailTable([
-      ["Units sold", `${Number(usage._sum.unitsSold ?? 0).toLocaleString("en-KE")} m³`],
-      ["Revenue", money(Number(usage._sum.amountPaid ?? 0))],
+      ["Units sold", `${summary.unitsSold.toLocaleString("en-KE")} m³`],
+      ["Collections", waterMoney(summary.collections)],
+      [
+        "Household reading coverage",
+        `${household.reconciliation.metersRead} of ${household.reconciliation.metersTotal} meters`,
+      ],
+      [
+        "Opening prepaid balance",
+        household.reconciliation.openingBalance === null
+          ? "Not available"
+          : `${household.reconciliation.openingBalance.toLocaleString("en-KE")} m\u00b3`,
+      ],
+      [
+        "Purchases for meters read",
+        household.reconciliation.purchases === null
+          ? "Not available"
+          : `${household.reconciliation.purchases.toLocaleString("en-KE")} m\u00b3`,
+      ],
+      [
+        "Usage from lifetime counters",
+        household.reconciliation.measuredUsed === null
+          ? "Not available"
+          : `${household.reconciliation.measuredUsed.toLocaleString("en-KE")} m\u00b3`,
+      ],
+      [
+        "Usage from prepaid credit",
+        household.reconciliation.creditUsed === null
+          ? "Not available"
+          : `${household.reconciliation.creditUsed.toLocaleString("en-KE")} m\u00b3`,
+      ],
+      [
+        "Remaining prepaid units",
+        household.reconciliation.closingBalance === null
+          ? "Not available"
+          : `${household.reconciliation.closingBalance.toLocaleString("en-KE")} m\u00b3`,
+      ],
+      [
+        "Counter / credit difference",
+        household.reconciliation.difference === null
+          ? "Not available"
+          : `${household.reconciliation.difference.toLocaleString("en-KE")} m\u00b3`,
+      ],
+      [
+        "Coverage",
+        household.reconciliation.complete &&
+        !household.reconciliation.estimated &&
+        household.reconciliation.issues === 0
+          ? "Complete exact readings"
+          : "Partial, estimated or needs checking",
+      ],
+      ["Expenses recorded", waterMoney(summary.expenses.recorded)],
+      ["Expenses paid during the month", waterMoney(summary.expenses.paid)],
+      ["Unpaid bills recorded this month", waterMoney(summary.expenses.unpaid)],
+      ["Collections less paid expenses", waterMoney(summary.cashAfterExpenses)],
+      ...summary.expenses.categories
+        .filter((row) => row.count > 0)
+        .map(
+          (row) =>
+            [WATER_EXPENSE_CATEGORY_LABELS[row.category], waterMoney(row.recorded)] as [
+              string,
+              string,
+            ],
+        ),
       ["Active meters", String(active)],
       ["Inactive meters (not in use)", String(inactive)],
     ])}`;

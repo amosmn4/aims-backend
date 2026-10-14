@@ -1,7 +1,8 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import type { ReportKind, ReviewerKind } from "@prisma/client";
+import { AppRole, type ReportKind, type ReviewerKind } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
-import { can, canWithCapability } from "../common/permission-resolution";
+import { roleGrantsDefault, can, canWithCapability } from "../common/permission-resolution";
+import { userCan } from "../common/capabilities";
 import { isAdminOrCeo } from "../common/is-admin-or-ceo";
 import { hasResourceGrant } from "../common/has-resource-grant";
 import {
@@ -102,6 +103,8 @@ export class ReportAccessService {
       select: { id: true, code: true },
     });
     if (!department) return false;
+    if (department.code !== "water" && !(await can(user, department, "read", this.prisma)))
+      return false;
     return canWithCapability(user, department, "submit_reports", this.prisma);
   }
 
@@ -180,12 +183,105 @@ export class ReportAccessService {
   }
 
   async isTeamReport(report: { kind: ReportKind; subjectId: string }) {
+    if (report.kind === "department") {
+      const department = await this.prisma.department.findUnique({
+        where: { id: report.subjectId },
+        select: { code: true },
+      });
+      return !!department && department.code !== "water";
+    }
     if (report.kind !== "project") return false;
     const project = await this.prisma.project.findUnique({
       where: { id: report.subjectId },
       select: { scope: true },
     });
     return project?.scope === "company";
+  }
+
+  async sharedDepartmentIds(user: AuthenticatedUser) {
+    const departments = await this.prisma.department.findMany({
+      where: { code: { not: "water" } },
+      select: { id: true, code: true },
+    });
+    if (isAdminOrCeo(user)) return departments.map((department) => department.id);
+    const overrides = await this.prisma.userPermissionOverride.findMany({
+      where: {
+        userId: user.id,
+        departmentId: { in: departments.map((department) => department.id) },
+        action: { in: ["read", "write"] },
+      },
+      select: { departmentId: true, action: true, effect: true },
+    });
+    return departments
+      .filter((department) => {
+        const read = overrides.find(
+          (override) => override.departmentId === department.id && override.action === "read",
+        );
+        const write = overrides.find(
+          (override) => override.departmentId === department.id && override.action === "write",
+        );
+        const canRead = read
+          ? read.effect === "grant"
+          : roleGrantsDefault(user, department, "read");
+        const canWrite = write
+          ? write.effect === "grant"
+          : roleGrantsDefault(user, department, "write") &&
+            userCan(user, "submit_reports", department);
+        return canRead && canWrite;
+      })
+      .map((department) => department.id);
+  }
+
+  async reportTeamIds(report: { kind: ReportKind; subjectId: string }) {
+    if (report.kind !== "department") return this.projectTeamIds(report.subjectId);
+    const department = await this.prisma.department.findUnique({ where: { id: report.subjectId } });
+    if (!department || department.code === "water") return [];
+    const people = await this.prisma.user.findMany({
+      where: {
+        isActive: true,
+        OR: [
+          { departmentId: department.id },
+          ...((Object.values(AppRole) as string[]).includes(department.code)
+            ? [{ roles: { some: { role: department.code as AppRole } } }]
+            : []),
+          {
+            permissionOverrides: {
+              some: { departmentId: department.id, action: "write", effect: "grant" },
+            },
+          },
+        ],
+      },
+      select: {
+        id: true,
+        departmentId: true,
+        roles: { select: { role: true } },
+        permissionOverrides: {
+          where: { departmentId: department.id, action: { in: ["read", "write"] } },
+          select: { action: true, effect: true },
+        },
+      },
+    });
+    return people
+      .filter((person) => {
+        const candidate = {
+          id: person.id,
+          email: "",
+          departmentId: person.departmentId,
+          roles: person.roles.map((item) => item.role),
+        };
+        if (isAdminOrCeo(candidate)) return true;
+        const read = person.permissionOverrides.find((override) => override.action === "read");
+        const canRead = read
+          ? read.effect === "grant"
+          : roleGrantsDefault(candidate, department, "read");
+        if (!canRead) return false;
+        const override = person.permissionOverrides.find((override) => override.action === "write");
+        return override
+          ? override.effect === "grant"
+          : roleGrantsDefault(candidate, department, "write") &&
+              userCan(candidate, "submit_reports", department);
+      })
+      .map((person) => person.id);
   }
 
   private isDepartmentHead(departmentId: string | null, user: AuthenticatedUser) {
@@ -201,13 +297,14 @@ export class ReportAccessService {
     });
     if (!report) throw new NotFoundException("Report not found");
     if (!(await this.canRead(report, user))) throw new NotFoundException("Report not found");
-    if (
-      report.status === "draft" &&
-      report.createdBy !== user.id &&
-      !(await this.isTeamReport(report)) &&
-      (report.kind !== "department" || !(await this.canWrite(report, user)))
-    )
-      throw new NotFoundException("Report not found");
+    if (report.status === "draft" && report.createdBy !== user.id) {
+      const shared = await this.isTeamReport(report);
+      const allowed =
+        report.kind === "department"
+          ? (shared && isAdminOrCeo(user)) || (await this.canWrite(report, user))
+          : shared;
+      if (!allowed) throw new NotFoundException("Report not found");
+    }
     return report;
   }
 }

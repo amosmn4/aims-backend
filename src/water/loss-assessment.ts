@@ -28,7 +28,7 @@ export interface Purchase {
 export interface HouseholdSide {
   /** Used when balances were read, else paid for. */
   taken: number;
-  basis: "readings" | "tokens";
+  basis: "readings" | "mixed" | "tokens";
   /** Typical use over the same number of days, from earlier purchases. Null without history. */
   expected: number | null;
   /** Bought shortly before the window beyond typical use, so possibly still unused. */
@@ -97,7 +97,7 @@ export function assessGap(input: {
   let verdict: WaterVerdict;
   if (!measured) verdict = "not_measured";
   else if (gap < -GAP_TOLERANCE) {
-    verdict = household.basis === "tokens" ? "bought_ahead" : "over_read";
+    verdict = household.basis === "readings" ? "over_read" : "bought_ahead";
   } else if (gapPct === null || gapPct <= LOSS_LIMIT_PCT) verdict = "within_limit";
   else if (unexplainedPct !== null && unexplainedPct > LOSS_LIMIT_PCT) verdict = "likely_loss";
   else verdict = "possible_loss";
@@ -131,7 +131,8 @@ export function gapNote(r: {
   brief?: boolean;
 }): string {
   const { household: h, assessment: a } = r;
-  const took = h.basis === "tokens" ? "paid for" : "used";
+  const took =
+    h.basis === "tokens" ? "paid for" : h.basis === "mixed" ? "have estimated usage of" : "used";
   const opening = `${dateSpan(r.from, r.to)} ${r.what} passed ${wholeUnits(r.passed)} m³ and households ${took} ${wholeUnits(h.taken)} m³`;
   const gap = `${wholeUnits(a.gap)} m³${a.gapPct === null ? "" : ` (${a.gapPct.toFixed(1)}%)`}`;
   const cushion = [
@@ -178,7 +179,7 @@ export function riseNote(r: {
   before: { units: number; days: number };
   taken: number;
   takenBefore: number;
-  basis: "readings" | "tokens";
+  basis: "readings" | "mixed" | "tokens";
   verdict: WaterVerdict;
 }): string | null {
   if (!roseSharply(r.now, r.before)) return null;
@@ -189,7 +190,8 @@ export function riseNote(r: {
   const rise = sameLength
     ? `from ${wholeUnits(r.before.units)} m³ to ${wholeUnits(r.now.units)} m³`
     : `from ${perDay(r.before)} to ${perDay(r.now)}`;
-  const took = r.basis === "tokens" ? "paid for" : "used";
+  const took =
+    r.basis === "tokens" ? "paid for" : r.basis === "mixed" ? "have estimated usage of" : "used";
   const households = `its households ${took} ${wholeUnits(r.taken)} m³ against ${wholeUnits(r.takenBefore)} m³ before`;
   const closing =
     r.verdict === "likely_loss"

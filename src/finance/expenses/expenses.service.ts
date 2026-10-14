@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import type { ExpenseStatus, Prisma } from "@prisma/client";
+import type { ExpenseStatus, Prisma, WaterExpenseCategory } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { CreateExpenseDto, PayExpenseDto, UpdateExpenseDto } from "./dto/expense.dto";
 
@@ -42,7 +42,7 @@ export class ExpensesService {
     });
   }
 
-  async create(dto: CreateExpenseDto, userId: string) {
+  async create(dto: CreateExpenseDto, userId: string, waterCategory?: WaterExpenseCategory) {
     await this.assertLinks(dto);
     return this.prisma.expense.create({
       data: {
@@ -50,6 +50,7 @@ export class ExpensesService {
         expenseDate: new Date(dto.expenseDate),
         description: dto.description.trim(),
         category: dto.category,
+        waterCategory,
         amount: dto.amount,
         status: dto.paidOn ? "paid" : "unpaid",
         createdBy: userId,
@@ -58,9 +59,11 @@ export class ExpensesService {
     });
   }
 
-  async update(id: string, dto: UpdateExpenseDto) {
+  async update(id: string, dto: UpdateExpenseDto, waterCategory?: WaterExpenseCategory) {
     const existing = await this.prisma.expense.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException("Expense not found");
+    if (existing.waterCategory && dto.currencyCode !== undefined && dto.currencyCode !== "KES")
+      throw new BadRequestException("Water expenses must be recorded in KES");
     await this.assertLinks(dto);
     return this.prisma.expense.update({
       where: { id },
@@ -69,6 +72,7 @@ export class ExpensesService {
         expenseDate: dto.expenseDate ? new Date(dto.expenseDate) : undefined,
         description: dto.description?.trim(),
         category: dto.category,
+        waterCategory,
         amount: dto.amount,
         ...(dto.paidOn !== undefined && { status: dto.paidOn ? "paid" : "unpaid" }),
       },

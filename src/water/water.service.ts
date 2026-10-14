@@ -22,7 +22,7 @@ import {
 } from "./household-balance";
 import type { CreateUsageUploadDto } from "./dto/create-usage-upload.dto";
 import { WATER_METER_TYPES, WATER_VENDING_SYSTEMS } from "./dto/create-meter.dto";
-import { endOfDay } from "../common/date-range";
+import { endOfDay, startOfDay, companyDateKey } from "../common/date-range";
 import {
   HISTORY_DAYS,
   assessGap,
@@ -34,6 +34,7 @@ import {
   type WaterVerdict,
 } from "./loss-assessment";
 import { dialFlow } from "./meter-flow";
+import { WaterExpensesService } from "./water-expenses.service";
 
 // undefined = leave unchanged; null or blank = clear; otherwise the trimmed value.
 function nullableText(value: string | null | undefined): string | null | undefined {
@@ -81,30 +82,30 @@ export const parseMeterStatusParam = (v?: string) =>
 
 type MeterStatusCounts = Record<WaterMeterType, { active: number; inactive: number }>;
 
-// A date-only upper bound ("2026-09-15") includes that whole day.
-function parseDateParam(value: string | undefined, label: string, endOfDay = false) {
+// Date-only reading filters include the requested days in Nairobi time.
+function parseDateParam(value: string | undefined, label: string, throughDay = false) {
   const raw = value?.trim();
   if (!raw) return undefined;
-  const date = new Date(raw);
+  const date = throughDay ? endOfDay(raw) : startOfDay(raw);
   if (Number.isNaN(date.getTime())) throw new BadRequestException(`${label} is not a valid date`);
-  if (endOfDay && /^\d{4}-\d{2}-\d{2}$/.test(raw)) return new Date(date.getTime() + 86_399_999);
   return date;
 }
 
 function monthRange(month?: string): { start: Date; end: Date } {
-  const now = new Date();
-  const [y, m] = month
-    ? month.split("-").map(Number)
-    : [now.getUTCFullYear(), now.getUTCMonth() + 1];
-  const start = new Date(Date.UTC(y, m - 1, 1));
-  const end = new Date(Date.UTC(y, m, 1));
-  return { start, end };
+  const key = month || companyDateKey().slice(0, 7);
+  if (!/^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test(key))
+    throw new BadRequestException("Choose a valid month");
+  const [year, number] = key.split("-").map(Number);
+  const next = new Date(Date.UTC(year, number, 1)).toISOString().slice(0, 10);
+  return { start: startOfDay(`${key}-01`), end: startOfDay(next) };
 }
 
 function shiftMonth(month: string | undefined, delta: number): string {
-  const { start } = monthRange(month);
-  start.setUTCMonth(start.getUTCMonth() + delta);
-  return `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, "0")}`;
+  const key = month || companyDateKey().slice(0, 7);
+  if (!/^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test(key))
+    throw new BadRequestException("Choose a valid month");
+  const [year, number] = key.split("-").map(Number);
+  return new Date(Date.UTC(year, number - 1 + delta, 1)).toISOString().slice(0, 7);
 }
 
 function dayKey(d: Date): string {
@@ -136,15 +137,32 @@ function addDays(d: Date, days: number): Date {
 const BALANCE_LOOKBACK_DAYS = 400;
 // Enough earlier periods for a household's usual daily use.
 const BALANCE_BASELINE_DAYS = 210;
-const FLAG_RANK: Record<BalanceFlag, number> = { balance_too_high: 0, no_use: 1, high_use: 2 };
+const FLAG_RANK: Record<BalanceFlag, number> = {
+  counter_decreased: 0,
+  usage_mismatch: 1,
+  balance_too_high: 2,
+  no_use: 3,
+  high_use: 4,
+};
 
 function groupBalanceReadings(
-  rows: { id: string; meterId: string; readingDate: Date; value: unknown }[],
+  rows: {
+    id: string;
+    meterId: string;
+    readingDate: Date;
+    value: unknown;
+    cumulativeUsage?: unknown;
+  }[],
 ) {
   const map = new Map<string, BalanceReading[]>();
   for (const r of rows) {
     const list = map.get(r.meterId) ?? [];
-    list.push({ id: r.id, readingDate: r.readingDate, value: Number(r.value) });
+    list.push({
+      id: r.id,
+      readingDate: r.readingDate,
+      value: Number(r.value),
+      cumulativeUsage: r.cumulativeUsage == null ? null : Number(r.cumulativeUsage),
+    });
     map.set(r.meterId, list);
   }
   return map;
@@ -173,7 +191,7 @@ function daysBetween(from: Date, to: Date): number {
 }
 
 function monthKeyOf(d: Date): string {
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  return companyDateKey(d).slice(0, 7);
 }
 
 export const MAIN_METER_BOREHOLE_TO_TANK = "Borehole → Tank";
@@ -190,7 +208,10 @@ export const MAIN_METER_NAMES = [
 
 @Injectable()
 export class WaterService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly expenses: WaterExpensesService,
+  ) {}
 
   /* ---------- Zones (self-nesting — a zone can sit inside another zone) ---------- */
 
@@ -633,6 +654,18 @@ export class WaterService {
       await this.assertMeterNumberAvailable(newMeterNumber);
       await this.assertReplaceable(id);
     }
+    if (dto.finalCumulativeUsage != null || dto.newMeterCumulativeUsage != null) {
+      if (meter.meterType !== "household")
+        throw new BadRequestException("Separate usage counters belong only to household meters");
+      if (dto.finalCumulativeUsage != null && dto.finalReading == null)
+        throw new BadRequestException(
+          "Capture the final remaining units alongside the lifetime usage counter",
+        );
+      if (dto.newMeterCumulativeUsage != null && (!newMeterNumber || dto.newMeterReading == null))
+        throw new BadRequestException(
+          "Capture a new meter and its remaining units alongside its starting usage counter",
+        );
+    }
     if (dto.finalReading != null) {
       await this.assertNoReadingAt(id, date);
     }
@@ -644,6 +677,7 @@ export class WaterService {
             meterId: id,
             readingDate: date,
             value: dto.finalReading,
+            cumulativeUsage: dto.finalCumulativeUsage,
             notes: "Final reading",
             createdBy: user.id,
           },
@@ -681,6 +715,7 @@ export class WaterService {
             meterId: newMeter.id,
             readingDate: date,
             value: dto.newMeterReading,
+            cumulativeUsage: dto.newMeterCumulativeUsage,
             notes: "Starting reading",
             createdBy: user.id,
           },
@@ -936,11 +971,13 @@ export class WaterService {
   async createReading(dto: CreateReadingDto, user: AuthenticatedUser) {
     await this.assertReadingMeter(dto.meterId);
     await this.assertNoReadingAt(dto.meterId, new Date(dto.readingDate));
+    await this.assertCumulativeReading(dto.meterId, dto.cumulativeUsage);
     return this.prisma.waterMeterReading.create({
       data: {
         meterId: dto.meterId,
         readingDate: new Date(dto.readingDate),
         value: dto.value,
+        cumulativeUsage: dto.cumulativeUsage,
         notes: nullableText(dto.notes),
         createdBy: user.id,
       },
@@ -957,15 +994,34 @@ export class WaterService {
         id,
       );
     }
+    await this.assertCumulativeReading(
+      dto.meterId ?? existing.meterId,
+      dto.cumulativeUsage === undefined
+        ? existing.cumulativeUsage == null
+          ? null
+          : Number(existing.cumulativeUsage)
+        : dto.cumulativeUsage,
+    );
     return this.prisma.waterMeterReading.update({
       where: { id },
       data: {
         meterId: dto.meterId,
         readingDate: dto.readingDate ? new Date(dto.readingDate) : undefined,
         value: dto.value,
+        cumulativeUsage: dto.cumulativeUsage,
         notes: nullableText(dto.notes),
       },
     });
+  }
+
+  private async assertCumulativeReading(meterId: string, value: number | null | undefined) {
+    if (value === null || value === undefined) return;
+    const meter = await this.prisma.waterMeter.findUnique({
+      where: { id: meterId },
+      select: { meterType: true },
+    });
+    if (meter?.meterType !== "household")
+      throw new BadRequestException("Cumulative household usage belongs only to household meters");
   }
 
   async deleteReading(id: string) {
@@ -1272,50 +1328,112 @@ export class WaterService {
     };
   }
 
-  /**
-   * What households actually drew, and how we know.
-   *
-   * Household readings are prepaid balances: used = opening balance + units bought
-   * − closing balance. Meters with two balances around the window are measured;
-   * the rest fall back to tokens bought in the window.
-   */
-  private async householdConsumption(
-    start: Date,
-    end: Date,
-    zoneIds?: (string | null)[],
-  ): Promise<{ units: number; basis: "readings" | "tokens"; metersRead: number }> {
+  async householdReconciliation(month?: string) {
+    if (month && !/^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test(month))
+      throw new BadRequestException("Choose a valid month");
+    const key = month || shiftMonth(undefined, 0);
+    const { start, end } = monthRange(key);
+    return { month: key, ...(await this.householdConsumption(start, end)) };
+  }
+
+  private async householdConsumption(start: Date, end: Date, zoneIds?: (string | null)[]) {
     const lookback = addDays(start, -BALANCE_LOOKBACK_DAYS);
-    const readings = await this.prisma.waterMeterReading.findMany({
-      where: {
-        readingDate: { gte: lookback, lt: end },
-        meter: { meterType: "household", ...(zoneIds && inZones(zoneIds)) },
-      },
-      select: { id: true, meterId: true, readingDate: true, value: true },
-    });
+    const lookahead = addDays(end, BALANCE_LOOKBACK_DAYS);
+    const householdScope = { meterType: "household" as const, ...(zoneIds && inZones(zoneIds)) };
+    const [readings, meters] = await Promise.all([
+      this.prisma.waterMeterReading.findMany({
+        where: { readingDate: { gte: lookback, lte: lookahead }, meter: householdScope },
+        select: { id: true, meterId: true, readingDate: true, value: true, cumulativeUsage: true },
+      }),
+      this.prisma.waterMeter.findMany({
+        where: householdScope,
+        select: { id: true, isActive: true, installedAt: true, deactivatedAt: true },
+      }),
+    ]);
     const byMeter = groupBalanceReadings(readings);
-    const purchases = await this.balancePurchases([...byMeter.keys()], lookback, end);
-
-    let measuredUnits = 0;
-    const measured: string[] = [];
+    const purchases = await this.balancePurchases(
+      [...byMeter.keys()],
+      lookback,
+      addDays(lookahead, 1),
+    );
+    const measurements: {
+      meterId: string;
+      reading: NonNullable<ReturnType<typeof balanceUsageInWindow>>;
+    }[] = [];
     for (const [meterId, meterReadings] of byMeter) {
-      const res = balanceUsageInWindow(meterReadings, purchases.get(meterId) ?? [], start, end);
-      if (!res) continue;
-      measured.push(meterId);
-      measuredUnits += res.used;
+      const reading = balanceUsageInWindow(meterReadings, purchases.get(meterId) ?? [], start, end);
+      if (reading) measurements.push({ meterId, reading });
     }
-
+    const measuredIds = measurements.map((row) => row.meterId);
+    const tokenScopes =
+      measuredIds.length > 0
+        ? [
+            { meterId: { notIn: measuredIds } },
+            ...measurements
+              .filter(({ reading }) => !reading.complete)
+              .map(({ meterId, reading }) => ({
+                meterId,
+                OR: [
+                  { recordedAt: { lt: reading.openedAt } },
+                  { recordedAt: { gt: reading.closedAt } },
+                ],
+              })),
+          ]
+        : undefined;
     const tokens = await this.prisma.waterUsageRecord.aggregate({
       where: {
         recordedAt: { gte: start, lt: end },
         ...this.householdWhere(zoneIds),
-        ...(measured.length > 0 && { meterId: { notIn: measured } }),
+        ...(tokenScopes && { AND: [{ OR: tokenScopes }] }),
       },
       _sum: { unitsSold: true },
+      _count: { _all: true },
     });
+    const eligible = meters
+      .filter((meter) => meterActiveIn(meter, start, end))
+      .map((meter) => meter.id);
+    const metersTotal = new Set([...eligible, ...measuredIds]).size;
+    const estimated = measurements.some(({ reading }) => reading.estimated);
+    const issues = measurements.reduce((sum, row) => sum + row.reading.issues, 0);
+    const complete =
+      measurements.length > 0 &&
+      measurements.length === metersTotal &&
+      measurements.every(({ reading }) => reading.complete);
+    const counterRows = measurements.filter(({ reading }) => reading.measuredUsed !== null);
+    const sum = (key: "used" | "openingBalance" | "closingBalance" | "purchased" | "creditUsed") =>
+      Math.round(measurements.reduce((total, row) => total + row.reading[key], 0) * 100) / 100;
+    const basis: "readings" | "mixed" | "tokens" =
+      measurements.length === 0
+        ? "tokens"
+        : complete && !estimated && issues === 0 && tokens._count._all === 0
+          ? "readings"
+          : "mixed";
     return {
-      units: measuredUnits + Number(tokens._sum.unitsSold ?? 0),
-      basis: measured.length > 0 ? "readings" : "tokens",
-      metersRead: measured.length,
+      units: sum("used") + Number(tokens._sum.unitsSold ?? 0),
+      basis,
+      metersRead: measurements.length,
+      reconciliation: {
+        metersRead: measurements.length,
+        metersTotal,
+        counterMetersRead: counterRows.length,
+        complete,
+        estimated,
+        issues,
+        openingBalance: measurements.length ? sum("openingBalance") : null,
+        closingBalance: measurements.length ? sum("closingBalance") : null,
+        purchases: measurements.length ? sum("purchased") : null,
+        creditUsed: measurements.length ? sum("creditUsed") : null,
+        measuredUsed: counterRows.length
+          ? Math.round(
+              counterRows.reduce((total, row) => total + row.reading.measuredUsed!, 0) * 100,
+            ) / 100
+          : null,
+        difference: counterRows.length
+          ? Math.round(
+              counterRows.reduce((total, row) => total + row.reading.difference!, 0) * 100,
+            ) / 100
+          : null,
+      },
     };
   }
 
@@ -1349,7 +1467,7 @@ export class WaterService {
       this.prisma.waterMeterReading.findMany({
         where: { meterId },
         orderBy: { readingDate: "asc" },
-        select: { id: true, readingDate: true, value: true, notes: true },
+        select: { id: true, readingDate: true, value: true, cumulativeUsage: true, notes: true },
       }),
       this.prisma.waterUsageRecord.findMany({
         where: { meterId },
@@ -1357,7 +1475,12 @@ export class WaterService {
       }),
     ]);
     const periods = balancePeriods(
-      readings.map((r) => ({ id: r.id, readingDate: r.readingDate, value: Number(r.value) })),
+      readings.map((r) => ({
+        id: r.id,
+        readingDate: r.readingDate,
+        value: Number(r.value),
+        cumulativeUsage: r.cumulativeUsage == null ? null : Number(r.cumulativeUsage),
+      })),
       purchases.map((p) => ({ recordedAt: p.recordedAt, units: Number(p.unitsSold) })),
     );
     const periodByReading = new Map(periods.map((p) => [p.readingId, p]));
@@ -1366,6 +1489,7 @@ export class WaterService {
         id: r.id,
         readingDate: r.readingDate,
         balance: Number(r.value),
+        cumulativeUsage: r.cumulativeUsage == null ? null : Number(r.cumulativeUsage),
         notes: r.notes,
         period: periodByReading.get(r.id) ?? null,
       }))
@@ -1378,7 +1502,7 @@ export class WaterService {
     const lookback = addDays(since, -BALANCE_BASELINE_DAYS);
     const readings = await this.prisma.waterMeterReading.findMany({
       where: { readingDate: { gte: lookback }, meter: { meterType: "household" } },
-      select: { id: true, meterId: true, readingDate: true, value: true },
+      select: { id: true, meterId: true, readingDate: true, value: true, cumulativeUsage: true },
     });
     const byMeter = groupBalanceReadings(readings);
     const purchases = await this.balancePurchases(
@@ -2145,7 +2269,7 @@ export class WaterService {
           // "readings" is what was drawn; "tokens" is what was paid for, which may be
           // used later — so a single period on tokens is provisional.
           consumptionBasis: own.basis,
-          provisional: own.basis === "tokens",
+          provisional: own.basis !== "readings",
           accountedTotal: ownAccounted + childZonesBulkTotal,
           lossUnits,
           lossPct: ownAssessment.gapPct,
@@ -2225,6 +2349,7 @@ export class WaterService {
       tankOutlet,
       bulkTotal,
       zoneLoss,
+      expenses,
     ] = await Promise.all([
       this.prisma.waterCustomer.count({
         where: { isActive: true, ...(zoneIds && { zoneId: { in: zoneIds } }) },
@@ -2242,6 +2367,7 @@ export class WaterService {
       this.outletFlow(start, end),
       this.outerBulkTotal(start, end, filters.zoneId),
       this.zoneLossBreakdown(start, end),
+      zoneIds ? Promise.resolve(null) : this.expenses.totals(start, end),
     ]);
     const boreholeToTankTotal = borehole.units;
     const tankToDistributionTotal = tankOutlet.units;
@@ -2299,6 +2425,7 @@ export class WaterService {
       unitsSoldChangePct: unitsChangePct,
       revenue,
       mainReadingTotal: boreholeToTankTotal,
+      expenses,
       bulkReadingTotal: bulkTotal,
       bulk: {
         estate: estateRow && {
@@ -2336,6 +2463,7 @@ export class WaterService {
       nrwTankToNetworkPct: nrwTankToNetwork,
       nrwOverallPct: nrwOverall,
       reconciliation,
+      householdReconciliation: zoneIds ? null : consumption.reconciliation,
       // Three different things, never added together:
       //   released — what the meters passed; bought — credit paid for;
       //   used — what households actually drew, when their dials have been read.
@@ -2349,8 +2477,12 @@ export class WaterService {
         consumptionBasis: consumption.basis,
         householdMetersRead: consumption.metersRead,
         // Tokens are bought before they are used, so one period never settles.
-        provisional: consumption.basis === "tokens",
-        unusedCredit: consumption.basis === "readings" ? allBoughtTotal - consumption.units : null,
+        provisional: consumption.basis !== "readings",
+        householdReconciliation: consumption.reconciliation,
+        unusedCredit:
+          consumption.reconciliation.complete && !consumption.reconciliation.estimated
+            ? consumption.reconciliation.closingBalance
+            : null,
         reconciliation,
       },
     };
@@ -2390,6 +2522,13 @@ export class WaterService {
       accountedAdjustments: adjustments.total,
       adjustmentsByKind: adjustments.byKind,
       consumptionBasis: consumption.basis,
+      provisional: consumption.basis !== "readings",
+      householdMetersRead: consumption.metersRead,
+      householdReconciliation: consumption.reconciliation,
+      unusedCredit:
+        consumption.reconciliation.complete && !consumption.reconciliation.estimated
+          ? consumption.reconciliation.closingBalance
+          : null,
       unaccounted: reconciliation.gap,
       unaccountedPct: reconciliation.gapPct,
       reconciliation,
@@ -2533,6 +2672,15 @@ export class WaterService {
       insights.push(reconciliation.note);
     }
     if (reconciliation.riseNote) insights.push(reconciliation.riseNote);
+    if (reconciliation.basis === "mixed")
+      insights.push(
+        "Household figures combine captured usage with purchases for intervals or meters without complete readings. Check coverage before treating the gap as a confirmed loss.",
+      );
+    const credit = dashboard.householdReconciliation;
+    if (credit && credit.measuredUsed !== null)
+      insights.push(
+        `Household usage counters show ${credit.measuredUsed.toLocaleString("en-KE")} m\u00b3 for ${credit.counterMetersRead} meters. The counter/credit difference is ${credit.difference?.toLocaleString("en-KE")} m\u00b3; remaining prepaid units for the reconciled meters are ${credit.closingBalance?.toLocaleString("en-KE")} m\u00b3.`,
+      );
     if (reconciliation.basis === "tokens" && reconciliation.measured) {
       insights.push(
         "Household figures are water paid for, because household meter balances were not read. A gap is only called a likely loss when typical use and credit left from earlier purchases cannot explain it; until balances are read, one month's figures are provisional.",

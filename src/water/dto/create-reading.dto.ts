@@ -1,4 +1,4 @@
-import { IsDateString, IsNumber, IsOptional, IsString, MaxLength, Min } from "class-validator";
+import { IsDateString, IsNumber, IsOptional, IsString, Max, MaxLength, Min } from "class-validator";
 
 export class CreateReadingDto {
   @IsString()
@@ -10,6 +10,12 @@ export class CreateReadingDto {
   @IsNumber()
   @Min(0)
   value!: number;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(999999999999.99)
+  cumulativeUsage?: number | null;
 
   // null clears the notes on update.
   @IsOptional()

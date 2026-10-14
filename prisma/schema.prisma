@@ -2310,15 +2310,16 @@ model WaterUsageRecord {
   @@map("water_usage_records")
 }
 
-// Main/bulk: the dial total. Household (prepaid): the credit balance left on the meter.
+// Main/bulk: the dial total. Household: remaining credit and a separate lifetime usage counter.
 model WaterMeterReading {
-  id          String   @id @default(uuid()) @db.Char(36)
-  meterId     String   @map("meter_id") @db.Char(36)
-  readingDate DateTime @map("reading_date")
-  value       Decimal  @db.Decimal(14, 2)
-  notes       String?
-  createdBy   String?  @map("created_by") @db.Char(36)
-  createdAt   DateTime @default(now()) @map("created_at")
+  id              String   @id @default(uuid()) @db.Char(36)
+  meterId         String   @map("meter_id") @db.Char(36)
+  readingDate     DateTime @map("reading_date")
+  value           Decimal  @db.Decimal(14, 2)
+  cumulativeUsage Decimal? @map("cumulative_usage") @db.Decimal(14, 2)
+  notes           String?
+  createdBy       String?  @map("created_by") @db.Char(36)
+  createdAt       DateTime @default(now()) @map("created_at")
 
   meter   WaterMeter @relation(fields: [meterId], references: [id], onDelete: Cascade)
   creator User?      @relation("WaterMeterReadingCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
@@ -2440,25 +2441,35 @@ enum ExpenseCategory {
   other
 }
 
+enum WaterExpenseCategory {
+  electricity
+  maintenance
+  repairs
+  equipment
+  staff
+  other
+}
+
 // Money the company spends or owes suppliers; feeds margin and payables.
 model Expense {
-  id            String          @id @default(uuid()) @db.Char(36)
-  expenseDate   DateTime        @map("expense_date") @db.Date
-  dueDate       DateTime?       @map("due_date") @db.Date
+  id            String                @id @default(uuid()) @db.Char(36)
+  expenseDate   DateTime              @map("expense_date") @db.Date
+  dueDate       DateTime?             @map("due_date") @db.Date
   supplier      String?
   description   String
   category      ExpenseCategory
-  amount        Decimal         @db.Decimal(14, 2)
-  currencyCode  String          @default("KES") @map("currency_code") @db.VarChar(3)
-  departmentId  String?         @map("department_id") @db.Char(36)
-  serviceLineId String?         @map("service_line_id") @db.Char(36)
-  projectId     String?         @map("project_id") @db.Char(36)
-  status        ExpenseStatus   @default(unpaid)
-  paidOn        DateTime?       @map("paid_on") @db.Date
+  waterCategory WaterExpenseCategory? @map("water_category")
+  amount        Decimal               @db.Decimal(14, 2)
+  currencyCode  String                @default("KES") @map("currency_code") @db.VarChar(3)
+  departmentId  String?               @map("department_id") @db.Char(36)
+  serviceLineId String?               @map("service_line_id") @db.Char(36)
+  projectId     String?               @map("project_id") @db.Char(36)
+  status        ExpenseStatus         @default(unpaid)
+  paidOn        DateTime?             @map("paid_on") @db.Date
   reference     String?
-  createdBy     String?         @map("created_by") @db.Char(36)
-  createdAt     DateTime        @default(now()) @map("created_at")
-  updatedAt     DateTime        @updatedAt @map("updated_at")
+  createdBy     String?               @map("created_by") @db.Char(36)
+  createdAt     DateTime              @default(now()) @map("created_at")
+  updatedAt     DateTime              @updatedAt @map("updated_at")
 
   department  Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   serviceLine ServiceLine? @relation(fields: [serviceLineId], references: [id], onDelete: SetNull)
@@ -2469,6 +2480,8 @@ model Expense {
   @@index([status, dueDate])
   @@index([serviceLineId])
   @@index([departmentId])
+  @@index([waterCategory, expenseDate])
+  @@index([waterCategory, status, paidOn])
   @@map("expenses")
 }
 

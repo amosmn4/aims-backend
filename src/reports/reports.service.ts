@@ -127,11 +127,17 @@ export class ReportsService {
       }
       if (!isAdminOrCeo(user)) where.OR = scope;
     }
+    const departmentTeamIds = await this.access.sharedDepartmentIds(user);
     where.NOT = [
       {
         status: "draft",
         createdBy: { not: user.id },
-        OR: [{ kind: { not: "project" } }, { subjectId: { notIn: teamProjectIds } }],
+        NOT: {
+          OR: [
+            { kind: "department", subjectId: { in: departmentTeamIds } },
+            { kind: "project", subjectId: { in: teamProjectIds } },
+          ],
+        },
       },
     ];
 
@@ -153,7 +159,9 @@ export class ReportsService {
 
     return rows.map(({ messages, ...r }) => ({
       ...r,
-      isTeamReport: r.kind === "project" && teamProjectIds.includes(r.subjectId),
+      isTeamReport:
+        (r.kind === "department" && !!r.department && r.department.code !== "water") ||
+        (r.kind === "project" && teamProjectIds.includes(r.subjectId)),
       figures: readFigures(r.figures),
       creator: maskUserRef(r.creator, user),
       subjectUser: r.subjectUser ? maskUserRef(r.subjectUser, user) : null,
@@ -436,7 +444,7 @@ export class ReportsService {
       },
     });
     const recipients = (await this.access.isTeamReport(report))
-      ? await this.access.projectTeamIds(report.subjectId)
+      ? await this.access.reportTeamIds(report)
       : [report.createdBy, report.submittedBy];
     await this.notifier.notify(recipients, {
       type: "report_reviewed",
@@ -475,7 +483,7 @@ export class ReportsService {
     };
     const isTeamReport = await this.access.isTeamReport(report);
     if (isTeamReport) {
-      await this.notifier.notify(await this.access.projectTeamIds(report.subjectId), event);
+      await this.notifier.notify(await this.access.reportTeamIds(report), event);
     }
     if (await this.access.isReviewer(report, user)) {
       if (!isTeamReport) await this.notifier.notify([report.createdBy, report.submittedBy], event);

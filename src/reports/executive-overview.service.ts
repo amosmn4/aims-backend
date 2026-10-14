@@ -46,6 +46,8 @@ export class ExecutiveOverviewService {
       updates,
       closingBids,
       settings,
+      completedInPeriod,
+      overdueTasks,
     ] = await Promise.all([
       this.prisma.department.findMany({
         where: { code: { in: CODES } },
@@ -140,6 +142,21 @@ export class ExecutiveOverviewService {
         where: { id: "company" },
         select: { reportDueDay: true },
       }),
+      this.prisma.project.count({
+        where: {
+          ...projectScope,
+          status: "completed",
+          completedAt: {
+            gte: startOfDay(companyDateKey(periodStart)),
+            lt: startOfDay(
+              companyDateKey(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1))),
+            ),
+          },
+        },
+      }),
+      this.prisma.task.count({
+        where: { project: openProjects, status: { not: "completed" }, dueDate: { lt: today } },
+      }),
     ]);
     const dueDate = new Date(
       Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), settings?.reportDueDay ?? 5),
@@ -152,6 +169,8 @@ export class ExecutiveOverviewService {
       period: { start: periodStart, end: periodEnd, dueDate },
       totals: {
         openProjects: openCount,
+        completedInPeriod,
+        overdueTasks,
         atRisk: riskCounts.reduce((sum, r) => sum + r._count._all, 0),
         lateProjects: lateCounts.reduce((sum, r) => sum + r._count._all, 0),
         waitingOnCeo: reviewCount + financeReviewCount,
@@ -173,6 +192,46 @@ export class ExecutiveOverviewService {
             : null,
         };
       }),
+      charts: {
+        projectStatuses: ["planning", "active", "on_hold", "completed", "cancelled"].map(
+          (status) => ({
+            status,
+            count: projectCounts
+              .filter((row) => row.status === status)
+              .reduce((sum, row) => sum + row._count._all, 0),
+          }),
+        ),
+        workByTeam: [
+          ...departments.map((department) => ({
+            id: department.id,
+            name: department.name,
+            count: projectCounts
+              .filter(
+                (row) =>
+                  row.departmentId === department.id &&
+                  !["completed", "cancelled"].includes(row.status),
+              )
+              .reduce((sum, row) => sum + row._count._all, 0),
+          })),
+          {
+            id: "company",
+            name: "Company teams",
+            count: projectCounts
+              .filter(
+                (row) =>
+                  row.departmentId === null && !["completed", "cancelled"].includes(row.status),
+              )
+              .reduce((sum, row) => sum + row._count._all, 0),
+          },
+        ],
+        reporting: ["not_sent", "submitted", "approved", "changes_requested"].map((status) => ({
+          status,
+          count: departments.filter((department) => {
+            const report = reports.find((row) => row.departmentId === department.id);
+            return (report?.status === "draft" || !report ? "not_sent" : report.status) === status;
+          }).length,
+        })),
+      },
       reviews: [
         ...reviewReports.map((r) => ({ ...r, path: `/reports/${r.id}` })),
         ...financeReviews.map((r) => ({ ...r, path: `/finance/reports/${r.id}` })),

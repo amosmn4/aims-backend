@@ -23,6 +23,7 @@ between those causes, so speak in terms of "likely" causes, not certainties.
 Meters are either active (in use) or inactive (no longer in use, e.g. retired or replaced).
 Inactive meters are excluded from active meter counts, but their past readings and sales still
 count in the months they happened; a sale or reading on an inactive meter is a data problem.
+Household lifetime usage counters and prepaid units remaining are separate. Consumption is the change in the counter, cross-checked against opening credit plus purchases less closing credit. Purchases alone are not actual water use; mixed coverage is provisional.
 Only use the figures you are given — never invent a number, zone, or meter not present in the
 data. Currency figures are in Kenyan Shillings (KES).`;
 

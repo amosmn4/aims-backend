@@ -186,6 +186,11 @@ export class WaterController {
     );
   }
 
+  @Get("household-reconciliation")
+  householdReconciliation(@Query("month") month?: string) {
+    return this.waterService.householdReconciliation(month);
+  }
+
   @Get("household-flags")
   householdFlags(@Query("months") months?: string) {
     return this.waterService.householdFlags(months ? Number(months) : undefined);

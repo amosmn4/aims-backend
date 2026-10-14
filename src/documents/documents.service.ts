@@ -4,7 +4,8 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import { can } from "../common/permission-resolution";
+import { can, roleGrantsDefault } from "../common/permission-resolution";
+import { userCan } from "../common/capabilities";
 import type {
   Document,
   DocumentAccessGrant,
@@ -173,6 +174,13 @@ export class DocumentsService {
 
     if (resourceType === "department_report") {
       const report = await this.reportAccess.loadReadable(resourceId, user);
+      if (
+        (report.status === "submitted" || report.status === "approved") &&
+        (await this.reportAccess.isTeamReport(report))
+      )
+        throw new ForbiddenException(
+          "This report is locked. Files can be changed while drafting or responding to feedback.",
+        );
       if (!(await this.reportAccess.canWrite(report, user)))
         throw new ForbiddenException("You cannot add files to this report");
       return;
@@ -237,7 +245,7 @@ export class DocumentsService {
     });
   }
 
-  private async companyDocumentAccess(
+  private async sharedDocumentAccess(
     documents: Pick<Document, "id" | "resourceType" | "resourceId">[],
     user: AuthenticatedUser,
   ) {
@@ -254,8 +262,17 @@ export class DocumentsService {
         : [],
       reportIds.length
         ? this.prisma.report.findMany({
-            where: { id: { in: reportIds }, kind: "project" },
-            select: { id: true, subjectId: true },
+            where: { id: { in: reportIds }, kind: { in: ["project", "department"] } },
+            select: {
+              id: true,
+              kind: true,
+              subjectId: true,
+              subjectUserId: true,
+              departmentId: true,
+              status: true,
+              createdBy: true,
+              department: { select: { code: true } },
+            },
           })
         : [],
     ]);
@@ -263,14 +280,15 @@ export class DocumentsService {
       ...new Set([
         ...idsFor("project"),
         ...tasks.map((t) => t.projectId),
-        ...reports.map((r) => r.subjectId),
+        ...[...reports].filter((r) => r.kind !== "department").map((r) => r.subjectId),
       ]),
     ];
-    if (!projectIds.length) return new Map<string, boolean>();
-    const projects = await this.prisma.project.findMany({
-      where: { id: { in: projectIds }, scope: "company" },
-      select: { id: true, team: { where: { userId: user.id }, select: { id: true } } },
-    });
+    const projects = projectIds.length
+      ? await this.prisma.project.findMany({
+          where: { id: { in: projectIds }, scope: "company" },
+          select: { id: true, team: { where: { userId: user.id }, select: { id: true } } },
+        })
+      : [];
     const access = new Map(projects.map((p) => [p.id, isAdminOrCeo(user) || p.team.length > 0]));
     const taskProjects = new Map(tasks.map((t) => [t.id, t.projectId]));
     const reportProjects = new Map(reports.map((r) => [r.id, r.subjectId]));
@@ -286,6 +304,51 @@ export class DocumentsService {
               : undefined;
       if (projectId && access.has(projectId)) result.set(doc.id, access.get(projectId)!);
     }
+    const departmentReports = [...reports].filter(
+      (report) =>
+        report.kind === "department" && report.department && report.department.code !== "water",
+    );
+    const overrides =
+      departmentReports.length && !isAdminOrCeo(user)
+        ? await this.prisma.userPermissionOverride.findMany({
+            where: {
+              userId: user.id,
+              departmentId: {
+                in: [...new Set(departmentReports.map((report) => report.subjectId))],
+              },
+              action: { in: ["read", "write"] },
+            },
+            select: { departmentId: true, action: true, effect: true },
+          })
+        : [];
+    const permissions = new Map(
+      departmentReports.map((report) => {
+        const department = { id: report.subjectId, code: report.department!.code };
+        const read = overrides.find(
+          (override) => override.departmentId === department.id && override.action === "read",
+        );
+        const write = overrides.find(
+          (override) => override.departmentId === department.id && override.action === "write",
+        );
+        const canRead =
+          isAdminOrCeo(user) ||
+          (read ? read.effect === "grant" : roleGrantsDefault(user, department, "read"));
+        const canWrite =
+          isAdminOrCeo(user) ||
+          (write
+            ? write.effect === "grant"
+            : roleGrantsDefault(user, department, "write") &&
+              userCan(user, "submit_reports", department));
+        return [
+          report.id,
+          canRead && (report.status !== "draft" || report.createdBy === user.id || canWrite),
+        ] as const;
+      }),
+    );
+    for (const doc of documents) {
+      if (doc.resourceType === "department_report" && permissions.has(doc.resourceId))
+        result.set(doc.id, permissions.get(doc.resourceId)!);
+    }
     return result;
   }
 
@@ -293,7 +356,7 @@ export class DocumentsService {
     doc: DocumentWithRelations | (Document & { accessGrants: DocumentAccessGrant[] }),
     user: AuthenticatedUser,
   ) {
-    const companyAccess = await this.companyDocumentAccess([doc], user);
+    const companyAccess = await this.sharedDocumentAccess([doc], user);
     if (companyAccess.has(doc.id)) {
       if (!companyAccess.get(doc.id)) throw new NotFoundException("Document not found");
       if (doc.resourceType === "department_report")
@@ -346,7 +409,7 @@ export class DocumentsService {
             orderBy: { createdAt: "desc" },
           });
 
-    const companyAccess = await this.companyDocumentAccess(documents, user);
+    const companyAccess = await this.sharedDocumentAccess(documents, user);
     let entries: LibraryEntry[] = documents
       .filter((doc) =>
         companyAccess.has(doc.id) ? companyAccess.get(doc.id) : this.canView(doc, user),
@@ -443,6 +506,7 @@ export class DocumentsService {
           },
           select: { resourceId: true, resourceType: true },
         });
+        const departmentTeamIds = await this.reportAccess.sharedDepartmentIds(user);
         const seesTenderPipeline = deptCodes.includes("tender");
         const seesIntakeQueue = seesTenderPipeline || deptCodes.includes("operations");
         const [tasks, tenders, requests, deptReports, libraries, systems] = await Promise.all([
@@ -500,14 +564,17 @@ export class DocumentsService {
               NOT: {
                 status: "draft",
                 createdBy: { not: user.id },
-                OR: [
-                  { kind: { not: "project" } },
-                  {
-                    subjectId: {
-                      notIn: projects.filter((p) => p.scope === "company").map((p) => p.id),
+                NOT: {
+                  OR: [
+                    { kind: "department", subjectId: { in: departmentTeamIds } },
+                    {
+                      kind: "project",
+                      subjectId: {
+                        in: projects.filter((p) => p.scope === "company").map((p) => p.id),
+                      },
                     },
-                  },
-                ],
+                  ],
+                },
               },
             },
             select: { id: true },
@@ -715,7 +782,7 @@ export class DocumentsService {
     this.validateFile(file);
     await this.assertCanAttach(dto.resourceType, dto.resourceId, user);
     const grants = this.parseAccessGrants(dto.access);
-    const companyAccess = await this.companyDocumentAccess(
+    const companyAccess = await this.sharedDocumentAccess(
       [{ id: "upload", resourceType: dto.resourceType, resourceId: dto.resourceId }],
       user,
     );
@@ -1017,9 +1084,11 @@ export class DocumentsService {
     const doc = await this.prisma.document.findUniqueOrThrow({ where: { id: documentId } });
     await this.assertCanAttach(doc.resourceType, doc.resourceId, user);
 
-    const companyAccess = await this.companyDocumentAccess([doc], user);
+    const companyAccess = await this.sharedDocumentAccess([doc], user);
     if (companyAccess.has(doc.id) && dto.grants.length)
-      throw new BadRequestException("Company project files inherit access from the project team.");
+      throw new BadRequestException(
+        "Team report and company project files inherit access from their team.",
+      );
     await this.applyAccessGrants(documentId, dto.grants, user, doc.title);
 
     return this.prisma.documentAccessGrant.findMany({ where: { documentId } });

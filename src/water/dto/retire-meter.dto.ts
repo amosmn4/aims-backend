@@ -4,6 +4,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from "class-validator";
@@ -24,6 +25,12 @@ export class RetireMeterDto {
   finalReading?: number;
 
   @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(999999999999.99)
+  finalCumulativeUsage?: number;
+
+  @IsOptional()
   @IsString()
   @MaxLength(191)
   note?: string;
@@ -38,4 +45,10 @@ export class RetireMeterDto {
   @IsNumber()
   @Min(0)
   newMeterReading?: number;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(999999999999.99)
+  newMeterCumulativeUsage?: number;
 }
