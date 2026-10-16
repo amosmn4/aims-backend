@@ -4,6 +4,8 @@ import { z } from "zod";
 // a missing/misspelled variable — see .env.example for what each of these is for.
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+  PAYMENT_GATEWAY_URL: z.string().url().optional(),
+  PAYMENT_GATEWAY_BRIDGE_KEY: z.string().min(32).optional(),
 
   JWT_ACCESS_SECRET: z.string().min(1, "JWT_ACCESS_SECRET is required"),
   JWT_REFRESH_SECRET: z.string().min(1, "JWT_REFRESH_SECRET is required"),

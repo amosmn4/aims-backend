@@ -2599,3 +2599,42 @@ model RoleCapability {
   @@id([role, capability])
   @@map("role_capabilities")
 }
+
+model PaymentLedgerEntry {
+  id               String    @id @db.Char(36)
+  receipt          String    @unique @db.VarChar(64)
+  paybill          String    @db.VarChar(32)
+  reference        String    @db.VarChar(64)
+  amount           Decimal?  @db.Decimal(12, 2)
+  currency         String    @db.VarChar(3)
+  direction        String    @db.VarChar(3)
+  channel          String    @db.VarChar(10)
+  paymentStatus    String    @map("payment_status") @db.VarChar(12)
+  processingStatus String    @map("processing_status") @db.VarChar(12)
+  destination      String    @db.VarChar(12)
+  systemName       String    @map("system_name") @db.VarChar(100)
+  applicationCode  String?   @map("application_code") @db.VarChar(50)
+  payerName        String    @map("payer_name") @db.VarChar(255)
+  payerPhone       String    @map("payer_phone") @db.VarChar(64)
+  requiresReview   Boolean   @map("requires_review")
+  transactionAt    DateTime? @map("transaction_at")
+  receivedAt       DateTime  @map("received_at")
+  sourceSequence   BigInt    @map("source_sequence")
+  snapshot         Json
+  syncedAt         DateTime  @default(now()) @map("synced_at")
+
+  @@index([receivedAt, id])
+  @@index([destination, processingStatus])
+  @@index([systemName, currency, direction])
+  @@map("payment_ledger_entries")
+}
+
+model PaymentLedgerSync {
+  id               String    @id @db.VarChar(40)
+  leaseToken       String?   @map("lease_token") @db.Char(36)
+  leaseUntil       DateTime? @map("lease_until")
+  lastSuccessAt    DateTime? @map("last_success_at")
+  lastError        String?   @map("last_error") @db.Text
+
+  @@map("payment_ledger_sync")
+}
