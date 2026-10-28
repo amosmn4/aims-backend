@@ -65,7 +65,7 @@ describe("dialFlow", () => {
       { ...none, first: r("2026-08-05T00:00:00Z", 900), last: r("2026-08-25T00:00:00Z", 100) },
       ...AUG,
     );
-    expect(flow?.units).toBe(0);
+    expect(flow).toBeNull();
   });
 });
 

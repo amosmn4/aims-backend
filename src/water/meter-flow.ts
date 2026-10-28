@@ -37,6 +37,11 @@ export function dialFlow(
   end: Date,
 ): DialFlow | null {
   const { before, first, last, after } = around;
+  const points = [before, first, last, after]
+    .filter((point): point is DialReading => point !== null)
+    .sort((a, b) => +a.at - +b.at);
+  if (points.some((point, index) => index > 0 && point.value < points[index - 1].value))
+    return null;
   const nextInside = first ?? after;
   const opening: DialReading | null =
     before && nextInside ? { at: start, value: valueAt(before, nextInside, start) } : first;
@@ -45,7 +50,7 @@ export function dialFlow(
     after && lastKnown ? { at: end, value: valueAt(lastKnown, after, end) } : last;
   if (!opening || !closing || closing.at <= opening.at) return null;
   return {
-    units: Math.max(0, closing.value - opening.value),
+    units: closing.value - opening.value,
     from: opening.at,
     to: closing.at,
   };

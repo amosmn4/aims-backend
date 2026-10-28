@@ -7,15 +7,27 @@ export class CreateReadingDto {
   @IsDateString()
   readingDate!: string;
 
-  @IsNumber()
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
-  value!: number;
+  @Max(999999999999.99)
+  value?: number | null;
 
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   @Max(999999999999.99)
   cumulativeUsage?: number | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  reviewToken?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  reviewReason?: string;
 
   // null clears the notes on update.
   @IsOptional()

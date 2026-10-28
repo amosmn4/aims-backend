@@ -2267,6 +2267,7 @@ model WaterMeter {
 
   usageRecords WaterUsageRecord[]
   readings     WaterMeterReading[]
+  usageIntervals WaterMeterUsageInterval[]
 
   @@index([customerId])
   @@index([zoneId])
@@ -2315,8 +2316,9 @@ model WaterMeterReading {
   id              String   @id @default(uuid()) @db.Char(36)
   meterId         String   @map("meter_id") @db.Char(36)
   readingDate     DateTime @map("reading_date")
-  value           Decimal  @db.Decimal(14, 2)
+  value           Decimal? @db.Decimal(14, 2)
   cumulativeUsage Decimal? @map("cumulative_usage") @db.Decimal(14, 2)
+  review          Json?
   notes           String?
   createdBy       String?  @map("created_by") @db.Char(36)
   createdAt       DateTime @default(now()) @map("created_at")
@@ -2326,6 +2328,70 @@ model WaterMeterReading {
 
   @@index([meterId, readingDate])
   @@map("water_meter_readings")
+}
+
+model WaterMeterUsageInterval {
+  id          String   @id @default(uuid()) @db.Char(36)
+  meterId     String   @map("meter_id") @db.Char(36)
+  periodStart DateTime @map("period_start")
+  periodEnd   DateTime @map("period_end")
+  units       Decimal  @db.Decimal(14, 2)
+  notes       String?  @db.Text
+  createdBy   String?  @map("created_by") @db.Char(36)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  meter WaterMeter @relation(fields: [meterId], references: [id], onDelete: Cascade)
+
+  @@index([meterId, periodStart, periodEnd])
+  @@map("water_meter_usage_intervals")
+}
+
+model WaterImportBatch {
+  id             String   @id @default(uuid()) @db.Char(36)
+  fileName       String   @map("file_name")
+  mimeType       String   @map("mime_type")
+  storageKey     String   @map("storage_key")
+  fileHash       String   @map("file_hash") @db.Char(64)
+  status         String   @default("queued") @db.VarChar(24)
+  uploadedBy     String   @map("uploaded_by") @db.Char(36)
+  totalRows      Int      @default(0) @map("total_rows")
+  processedParts Int      @default(0) @map("processed_parts")
+  totalParts     Int      @default(0) @map("total_parts")
+  summary        Json?
+  error          String?  @db.Text
+  leaseUntil     DateTime? @map("lease_until")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  rows WaterImportRow[]
+
+  @@index([status, leaseUntil])
+  @@index([fileHash])
+  @@map("water_import_batches")
+}
+
+model WaterImportRow {
+  id          String   @id @default(uuid()) @db.Char(36)
+  batchId     String   @map("batch_id") @db.Char(36)
+  position    Int
+  source      String
+  raw         Json
+  data        Json
+  status      String   @default("pending") @db.VarChar(24)
+  issues      Json?
+  warnings    Json?
+  targetType  String?  @map("target_type")
+  targetId    String?  @map("target_id") @db.Char(36)
+  confirmedBy String?  @map("confirmed_by") @db.Char(36)
+  confirmedAt DateTime? @map("confirmed_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  batch WaterImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@unique([batchId, position])
+  @@index([batchId, status])
+  @@map("water_import_rows")
 }
 
 enum WaterAiChatRole {

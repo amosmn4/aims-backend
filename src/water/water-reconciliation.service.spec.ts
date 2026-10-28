@@ -5,6 +5,8 @@ import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import { WaterService } from "./water.service";
 import type { WaterExpensesService } from "./water-expenses.service";
 import { CreateReadingDto } from "./dto/create-reading.dto";
+import { ConfigService } from "@nestjs/config";
+import { WaterReadingReviewService } from "./water-reading-review.service";
 
 const start = new Date("2026-09-30T21:00:00Z");
 const end = new Date("2026-10-31T21:00:00Z");
@@ -48,6 +50,7 @@ function fixture() {
     recordedAt: new Date("2026-10-15T00:00:00Z"),
     unitsSold: 5,
   }));
+  const intervals: { meterId: string; periodStart: Date; periodEnd: Date; units: number }[] = [];
   const prisma = {
     waterMeter: {
       findMany: jest.fn(async (_query: unknown) => meters),
@@ -60,7 +63,22 @@ function fixture() {
       create: jest.fn(async (_query: unknown) => ({ ...meters[0], id: "new-meter" })),
     },
     waterMeterReading: {
-      findMany: jest.fn(async (_query: unknown) => readings),
+      findMany: jest.fn(async (query: unknown) => {
+        const { where } = query as {
+          where?: {
+            meterId?: string;
+            id?: { not?: string };
+            readingDate?: { lt?: Date; gt?: Date };
+          };
+        };
+        return readings.filter(
+          (row) =>
+            (!where?.meterId || row.meterId === where.meterId) &&
+            (!where?.id?.not || row.id !== where.id.not) &&
+            (!where?.readingDate?.lt || row.readingDate < where.readingDate.lt) &&
+            (!where?.readingDate?.gt || row.readingDate > where.readingDate.gt),
+        );
+      }),
       findFirst: jest.fn(async () => null),
       findUniqueOrThrow: jest.fn(async () => readings[1]),
       create: jest.fn(async ({ data }: { data: unknown }) => data),
@@ -79,17 +97,70 @@ function fixture() {
         },
       ),
     },
+    waterMeterUsageInterval: { findMany: jest.fn(async () => intervals) },
+    $queryRaw: jest.fn(async () => []),
     $transaction: jest.fn(async (work: (tx: unknown) => Promise<unknown>) => work(prisma)),
   };
+  const readingReview = new WaterReadingReviewService(
+    prisma as unknown as PrismaService,
+    new ConfigService({ JWT_ACCESS_SECRET: "test-only-reading-secret" }),
+  );
   return {
     prisma,
     meters,
     readings,
-    service: new WaterService(prisma as unknown as PrismaService, {} as WaterExpensesService),
+    intervals,
+    readingReview,
+    service: new WaterService(
+      prisma as unknown as PrismaService,
+      {} as WaterExpensesService,
+      readingReview,
+    ),
   };
 }
 
 describe("Household reconciliation API", () => {
+  it.each([false, true])(
+    "checks the readings inside a bulk period for a reset (reset: %s)",
+    async (reset) => {
+      const { service, prisma } = fixture();
+      const closing = new Date(+end - 1);
+      const history = [
+        { readingDate: start, value: 22000 },
+        { readingDate: new Date("2026-10-15T00:00:00Z"), value: reset ? 21500 : 22005 },
+        { readingDate: closing, value: 22010 },
+      ];
+      prisma.waterMeterReading.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(history[0] as never)
+        .mockResolvedValueOnce(history[2] as never)
+        .mockResolvedValueOnce(null);
+      prisma.waterMeterReading.findMany.mockResolvedValueOnce(history as never);
+      const meterFlow = (
+        service as unknown as {
+          meterFlow: (id: string, start: Date, end: Date) => Promise<unknown>;
+        }
+      ).meterFlow.bind(service);
+      expect(await meterFlow("bulk-meter", start, end)).toEqual(
+        reset ? null : { units: 10, from: start, to: closing },
+      );
+    },
+  );
+
+  it("includes recorded purchases for interval-only households and distinguishes their counter coverage", async () => {
+    const { service, readings, meters, intervals } = fixture();
+    readings.splice(0, 2);
+    intervals.push({ meterId: meters[0].id, periodStart: start, periodEnd: end, units: 3 });
+    expect((await service.householdReconciliation("2026-10")).reconciliation).toMatchObject({
+      purchases: 50,
+      measuredUsed: 30,
+      counterMetersRead: 9,
+      openingBalance: null,
+      closingBalance: null,
+      creditUsed: null,
+    });
+  });
+
   it("reconciles ten households buying fifty units, using thirty and retaining twenty", async () => {
     const { service } = fixture();
     const result = await service.householdReconciliation("2026-10");
@@ -138,7 +209,14 @@ describe("Household reconciliation API", () => {
     const legacy = readings.map((reading) => ({ ...reading, cumulativeUsage: null }));
     const { prisma } = fixture();
     prisma.waterMeterReading.findMany.mockResolvedValue(legacy as unknown as typeof readings);
-    const older = new WaterService(prisma as unknown as PrismaService, {} as WaterExpensesService);
+    const older = new WaterService(
+      prisma as unknown as PrismaService,
+      {} as WaterExpensesService,
+      new WaterReadingReviewService(
+        prisma as unknown as PrismaService,
+        new ConfigService({ JWT_ACCESS_SECRET: "test-only-reading-secret" }),
+      ),
+    );
     expect((await older.householdReconciliation("2026-10")).reconciliation).toMatchObject({
       measuredUsed: null,
       creditUsed: 30,
@@ -178,15 +256,37 @@ describe("Household reconciliation API", () => {
   });
 
   it("stores remaining units and lifetime usage as separate values on create and edit", async () => {
-    const { service, prisma } = fixture();
+    const { service, prisma, readingReview } = fixture();
+    const input = {
+      meterId: "meter-0",
+      readingDate: end.toISOString(),
+      value: 20,
+      cumulativeUsage: 549,
+    };
+    const review = await readingReview.assess(input, staff.id);
     await service.createReading(
-      { meterId: "meter-0", readingDate: end.toISOString(), value: 20, cumulativeUsage: 549 },
+      {
+        ...input,
+        reviewToken: review.reviewToken,
+        reviewReason: "Verified the figures against the meter",
+      },
       staff,
     );
     expect(prisma.waterMeterReading.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ value: 20, cumulativeUsage: 549, createdBy: "staff" }),
     });
-    await service.updateReading("closing-0", { value: 4, cumulativeUsage: 525 });
+    const edited = { ...input, value: 4, cumulativeUsage: 525 };
+    const editedReview = await readingReview.assess(edited, staff.id, undefined, "closing-0");
+    await service.updateReading(
+      "closing-0",
+      {
+        value: 4,
+        cumulativeUsage: 525,
+        reviewToken: editedReview.reviewToken,
+        reviewReason: "Verified the corrected figures on the meter",
+      },
+      staff,
+    );
     expect(prisma.waterMeterReading.update).toHaveBeenCalledWith({
       where: { id: "closing-0" },
       data: expect.objectContaining({ value: 4, cumulativeUsage: 525 }),

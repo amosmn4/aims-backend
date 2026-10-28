@@ -58,6 +58,17 @@ export class StorageService {
     await fs.writeFile(fullPath, buffer);
   }
 
+  async read(key: string): Promise<Buffer> {
+    if (this.client && this.bucket) {
+      const result = await this.client.send(
+        new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+      if (!result.Body) throw new NotFoundException("File is missing from storage");
+      return Buffer.from(await result.Body.transformToByteArray());
+    }
+    return fs.readFile(path.join(LOCAL_ROOT, key));
+  }
+
   async streamToResponse(key: string, res: Response, opts: StreamOptions): Promise<void> {
     if (opts.contentType) res.type(opts.contentType);
     const name = opts.fileName ?? key.split("/").pop() ?? "download";

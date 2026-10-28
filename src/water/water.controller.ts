@@ -21,11 +21,16 @@ import { Roles } from "../auth/decorators/roles.decorator";
 import { CurrentUser } from "../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import { parsePaginationQuery } from "../common/pagination";
+import { WaterReadingReviewService } from "./water-reading-review.service";
+import { ReviewReadingDto } from "./dto/review-reading.dto";
 
 @Controller("water")
 @Roles("water")
 export class WaterController {
-  constructor(private readonly waterService: WaterService) {}
+  constructor(
+    private readonly waterService: WaterService,
+    private readonly readingReview: WaterReadingReviewService,
+  ) {}
 
   /* ---------- Zones (self-nesting) ---------- */
 
@@ -254,9 +259,18 @@ export class WaterController {
     return this.waterService.createReading(dto, user);
   }
 
+  @Post("readings/review")
+  reviewReading(@Body() dto: ReviewReadingDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.readingReview.assess(dto, user.id, undefined, dto.excludeId);
+  }
+
   @Patch("readings/:id")
-  updateReading(@Param("id") id: string, @Body() dto: UpdateReadingDto) {
-    return this.waterService.updateReading(id, dto);
+  updateReading(
+    @Param("id") id: string,
+    @Body() dto: UpdateReadingDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.waterService.updateReading(id, dto, user);
   }
 
   @Delete("readings/:id")

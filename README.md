@@ -1,9 +1,52 @@
 # AIMS Backend
 
+## Intelligent water file imports
+
+The Water upload page accepts PNG, JPEG, WebP, PDF, Word (`.doc` and `.docx`), CSV, and Excel.
+Files are stored privately and extracted by a resumable database-backed worker. CSV and Excel
+records are read directly with SheetJS across every worksheet. OpenAI maps unfamiliar headings
+and extracts document/image records with a strict schema. PDF pages and Word text/images are
+processed separately. Limits are 25 MB, 50,000 extracted records, and 200 PDF pages per file;
+oversized or incomplete sources fail explicitly rather than silently truncating the import.
+
+Apply `20261013160000_water_cumulative_usage` and
+`20261028120000_water_intelligent_imports`, then regenerate Prisma before running this feature.
+The import migration adds batches, source rows, measured usage intervals, and reading review
+metadata. Remaining prepaid credit is nullable so a known lifetime counter can be stored without
+inventing a balance. Existing non-null readings keep their values.
+
+Use clear headings such as `Meter`, `Date`, `Dial reading` for main/bulk snapshots;
+`Meter`, `Date`, `Remaining balance`, `Cumulative usage` for households; and
+`Meter`, `Date`, `Units`, `Amount` for purchases. Explicit consumption totals require
+`Period start`, `Period end`, and `Units`. Period end is exclusive. Date-only or unzoned ISO
+timestamps use Nairobi time; ambiguous dates require correction. Missing numbers stay absent.
+
+`POST /water/imports` accepts multipart `file`. `GET /water/imports` lists recent jobs and
+`GET /water/imports/:id?page=1&status=pending` returns fifty rows with current meter matches,
+destinations, source values, issues, warnings, and confirmation tokens. Correct staged data with
+`PATCH /water/imports/:id/rows/:rowId`. `POST /water/imports/:id/confirm` accepts selected row IDs,
+their tokens, and reasons for warning overrides. `POST /water/imports/:id/confirm-ready` with
+`approved: true` records rows without warnings in background batches and holds exceptions for
+individual review. Interrupted jobs resume; committed rows are not written again.
+
+Both imports and manual reading entry use the same history assessment. A bulk dial falling
+from 22,000 to 21,500 requires explicit confirmation and a reason. Checks also cover later
+readings, per-meter median daily usage, unexplained credit increases, top-ups, and disagreement
+between household counters and prepaid credit. The API rejects unacknowledged or stale warnings
+with HTTP 409. Confirmations retain their reason, actor, and time. This uses OpenAI extraction
+and adaptive statistical checks against system history; it does not train a separate local model.
+
+Known reading coverage takes precedence over period totals, preventing double counting.
+Counter resets leave consumption unmeasured until usable readings or an independent measured
+period establish it. Unknown meters are held for explicit registration with the correct type.
+All endpoints use the existing Water role and read-only View As rules. The standard payment
+import remains available alongside AI import.
+
 ## Household usage and prepaid reconciliation
 
-Household readings capture two separate values at one timestamp: `value` is prepaid units
-remaining, and `cumulativeUsage` is the lifetime usage counter. Counter movement measures
+Household readings support two separate values at one timestamp: `value` is prepaid units
+remaining, and `cumulativeUsage` is the lifetime usage counter. Either can be captured independently.
+Counter movement measures
 consumption; opening prepaid balance plus purchases minus closing balance cross-checks it.
 For example, 519 to 525 measures 6 m³ used, while a balance of 10 falling to 4 confirms 6 m³.
 

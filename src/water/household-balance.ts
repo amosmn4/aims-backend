@@ -6,7 +6,7 @@ import { dialFlow } from "./meter-flow";
 export type BalanceReading = {
   id: string;
   readingDate: Date;
-  value: number;
+  value: number | null;
   cumulativeUsage?: number | null;
 };
 export type BalancePurchase = { recordedAt: Date; units: number };
@@ -63,8 +63,18 @@ export function balancePeriods(
   readings: BalanceReading[],
   purchases: BalancePurchase[],
 ): BalancePeriod[] {
-  const sorted = [...readings].sort((a, b) => a.readingDate.getTime() - b.readingDate.getTime());
+  const sorted = readings
+    .filter((row): row is BalanceReading & { value: number } => row.value !== null)
+    .sort((a, b) => a.readingDate.getTime() - b.readingDate.getTime());
   const periods: BalancePeriod[] = [];
+  const counters = readings
+    .filter((row) => row.cumulativeUsage != null)
+    .sort((a, b) => +a.readingDate - +b.readingDate);
+  const resets = counters.flatMap((row, index) =>
+    index > 0 && row.cumulativeUsage! < counters[index - 1].cumulativeUsage!
+      ? [row.readingDate]
+      : [],
+  );
   let lastKnownCounter = sorted[0]?.cumulativeUsage ?? null;
   for (let i = 1; i < sorted.length; i++) {
     const prev = sorted[i - 1];
@@ -75,7 +85,9 @@ export function balancePeriods(
       prev.cumulativeUsage != null && cur.cumulativeUsage != null
         ? cur.cumulativeUsage - prev.cumulativeUsage
         : null;
-    const measuredUsed = counterDelta !== null && counterDelta >= 0 ? counterDelta : null;
+    const counterReset = resets.some((date) => date > prev.readingDate && date <= cur.readingDate);
+    const measuredUsed =
+      counterDelta !== null && counterDelta >= 0 && !counterReset ? counterDelta : null;
     const used = measuredUsed ?? creditUsed;
     const difference = measuredUsed === null ? null : measuredUsed - creditUsed;
     const days = (cur.readingDate.getTime() - prev.readingDate.getTime()) / DAY_MS;
@@ -89,9 +101,10 @@ export function balancePeriods(
 
     const flags: BalanceFlag[] = [];
     if (
-      cur.cumulativeUsage != null &&
-      lastKnownCounter !== null &&
-      cur.cumulativeUsage < lastKnownCounter
+      counterReset ||
+      (cur.cumulativeUsage != null &&
+        lastKnownCounter !== null &&
+        cur.cumulativeUsage < lastKnownCounter)
     )
       flags.push("counter_decreased");
     if (cur.cumulativeUsage != null) lastKnownCounter = cur.cumulativeUsage;
@@ -141,7 +154,10 @@ export function balanceUsageInWindow(
   const matching = periods.filter(
     (period) => period.to > start && period.from < end && period.to > period.from,
   );
-  if (matching.length === 0) return null;
+  if (matching.length === 0) return independentCounterUsage(readings, purchases, start, end);
+  const independent = independentCounterUsage(readings, purchases, start, end);
+  if (independent?.complete && (matching[0].from > start || matching.at(-1)!.to < end))
+    return independent;
   const slices = matching.map((period) => {
     const from = new Date(Math.max(start.getTime(), period.from.getTime()));
     const to = new Date(Math.min(end.getTime(), period.to.getTime()));
@@ -172,7 +188,7 @@ export function balanceUsageInWindow(
           : 0),
     };
   });
-  if (slices.some(({ period }) => period.flags.includes("counter_decreased"))) return null;
+  if (slices.some(({ period }) => period.flags.includes("counter_decreased"))) return independent;
   const from = slices[0].from;
   const to = slices[slices.length - 1].to;
   const counters = readings
@@ -237,5 +253,74 @@ export function balanceUsageInWindow(
     issues:
       intervalIssues ||
       (measuredUsed !== null && Math.abs(measuredUsed - creditUsed) > BALANCE_TOLERANCE ? 1 : 0),
+  };
+}
+
+export function independentCounterUsage(
+  readings: BalanceReading[],
+  purchases: BalancePurchase[],
+  start: Date,
+  end: Date,
+) {
+  const counters = readings
+    .filter((row) => row.cumulativeUsage != null)
+    .sort((a, b) => +a.readingDate - +b.readingDate);
+  const before = counters.filter((row) => row.readingDate < start).at(-1) ?? null;
+  const inside = counters.filter((row) => row.readingDate >= start && row.readingDate < end);
+  const after = counters.find((row) => row.readingDate >= end) ?? null;
+  const relevant = [before, ...inside, after].filter((row): row is BalanceReading => row !== null);
+  if (
+    relevant.some(
+      (row, index) => index > 0 && row.cumulativeUsage! < relevant[index - 1].cumulativeUsage!,
+    )
+  )
+    return null;
+  const counter = (row: BalanceReading | null) =>
+    row && { at: row.readingDate, value: row.cumulativeUsage! };
+  const flow = dialFlow(
+    {
+      before: counter(before),
+      first: counter(inside[0] ?? null),
+      last: counter(inside.at(-1) ?? null),
+      after: counter(after),
+    },
+    start,
+    end,
+  );
+  if (!flow) return null;
+  const openingBalance =
+    readings.find((row) => +row.readingDate === +flow.from && row.value !== null)?.value ?? null;
+  const closingBalance =
+    readings.find((row) => +row.readingDate === +flow.to && row.value !== null)?.value ?? null;
+  const purchased = purchases
+    .filter(
+      (purchase) =>
+        (+flow.from === +start
+          ? purchase.recordedAt >= flow.from
+          : purchase.recordedAt > flow.from) &&
+        (+flow.to === +end ? purchase.recordedAt < flow.to : purchase.recordedAt <= flow.to),
+    )
+    .reduce((total, purchase) => total + purchase.units, 0);
+  const creditUsed =
+    openingBalance !== null && closingBalance !== null
+      ? round2(openingBalance + purchased - closingBalance)
+      : null;
+  const measuredUsed = round2(flow.units);
+  const difference = creditUsed === null ? null : round2(measuredUsed - creditUsed);
+  return {
+    used: measuredUsed,
+    openedAt: flow.from,
+    closedAt: flow.to,
+    complete: +flow.from <= +start && +flow.to >= +end,
+    estimated:
+      !counters.some((row) => +row.readingDate === +flow.from) ||
+      !counters.some((row) => +row.readingDate === +flow.to),
+    openingBalance,
+    closingBalance,
+    purchased,
+    measuredUsed,
+    creditUsed,
+    difference,
+    issues: difference !== null && Math.abs(difference) > BALANCE_TOLERANCE ? 1 : 0,
   };
 }

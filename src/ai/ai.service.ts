@@ -22,6 +22,15 @@ export interface AiCompletionResult {
   provider: AiProvider;
 }
 
+export interface AiExtractionRequest {
+  system: string;
+  prompt: string;
+  schema: Record<string, unknown>;
+  file?: { name: string; mimeType: string; data: Buffer };
+}
+
+export class AiExtractionLimitError extends Error {}
+
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
 const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
 
@@ -47,6 +56,61 @@ export class AiService {
 
   providerStatus(): { openai: boolean; gemini: boolean } {
     return { openai: !!this.openaiKey, gemini: !!this.geminiKey };
+  }
+
+  async extract(req: AiExtractionRequest): Promise<unknown> {
+    if (!this.openaiKey) throw new Error("Configure OpenAI to extract records from files.");
+    const content: Record<string, unknown>[] = [{ type: "input_text", text: req.prompt }];
+    if (req.file) {
+      const data = `data:${req.file.mimeType};base64,${req.file.data.toString("base64")}`;
+      content.push(
+        req.file.mimeType.startsWith("image/")
+          ? { type: "input_image", image_url: data, detail: "high" }
+          : { type: "input_file", filename: req.file.name, file_data: data },
+      );
+    }
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.openaiKey}` },
+      body: JSON.stringify({
+        model: this.openaiModel,
+        instructions: req.system,
+        input: [{ role: "user", content }],
+        text: {
+          format: { type: "json_schema", name: "water_import", strict: true, schema: req.schema },
+        },
+        max_output_tokens: 12000,
+        temperature: 0,
+        store: false,
+      }),
+      signal: AbortSignal.timeout(120000),
+    });
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as {
+        error?: { code?: string; message?: string };
+      } | null;
+      throw new Error(
+        `OpenAI extraction ${response.status}: ${body?.error?.code || "request_failed"}. ${body?.error?.message?.replace(this.openaiKey, "[redacted]").slice(0, 200) || "Try again later."}`,
+      );
+    }
+    const data = (await response.json()) as {
+      status?: string;
+      incomplete_details?: { reason?: string };
+      output?: { content?: { type: string; text?: string }[] }[];
+    };
+    if (data.status === "incomplete")
+      throw new AiExtractionLimitError(
+        `Extraction was incomplete: ${data.incomplete_details?.reason || "output limit"}. Split the source into smaller parts.`,
+      );
+    if (data.status !== "completed")
+      throw new Error("File extraction did not complete. No records were imported.");
+    const text = data.output
+      ?.flatMap((item) => item.content ?? [])
+      .filter((item) => item.type === "output_text")
+      .map((item) => item.text ?? "")
+      .join("");
+    if (!text) throw new Error("The AI could not read this source. No records were imported.");
+    return JSON.parse(text);
   }
 
   // Tries OpenAI first, falls back to Gemini on failure, logging why. Throws if all fail.
