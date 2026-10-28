@@ -370,6 +370,7 @@ model User {
   waterMeterReadings         WaterMeterReading[]             @relation("WaterMeterReadingCreatedBy")
   waterAiInsightsGenerated   WaterAiInsight[]                @relation("WaterAiInsightGeneratedBy")
   waterAiChatMessages        WaterAiChatMessage[]            @relation("WaterAiChatMessageUser")
+  aiChatMessages             AiChatMessage[]
   permissionOverrides        UserPermissionOverride[]        @relation("PermissionOverrideUser")
   permissionOverridesGranted UserPermissionOverride[]        @relation("PermissionOverrideCreatedBy")
   resourceAccessGrants       ResourceAccessGrant[]           @relation("ResourceAccessGrantUser")
@@ -2355,6 +2356,7 @@ model WaterImportBatch {
   status         String   @default("queued") @db.VarChar(24)
   uploadedBy     String   @map("uploaded_by") @db.Char(36)
   totalRows      Int      @default(0) @map("total_rows")
+  previewVersion Int      @default(0) @map("preview_version")
   processedParts Int      @default(0) @map("processed_parts")
   totalParts     Int      @default(0) @map("total_parts")
   summary        Json?
@@ -2422,12 +2424,52 @@ model WaterAiChatMessage {
   userId    String          @map("user_id") @db.Char(36)
   role      WaterAiChatRole
   content   String          @db.Text
+  evidence  Json?
   createdAt DateTime        @default(now()) @map("created_at")
 
   user User @relation("WaterAiChatMessageUser", fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
   @@map("water_ai_chat_messages")
+}
+
+model AiChatMessage {
+  id         String          @id @default(uuid()) @db.Char(36)
+  userId     String          @map("user_id") @db.Char(36)
+  contextKey String          @default("system") @map("context_key") @db.VarChar(191)
+  role       WaterAiChatRole
+  content    String          @db.Text
+  evidence   Json?
+  createdAt  DateTime        @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, contextKey, createdAt])
+  @@map("ai_chat_messages")
+}
+
+model WaterUploadEntity {
+  id         String   @id @default(uuid()) @db.Char(36)
+  uploadKind String   @map("upload_kind") @db.VarChar(16)
+  uploadId   String   @map("upload_id") @db.Char(36)
+  entityType String   @map("entity_type") @db.VarChar(16)
+  entityId   String   @map("entity_id") @db.Char(36)
+  snapshot   Json
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@unique([entityType, entityId])
+  @@index([uploadKind, uploadId])
+  @@map("water_upload_entities")
+}
+
+model WaterUploadRemovalJob {
+  id         String   @id @default(uuid()) @db.Char(36)
+  storageKey String   @map("storage_key")
+  attempts   Int      @default(0)
+  error      String?  @db.Text
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("water_upload_removal_jobs")
 }
 
 /**

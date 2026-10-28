@@ -9,6 +9,8 @@ import type { WaterFileExtractionService } from "./water-file-extraction.service
 import { WaterReadingReviewService } from "./water-reading-review.service";
 import { WaterImportService } from "./water-import.service";
 import { emptyImportRecord } from "./water-import.types";
+import { WaterImportSuggestionsService } from "./water-import-suggestions.service";
+import { WaterUploadRemovalService } from "./water-upload-removal.service";
 
 const user: AuthenticatedUser = {
   id: "staff",
@@ -25,6 +27,7 @@ function fixture() {
     fileHash: "private-hash",
     leaseUntil: null,
     totalRows: 1,
+    previewVersion: 0,
   };
   const rows: WaterImportRow[] = [
     {
@@ -67,7 +70,7 @@ function fixture() {
     isActive: true,
     installedAt: null,
     name: "Zone bulk",
-    customer: null,
+    customer: null as { name: string } | null,
   };
   const filterRows = (where?: { status?: string }) =>
     rows.filter((row) => !where?.status || row.status === where.status);
@@ -134,11 +137,68 @@ function fixture() {
     {} as WaterFileExtractionService,
     readings,
     config,
+    { suggest: jest.fn(async () => []) } as unknown as WaterImportSuggestionsService,
+    { track: jest.fn(async () => undefined) } as unknown as WaterUploadRemovalService,
   );
-  return { service, db, rows, history, storage };
+  return { service, db, rows, history, storage, batch, meter };
 }
 
 describe("Water import confirmation", () => {
+  it("keeps numerical corrections in the source units when importing litres", async () => {
+    const { service, rows } = fixture();
+    rows[0].data = {
+      ...emptyImportRecord(),
+      kind: "reading",
+      meterNumber: "B01",
+      date: "2026-01-10T09:00:00Z",
+      dialReading: 21500000,
+      volumeUnit: "litres",
+    };
+    const preview = await service.get("batch", user);
+    expect(preview.rows[0].assessment?.suggestions[0].patch).toEqual({ dialReading: 22500000 });
+  });
+
+  it("holds a known household meter for review when the source names a different owner", async () => {
+    const { service, rows, meter, history } = fixture();
+    meter.meterType = "household";
+    meter.customer = { name: "Registered household" };
+    history[0].cumulativeUsage = 100;
+    history[0].value = 20;
+    rows[0].data = {
+      ...emptyImportRecord(),
+      kind: "reading",
+      meterNumber: "B01",
+      date: "2026-01-10T09:00:00Z",
+      remainingBalance: 15,
+      cumulativeUsage: 105,
+      customerName: "Different household",
+    };
+    const preview = await service.get("batch", user);
+    expect(preview.rows[0].assessment?.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "customer_name_mismatch" })]),
+    );
+    expect(preview.rows[0].assessment?.suggestions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ patch: { customerName: "Registered household" } }),
+      ]),
+    );
+    expect(preview.rows[0].assessment?.status).toBe("warning");
+  });
+
+  it("requires a complete extraction preview before bulk recording", async () => {
+    const { service, db } = fixture();
+    await expect(service.beginRecording("batch", user)).rejects.toBeInstanceOf(ConflictException);
+    expect(db.waterMeterReading.create).not.toHaveBeenCalled();
+  });
+
+  it("invalidates preview approval when the extracted data is corrected", async () => {
+    const { service, batch } = fixture();
+    const preview = await service.get("batch", user);
+    batch.previewVersion++;
+    await expect(
+      service.beginRecording("batch", user, preview.previewToken!),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
   it("records all validated rows through the background worker after one confirmation", async () => {
     const { service, rows, db } = fixture();
     rows[0].data = {
@@ -148,7 +208,7 @@ describe("Water import confirmation", () => {
       date: "2026-01-10T09:00:00Z",
       dialReading: 22100,
     };
-    await service.beginRecording("batch", user);
+    await service.beginRecording("batch", user, (await service.get("batch", user)).previewToken!);
     await service.processNext();
     await service.processNext();
     expect(db.waterMeterReading.create).toHaveBeenCalledTimes(1);
@@ -157,7 +217,7 @@ describe("Water import confirmation", () => {
 
   it("holds warning rows for explicit individual review during bulk recording", async () => {
     const { service, rows, db } = fixture();
-    await service.beginRecording("batch", user);
+    await service.beginRecording("batch", user, (await service.get("batch", user)).previewToken!);
     await service.processNext();
     expect(db.waterMeterReading.create).not.toHaveBeenCalled();
     expect(rows[0].status).toBe("pending");
@@ -182,7 +242,10 @@ describe("Water import confirmation", () => {
     await expect(
       service.confirm(
         "batch",
-        { rows: [{ id: "row", reviewToken: preview.rows[0].assessment!.reviewToken }] },
+        {
+          rows: [{ id: "row", reviewToken: preview.rows[0].assessment!.reviewToken }],
+          previewToken: preview.previewToken!,
+        },
         user,
       ),
     ).rejects.toBeInstanceOf(ConflictException);
@@ -193,6 +256,7 @@ describe("Water import confirmation", () => {
     const { service, db, rows } = fixture();
     const preview = await service.get("batch", user);
     const request = {
+      previewToken: preview.previewToken!,
       rows: [
         {
           id: "row",
@@ -220,6 +284,7 @@ describe("Water import confirmation", () => {
       service.confirm(
         "batch",
         {
+          previewToken: preview.previewToken!,
           rows: [
             {
               id: "row",

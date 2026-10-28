@@ -3,6 +3,8 @@ import { PrismaService } from "../prisma/prisma.service";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import { AiService } from "../ai/ai.service";
 import { WaterService } from "./water.service";
+import { AiAssistantService } from "../ai/ai-assistant.service";
+import { plainAiText } from "../ai/plain-ai-text";
 
 interface InsightPayload {
   summary: string;
@@ -35,7 +37,40 @@ export class WaterAiService {
     private readonly prisma: PrismaService,
     private readonly water: WaterService,
     private readonly ai: AiService,
-  ) {}
+    private readonly assistant: AiAssistantService,
+  ) {
+    this.assistant.register(
+      {
+        name: "water_report",
+        description:
+          "Compute the authoritative Water report for an explicitly requested YYYY-MM month using AIMS's existing measurement and reconciliation rules. Prefer this for monthly NRW, losses, measured volumes, household credit reconciliation, collections and expenses. A month is mandatory; never silently default to the current month. Use query_records for available historical dates and all-time searches.",
+        parameters: {
+          type: "object",
+          properties: { month: { type: "string" } },
+          required: ["month"],
+          additionalProperties: false,
+        },
+      },
+      async (args, user) => {
+        if (!user.roles.some((role) => ["water", "ceo", "system_admin"].includes(role)))
+          throw new BadRequestException("Water access is required.");
+        const month = args && typeof args === "object" ? (args as { month?: unknown }).month : null;
+        if (typeof month !== "string" || !/^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test(month))
+          throw new BadRequestException("Specify the requested month as YYYY-MM.");
+        return {
+          data: await this.water.reportSummary({ month }),
+          source: {
+            model: "Water report",
+            operation: "report",
+            filters: { month },
+            matchedRecords: 1,
+            coverage: { month },
+            records: [],
+          },
+        };
+      },
+    );
+  }
 
   isConfigured(): boolean {
     return this.ai.isConfigured();
@@ -45,11 +80,12 @@ export class WaterAiService {
     return this.ai.providerStatus();
   }
 
-  latestInsight(month?: string) {
-    return this.prisma.waterAiInsight.findFirst({
+  async latestInsight(month?: string) {
+    const insight = await this.prisma.waterAiInsight.findFirst({
       where: month ? { month } : {},
       orderBy: { createdAt: "desc" },
     });
+    return insight ? { ...insight, ...this.parseInsightPayload(JSON.stringify(insight)) } : null;
   }
 
   async generateInsight(month: string | undefined, user: AuthenticatedUser) {
@@ -120,7 +156,7 @@ List at most 5 reasons. Do not invent data not present above.`;
       throw new BadRequestException("The AI response was not in the expected format.");
     }
     const obj = raw as Record<string, unknown>;
-    const summary = typeof obj.summary === "string" ? obj.summary : "";
+    const summary = typeof obj.summary === "string" ? plainAiText(obj.summary) : "";
     if (!summary) {
       throw new BadRequestException(
         "The AI response was missing a summary — try generating again.",
@@ -137,14 +173,26 @@ List at most 5 reasons. Do not invent data not present above.`;
     const reasons = Array.isArray(obj.reasons)
       ? obj.reasons.filter((r): r is string => typeof r === "string")
       : [];
-    return { summary, anomalies, reasons };
+    return {
+      summary,
+      anomalies: anomalies.map((item) => ({
+        ...item,
+        title: plainAiText(item.title),
+        detail: typeof item.detail === "string" ? plainAiText(item.detail) : "",
+      })),
+      reasons: reasons.map(plainAiText),
+    };
   }
 
-  chatHistory(user: AuthenticatedUser) {
-    return this.prisma.waterAiChatMessage.findMany({
+  async chatHistory(user: AuthenticatedUser) {
+    const rows = await this.prisma.waterAiChatMessage.findMany({
       where: { userId: user.id },
       orderBy: { createdAt: "asc" },
     });
+    return rows.map((row) => ({
+      ...row,
+      content: row.role === "assistant" ? plainAiText(row.content) : row.content,
+    }));
   }
 
   async chatSend(message: string, user: AuthenticatedUser) {
@@ -164,44 +212,21 @@ List at most 5 reasons. Do not invent data not present above.`;
     });
     const history = recent.reverse().map((m) => ({ role: m.role, content: m.content }));
 
-    const [summary, trend] = await Promise.all([
-      this.water.reportSummary({}),
-      this.water.trend({ months: 6 }),
-    ]);
-    const dataBlock = JSON.stringify({ ...summary, sixMonthTrend: trend }, null, 2);
-
     await this.prisma.waterAiChatMessage.create({
       data: { userId: user.id, role: "user", content: trimmed },
     });
 
-    const prompt = `Current water network data (context — the question below may or may not be about this data):
-
-${dataBlock}
-
-Question: ${trimmed}`;
-
-    let result;
-    try {
-      result = await this.ai.complete({
-        system: `${SYSTEM_CONTEXT} Answer conversationally and concisely (a few sentences unless the question calls for a list). If something can't be answered from the data given, say so plainly instead of guessing.`,
-        history,
-        prompt,
-        maxOutputTokens: 600,
-      });
-    } catch {
-      // Degrade gracefully within the conversation itself instead of surfacing a raw error.
-      return this.prisma.waterAiChatMessage.create({
-        data: {
-          userId: user.id,
-          role: "assistant",
-          content:
-            "Sorry — I couldn't reach the AI provider just now. Please try again in a moment.",
-        },
-      });
-    }
+    const result = await this.assistant.answer(trimmed, user, history);
 
     return this.prisma.waterAiChatMessage.create({
-      data: { userId: user.id, role: "assistant", content: result.text.trim() },
+      data: {
+        userId: user.id,
+        role: "assistant",
+        content: result.text,
+        evidence: JSON.parse(
+          JSON.stringify({ sources: result.sources, queriedAt: result.queriedAt }),
+        ),
+      },
     });
   }
 

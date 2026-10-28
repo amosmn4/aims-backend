@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { plainAiText } from "./plain-ai-text";
 
 export type AiProvider = "openai" | "gemini";
 
@@ -20,6 +21,17 @@ export interface AiCompletionRequest {
 export interface AiCompletionResult {
   text: string;
   provider: AiProvider;
+}
+
+export interface AiFunctionTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface AiToolResult {
+  data: unknown;
+  file?: AiExtractionRequest["file"];
 }
 
 export interface AiExtractionRequest {
@@ -56,6 +68,99 @@ export class AiService {
 
   providerStatus(): { openai: boolean; gemini: boolean } {
     return { openai: !!this.openaiKey, gemini: !!this.geminiKey };
+  }
+
+  async withTools(
+    req: AiCompletionRequest,
+    functions: AiFunctionTool[],
+    execute: (name: string, args: unknown) => Promise<AiToolResult>,
+  ): Promise<AiCompletionResult> {
+    if (!this.openaiKey)
+      throw new Error(
+        "OpenAI is required for database-backed questions. Configure OPENAI_API_KEY.",
+      );
+    const input: Record<string, unknown>[] = [
+      ...(req.history ?? []).map((turn) => ({ role: turn.role, content: turn.content })),
+      { role: "user", content: req.prompt },
+    ];
+    let calls = 0;
+    for (let turn = 0; turn < 12; turn++) {
+      const response = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.openaiKey}` },
+        body: JSON.stringify({
+          model: this.openaiModel,
+          instructions: req.system,
+          input,
+          tools: functions.map((tool) => ({ type: "function", ...tool, strict: true })),
+          tool_choice: turn === 0 ? "required" : calls >= 24 || turn === 11 ? "none" : "auto",
+          parallel_tool_calls: false,
+          max_output_tokens: req.maxOutputTokens ?? 2400,
+          store: false,
+        }),
+        signal: AbortSignal.timeout(120000),
+      });
+      if (!response.ok)
+        throw new Error(`Database assistant provider returned HTTP ${response.status}.`);
+      const body = (await response.json()) as {
+        status: string;
+        output: {
+          type: string;
+          name?: string;
+          arguments?: string;
+          call_id?: string;
+          content?: { type: string; text?: string }[];
+        }[];
+      };
+      if (body.status !== "completed")
+        throw new Error("The database answer did not finish. Narrow the question and try again.");
+      input.push(...(body.output as Record<string, unknown>[]));
+      const pending = body.output.filter((item) => item.type === "function_call");
+      if (!pending.length) {
+        const text = plainAiText(
+          body.output
+            .flatMap((item) => item.content ?? [])
+            .filter((part) => part.type === "output_text")
+            .map((part) => part.text ?? "")
+            .join("\n"),
+        );
+        if (!text) throw new Error("The database assistant returned no answer.");
+        return { text, provider: "openai" };
+      }
+      for (const call of pending) {
+        calls++;
+        let result: AiToolResult;
+        try {
+          result = await execute(call.name!, JSON.parse(call.arguments || "{}"));
+        } catch (error) {
+          result = {
+            data: {
+              error:
+                error instanceof Error && !/prisma|sql|invocation/i.test(error.message)
+                  ? error.message
+                  : "The query could not run. Check the catalog, filters and your record permissions.",
+            },
+          };
+        }
+        input.push({
+          type: "function_call_output",
+          call_id: call.call_id,
+          output: JSON.stringify(result.data),
+        });
+        if (result.file) {
+          const uri = `data:${result.file.mimeType};base64,${result.file.data.toString("base64")}`;
+          input.push({
+            role: "user",
+            content: [
+              result.file.mimeType.startsWith("image/")
+                ? { type: "input_image", image_url: uri }
+                : { type: "input_file", filename: result.file.name, file_data: uri },
+            ],
+          });
+        }
+      }
+    }
+    throw new Error("The query needs more steps. Ask for a narrower breakdown.");
   }
 
   async extract(req: AiExtractionRequest): Promise<unknown> {
@@ -121,7 +226,7 @@ export class AiService {
     if (this.openaiKey) {
       try {
         const text = await this.callOpenAi(req);
-        return { text, provider: "openai" };
+        return { text: req.jsonMode ? text : plainAiText(text), provider: "openai" };
       } catch (err) {
         this.logger.warn(
           `OpenAI request failed${this.geminiKey ? ", falling back to Gemini" : ""}: ${
@@ -132,7 +237,7 @@ export class AiService {
       }
     }
     const text = await this.callGemini(req);
-    return { text, provider: "gemini" };
+    return { text: req.jsonMode ? text : plainAiText(text), provider: "gemini" };
   }
 
   private async callOpenAi(req: AiCompletionRequest): Promise<string> {

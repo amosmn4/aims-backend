@@ -4,6 +4,7 @@ import {
   ArrayMinSize,
   Equals,
   IsArray,
+  IsBoolean,
   IsObject,
   IsOptional,
   IsString,
@@ -12,6 +13,9 @@ import {
 } from "class-validator";
 
 export class ConfirmReadyWaterImportDto {
+  @IsString()
+  @MaxLength(2048)
+  previewToken!: string;
   @Equals(true)
   approved!: boolean;
 }
@@ -37,10 +41,23 @@ export class ConfirmWaterImportRowDto {
 }
 
 export class ConfirmWaterImportDto {
+  @IsString()
+  @MaxLength(2048)
+  previewToken!: string;
   @IsArray()
   @ArrayMinSize(1)
   @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => ConfirmWaterImportRowDto)
   rows!: ConfirmWaterImportRowDto[];
+}
+
+export class RemoveWaterUploadDto {
+  @IsOptional()
+  @IsBoolean()
+  includeLegacyAccounts?: boolean;
+
+  @IsString()
+  @MaxLength(2048)
+  token!: string;
 }

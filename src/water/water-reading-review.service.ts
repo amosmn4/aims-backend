@@ -7,9 +7,11 @@ import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import type { CreateReadingDto } from "./dto/create-reading.dto";
 import type { UpdateReadingDto } from "./dto/update-reading.dto";
 import { assessReading, type ReadingObservation, type ReadingWarning } from "./reading-assessment";
+import { suggestReadingValues, type RecordSuggestion } from "./record-suggestions";
 
 export type WaterDatabase = PrismaService | Prisma.TransactionClient;
 export interface ReadingReview {
+  suggestions: RecordSuggestion[];
   warnings: ReadingWarning[];
   reviewToken: string;
   meter: { id: string; meterNumber: string; meterType: string };
@@ -170,6 +172,14 @@ export class WaterReadingReviewService {
       )
       .digest("hex");
     return {
+      suggestions: suggestReadingValues({
+        meterType: meter.meterType,
+        readingDate: at,
+        value,
+        cumulativeUsage,
+        observations,
+        purchasedUnits,
+      }),
       meter: { id: meter.id, meterNumber: meter.meterNumber, meterType: meter.meterType },
       warnings,
       reviewToken: this.sign(fingerprint),

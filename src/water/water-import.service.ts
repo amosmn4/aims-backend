@@ -27,9 +27,13 @@ import {
 import type { ReadingObservation, ReadingWarning } from "./reading-assessment";
 import type { CreateReadingDto } from "./dto/create-reading.dto";
 import type { ConfirmWaterImportDto } from "./dto/water-import.dto";
+import { WaterImportSuggestionsService } from "./water-import-suggestions.service";
+import { WaterUploadRemovalService, type WaterEntityType } from "./water-upload-removal.service";
+import { normaliseMatch, type RecordSuggestion } from "./record-suggestions";
 
 type RowContext = { rows: WaterImportRow[]; groups: Map<string, WaterImportRow[]> };
 export interface ImportReview {
+  suggestions: RecordSuggestion[];
   status: "ready" | "warning" | "blocked" | "duplicate" | "ignored";
   issues: string[];
   warnings: ReadingWarning[];
@@ -58,6 +62,8 @@ export class WaterImportService {
     private readonly extraction: WaterFileExtractionService,
     private readonly readings: WaterReadingReviewService,
     private readonly config: ConfigService,
+    private readonly suggestions: WaterImportSuggestionsService,
+    private readonly removal: WaterUploadRemovalService,
   ) {}
 
   async upload(file: Express.Multer.File | undefined, user: AuthenticatedUser) {
@@ -159,6 +165,9 @@ export class WaterImportService {
       });
     return {
       ...this.presentBatch(batch),
+      previewToken: ["review", "completed"].includes(batch.status)
+        ? this.previewToken(batch, user.id)
+        : null,
       rows: reviewed,
       total,
       page,
@@ -188,6 +197,10 @@ export class WaterImportService {
       if (!row) throw new NotFoundException("Import row not found.");
       if (row.status !== "pending")
         throw new ConflictException("This row has already been processed.");
+      await tx.waterImportBatch.update({
+        where: { id: batchId },
+        data: { previewVersion: { increment: 1 } },
+      });
       return tx.waterImportRow.update({
         where: { id: rowId },
         data: { data: json(parsed.data), issues: [], warnings: [] },
@@ -204,12 +217,13 @@ export class WaterImportService {
     return this.presentBatch(await this.batch(id));
   }
 
-  async beginRecording(id: string, user: AuthenticatedUser) {
+  async beginRecording(id: string, user: AuthenticatedUser, previewToken?: string) {
     return this.prisma.$transaction(async (tx) => {
       await tx.$queryRaw(
         Prisma.sql`SELECT id FROM water_import_batches WHERE id = ${id} FOR UPDATE`,
       );
       const batch = await this.batch(id, tx);
+      this.requirePreview(batch, user.id, previewToken);
       if (batch.status !== "review")
         throw new ConflictException("Only an import awaiting review can be confirmed.");
       const updated = await tx.waterImportBatch.update({
@@ -295,6 +309,7 @@ export class WaterImportService {
             data: {
               status: "review",
               totalRows: rows.length,
+              previewVersion: { increment: 1 },
               leaseUntil: null,
               summary: {
                 extracted: rows.length,
@@ -339,6 +354,7 @@ export class WaterImportService {
           Prisma.sql`SELECT id FROM water_import_batches WHERE id = ${batchId} FOR UPDATE`,
         );
         const batch = await this.batch(batchId, tx);
+        if (!backgroundContext) this.requirePreview(batch, user.id, request.previewToken);
         if (
           !(backgroundContext
             ? batch.status === "recording"
@@ -385,7 +401,14 @@ export class WaterImportService {
           let targetId = assessment.targetId;
           let status: string = assessment.status;
           if (!["duplicate", "ignored"].includes(assessment.status)) {
-            const result = await this.write(data, assessment, user, input.reviewReason, tx);
+            const result = await this.write(
+              data,
+              assessment,
+              user,
+              input.reviewReason,
+              tx,
+              batchId,
+            );
             targetId = result.id;
             status = "imported";
           }
@@ -477,7 +500,12 @@ export class WaterImportService {
           }
           if (!selections.length) break;
           try {
-            const result = await this.confirm(batch.id, { rows: selections }, user, context);
+            const result = await this.confirm(
+              batch.id,
+              { rows: selections, previewToken: "background" },
+              user,
+              context,
+            );
             const saved = new Set(result.processedIds);
             for (const row of chunk) if (saved.has(row.id)) row.status = "imported";
             processed += result.processed;
@@ -529,6 +557,7 @@ export class WaterImportService {
   ): Promise<ImportReview> {
     const data = importRecordSchema.parse(row.data);
     const result: ImportReview = {
+      suggestions: [],
       status: "ready",
       issues: Array.isArray(row.issues)
         ? row.issues.filter((issue): issue is string => typeof issue === "string")
@@ -565,6 +594,31 @@ export class WaterImportService {
       result.issues.push(
         "Unknown meter. Register it with its correct type first; meters are not created automatically from readings or payments.",
       );
+    if (!meter && ["reading", "purchase", "usage", "meter", "customer"].includes(data.kind))
+      result.suggestions = await this.suggestions.suggest(data);
+    if (
+      ["reading", "usage"].includes(data.kind) &&
+      meter?.customer &&
+      data.customerName &&
+      normaliseMatch(data.customerName) !== normaliseMatch(meter.customer.name)
+    ) {
+      result.warnings.push({
+        code: "customer_name_mismatch",
+        severity: "danger",
+        message: `The source names ${data.customerName}, but meter ${meter.meterNumber} belongs to ${meter.customer.name}. Verify the intended account before recording.`,
+      });
+      result.suggestions.push(
+        {
+          label: `Use registered name: ${meter.customer.name}`,
+          explanation:
+            "Use this only if the meter number is correct and the source name is a typo.",
+          confidence: "possible",
+          recordId: meter.id,
+          patch: { customerName: meter.customer.name },
+        },
+        ...(await this.suggestions.suggest(data)),
+      );
+    }
     const factor = volumeFactor(data.volumeUnit);
     if (factor === null && ["reading", "usage", "purchase"].includes(data.kind))
       result.issues.push("Specify a supported volume unit: m3 or litres.");
@@ -582,10 +636,20 @@ export class WaterImportService {
       );
     try {
       if (data.kind === "reading" && meter && at && factor !== null) {
-        if (meter.meterType === "household" && data.dialReading !== null)
+        if (meter.meterType === "household" && data.dialReading !== null) {
           result.issues.push(
             "For a household meter, classify the number as remainingBalance or cumulativeUsage. A generic dial reading is ambiguous.",
           );
+          for (const field of ["remainingBalance", "cumulativeUsage"] as const)
+            if (data[field] === null)
+              result.suggestions.push({
+                label: `Classify ${data.dialReading} as ${field === "remainingBalance" ? "remaining prepaid credit" : "lifetime usage counter"}`,
+                explanation:
+                  "These figures mean different things. Check the source heading or meter display before choosing.",
+                confidence: "possible",
+                patch: { dialReading: null, [field]: data.dialReading },
+              });
+        }
         if (meter.meterType !== "household" && data.remainingBalance !== null)
           result.issues.push("Remaining prepaid balance belongs to household meters.");
         const dto: CreateReadingDto = {
@@ -642,6 +706,17 @@ export class WaterImportService {
             );
           const staged = this.stagedReadings(group, meter.meterType, row.id);
           result.reading = await this.readings.assess(dto, userId, db, undefined, staged);
+          result.suggestions.push(
+            ...result.reading.suggestions.map((suggestion) => ({
+              ...suggestion,
+              patch: Object.fromEntries(
+                Object.entries(suggestion.patch).map(([key, value]) => [
+                  key,
+                  typeof value === "number" ? value / factor : value,
+                ]),
+              ),
+            })),
+          );
           result.warnings.push(...result.reading.warnings);
         }
       }
@@ -860,43 +935,59 @@ export class WaterImportService {
     user: AuthenticatedUser,
     reason: string | undefined,
     tx: Prisma.TransactionClient,
+    batchId: string,
   ): Promise<{ id: string }> {
+    const save = async <T extends { id: string }>(type: WaterEntityType, pending: Promise<T>) => {
+      const record = await pending;
+      await this.removal.track(tx, "ai", batchId, type, record);
+      return record;
+    };
     const factor = volumeFactor(data.volumeUnit)!;
     if (data.kind === "reading")
-      return this.readings.createReviewed(
-        { ...review.dto!, reviewToken: review.reading!.reviewToken, reviewReason: reason },
-        user,
-        review.reading!,
-        tx,
+      return save(
+        "reading",
+        this.readings.createReviewed(
+          { ...review.dto!, reviewToken: review.reading!.reviewToken, reviewReason: reason },
+          user,
+          review.reading!,
+          tx,
+        ),
       );
     if (data.kind === "purchase") {
       const meter = await tx.waterMeter.findUniqueOrThrow({
         where: { id: review.meterId! },
         include: { customer: true },
       });
-      return tx.waterUsageRecord.create({
-        data: {
-          meterId: meter.id,
-          customerId: meter.customerId,
-          customerName: data.customerName || meter.customer?.name || `Account ${data.meterNumber}`,
-          unitsSold: data.units! * factor,
-          amountPaid: data.amountPaid!,
-          recordedAt: importDate(data.date)!,
-          source: "upload",
-        },
-      });
+      return save(
+        "purchase",
+        tx.waterUsageRecord.create({
+          data: {
+            meterId: meter.id,
+            customerId: meter.customerId,
+            customerName:
+              data.customerName || meter.customer?.name || `Account ${data.meterNumber}`,
+            unitsSold: data.units! * factor,
+            amountPaid: data.amountPaid!,
+            recordedAt: importDate(data.date)!,
+            source: "upload",
+          },
+        }),
+      );
     }
     if (data.kind === "usage")
-      return tx.waterMeterUsageInterval.create({
-        data: {
-          meterId: review.meterId!,
-          periodStart: importDate(data.periodStart)!,
-          periodEnd: importDate(data.periodEnd)!,
-          units: data.units! * factor,
-          notes: data.notes,
-          createdBy: user.id,
-        },
-      });
+      return save(
+        "usage",
+        tx.waterMeterUsageInterval.create({
+          data: {
+            meterId: review.meterId!,
+            periodStart: importDate(data.periodStart)!,
+            periodEnd: importDate(data.periodEnd)!,
+            units: data.units! * factor,
+            notes: data.notes,
+            createdBy: user.id,
+          },
+        }),
+      );
     let customerId = review.customerId;
     if (
       data.customerName &&
@@ -914,25 +1005,31 @@ export class WaterImportService {
       customerId =
         matches[0]?.id ??
         (
-          await tx.waterCustomer.create({
-            data: { name: data.customerName.trim(), phone: data.phone, zoneId: review.zoneId },
-          })
+          await save(
+            "customer",
+            tx.waterCustomer.create({
+              data: { name: data.customerName.trim(), phone: data.phone, zoneId: review.zoneId },
+            }),
+          )
         ).id;
     }
     if (data.kind === "customer") return { id: customerId! };
-    return tx.waterMeter.create({
-      data: {
-        meterNumber: data.meterNumber!.trim(),
-        meterType: data.meterType!,
-        mainStage: data.meterType === "main" ? data.mainStage : null,
-        name: data.meterType === "household" ? null : data.name,
-        location: data.location,
-        zoneId: review.zoneId,
-        customerId: data.meterType === "household" ? customerId : null,
-        plotNo: data.plotNo,
-        vendingSystem: data.vendingSystem ?? "amsol",
-      },
-    });
+    return save(
+      "meter",
+      tx.waterMeter.create({
+        data: {
+          meterNumber: data.meterNumber!.trim(),
+          meterType: data.meterType!,
+          mainStage: data.meterType === "main" ? data.mainStage : null,
+          name: data.meterType === "household" ? null : data.name,
+          location: data.location,
+          zoneId: review.zoneId,
+          customerId: data.meterType === "household" ? customerId : null,
+          plotNo: data.plotNo,
+          vendingSystem: data.vendingSystem ?? "amsol",
+        },
+      }),
+    );
   }
 
   private async resolveZone(name: string | null, db: WaterDatabase) {
@@ -998,6 +1095,23 @@ export class WaterImportService {
     const batch = await db.waterImportBatch.findUnique({ where: { id } });
     if (!batch) throw new NotFoundException("Import not found.");
     return batch;
+  }
+
+  private previewToken(batch: { id: string; previewVersion: number }, userId: string) {
+    return createHmac("sha256", this.config.getOrThrow<string>("JWT_ACCESS_SECRET"))
+      .update(JSON.stringify({ id: batch.id, version: batch.previewVersion ?? 0, userId }))
+      .digest("base64url");
+  }
+
+  private requirePreview(
+    batch: { id: string; previewVersion: number },
+    userId: string,
+    token?: string,
+  ) {
+    if (!token || token !== this.previewToken(batch, userId))
+      throw new ConflictException(
+        "Open the complete extraction preview and review the latest corrections before confirming this import.",
+      );
   }
 
   private presentBatch<T extends { storageKey: string; fileHash: string; leaseUntil: Date | null }>(

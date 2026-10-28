@@ -37,6 +37,8 @@ import { dialFlow } from "./meter-flow";
 import { WaterExpensesService } from "./water-expenses.service";
 import { WaterReadingReviewService } from "./water-reading-review.service";
 import { intervalFlow } from "./usage-interval";
+import { WaterUploadRemovalService } from "./water-upload-removal.service";
+import type { Prisma } from "@prisma/client";
 
 // undefined = leave unchanged; null or blank = clear; otherwise the trimmed value.
 function nullableText(value: string | null | undefined): string | null | undefined {
@@ -214,6 +216,7 @@ export class WaterService {
     private readonly prisma: PrismaService,
     private readonly expenses: WaterExpensesService,
     private readonly readingReview: WaterReadingReviewService,
+    private readonly uploadRemoval: WaterUploadRemovalService,
   ) {}
 
   /* ---------- Zones (self-nesting — a zone can sit inside another zone) ---------- */
@@ -1041,74 +1044,85 @@ export class WaterService {
     return Array.isArray(result) ? withPeriod : { ...result, data: withPeriod };
   }
 
-  // Removes the upload and the usage records it imported; auto-registered meters/customers stay.
-  async deleteUpload(id: string) {
-    await this.prisma.waterUsageUpload.findUniqueOrThrow({ where: { id } });
-    const [records] = await this.prisma.$transaction([
-      this.prisma.waterUsageRecord.deleteMany({ where: { uploadId: id } }),
-      this.prisma.waterUsageUpload.delete({ where: { id } }),
-    ]);
-    return { id, recordsDeleted: records.count };
+  async deleteUpload(
+    id: string,
+    token: string,
+    user: AuthenticatedUser,
+    includeLegacyAccounts = false,
+  ) {
+    return this.uploadRemoval.remove("standard", id, token, user, includeLegacyAccounts);
+  }
+
+  previewUploadDeletion(id: string, user: AuthenticatedUser, includeLegacyAccounts = false) {
+    return this.uploadRemoval.preview("standard", id, user, undefined, includeLegacyAccounts);
   }
 
   async createUpload(dto: CreateUsageUploadDto, user: AuthenticatedUser) {
-    const upload = await this.prisma.waterUsageUpload.create({
-      data: { fileName: dto.fileName, uploadedBy: user.id, recordCount: 0 },
-    });
+    return this.prisma.$transaction(
+      async (tx) => {
+        const upload = await tx.waterUsageUpload.create({
+          data: { fileName: dto.fileName, uploadedBy: user.id, recordCount: 0 },
+        });
 
-    let imported = 0;
-    let duplicates = 0;
-    const inactiveMeters = new Set<string>();
-    for (const row of dto.rows) {
-      const meter = await this.findOrCreateMeterWithCustomer(
-        row.meterNumber,
-        row.customerName,
-        dto.vendingSystem,
-      );
-      const recordedAt = new Date(row.recordedAt);
+        let imported = 0;
+        let duplicates = 0;
+        const inactiveMeters = new Set<string>();
+        for (const row of dto.rows) {
+          const meter = await this.findOrCreateMeterWithCustomer(
+            row.meterNumber,
+            row.customerName,
+            dto.vendingSystem,
+            tx,
+            upload.id,
+          );
+          const recordedAt = new Date(row.recordedAt);
 
-      const duplicate = await this.prisma.waterUsageRecord.findFirst({
-        where: {
-          meterId: meter.id,
-          recordedAt,
-          unitsSold: row.unitsSold,
-          amountPaid: row.amountPaid,
-        },
-        select: { id: true },
-      });
-      if (duplicate) {
-        duplicates++;
-        continue;
-      }
+          const duplicate = await tx.waterUsageRecord.findFirst({
+            where: {
+              meterId: meter.id,
+              recordedAt,
+              unitsSold: row.unitsSold,
+              amountPaid: row.amountPaid,
+            },
+            select: { id: true },
+          });
+          if (duplicate) {
+            duplicates++;
+            continue;
+          }
 
-      await this.prisma.waterUsageRecord.create({
-        data: {
-          meterId: meter.id,
-          customerId: meter.customerId,
-          customerName: row.customerName,
-          unitsSold: row.unitsSold,
-          amountPaid: row.amountPaid,
-          recordedAt,
-          source: "upload",
-          uploadId: upload.id,
-        },
-      });
-      if (!meter.isActive) inactiveMeters.add(meter.meterNumber);
-      imported++;
-    }
+          const record = await tx.waterUsageRecord.create({
+            data: {
+              meterId: meter.id,
+              customerId: meter.customerId,
+              customerName: row.customerName,
+              unitsSold: row.unitsSold,
+              amountPaid: row.amountPaid,
+              recordedAt,
+              source: "upload",
+              uploadId: upload.id,
+            },
+          });
+          await this.uploadRemoval.track(tx, "standard", upload.id, "purchase", record);
+          if (!meter.isActive) inactiveMeters.add(meter.meterNumber);
+          imported++;
+        }
 
-    await this.prisma.waterUsageUpload.update({
-      where: { id: upload.id },
-      data: { recordCount: imported },
-    });
-    return {
-      ...(await this.prisma.waterUsageUpload.findUniqueOrThrow({
-        where: { id: upload.id },
-        include: { _count: { select: { records: true } } },
-      })),
-      duplicatesSkipped: duplicates,
-      inactiveMeterNumbers: [...inactiveMeters],
-    };
+        await tx.waterUsageUpload.update({
+          where: { id: upload.id },
+          data: { recordCount: imported },
+        });
+        return {
+          ...(await tx.waterUsageUpload.findUniqueOrThrow({
+            where: { id: upload.id },
+            include: { _count: { select: { records: true } } },
+          })),
+          duplicatesSkipped: duplicates,
+          inactiveMeterNumbers: [...inactiveMeters],
+        };
+      },
+      { timeout: 120000 },
+    );
   }
 
   // mPaya payer names vary per payment, so mPaya meters get no customer record from uploads.
@@ -1116,18 +1130,25 @@ export class WaterService {
     meterNumber: string,
     customerName: string,
     vendingSystem: "amsol" | "mpaya" = "amsol",
+    tx: Prisma.TransactionClient,
+    uploadId: string,
   ) {
-    const existing = await this.prisma.waterMeter.findUnique({ where: { meterNumber } });
+    const existing = await tx.waterMeter.findUnique({ where: { meterNumber } });
     if (existing) return existing;
     if (vendingSystem === "mpaya") {
-      return this.prisma.waterMeter.create({
+      const meter = await tx.waterMeter.create({
         data: { meterNumber, meterType: "household", vendingSystem },
       });
+      await this.uploadRemoval.track(tx, "standard", uploadId, "meter", meter);
+      return meter;
     }
-    const customer = await this.createCustomerNamed(customerName);
-    return this.prisma.waterMeter.create({
+    const customer = await tx.waterCustomer.create({ data: { name: customerName } });
+    await this.uploadRemoval.track(tx, "standard", uploadId, "customer", customer);
+    const meter = await tx.waterMeter.create({
       data: { meterNumber, meterType: "household", vendingSystem, customerId: customer.id },
     });
+    await this.uploadRemoval.track(tx, "standard", uploadId, "meter", meter);
+    return meter;
   }
 
   async listUsageRecords(

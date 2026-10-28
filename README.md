@@ -1,5 +1,26 @@
 # AIMS Backend
 
+## System-wide AI assistant
+
+Ask AIMS is available from the application header. The report editor and Water monthly reports
+also offer an explanation panel. Questions use live, read-only database tools across business
+models, including historical and inactive records. General questions have no default month or
+six-month cutoff. A report question uses its selected period unless another range is requested.
+Counts and aggregates cover every matching record; detail and grouped results expose pagination.
+The assistant follows foreign keys, shows records checked and date coverage, and reads permitted
+PDF, Word, image, text and spreadsheet documents when needed. Existing account permissions apply;
+credentials and authentication secrets are excluded. Answers are plain text without asterisks.
+
+Set OPENAI_API_KEY in backend/.env and optionally OPENAI_MODEL, then restart the backend.
+Database questions use OpenAI Responses function calling and do not fall back to Gemini.
+Retrieved business records and requested document contents are sent to OpenAI with store:false.
+Conversation history and evidence are saved per user and report context in AIMS.
+
+Apply 20261028160000_system_ai_and_upload_ownership and regenerate Prisma. This additive migration
+adds conversations, source evidence, import preview versions, upload ownership snapshots and a
+private source-file cleanup queue. GET /ai/status checks the connection configuration;
+GET/POST/DELETE /ai/chat use a system, water, report:id or water-report:YYYY-MM context.
+
 ## Intelligent water file imports
 
 The Water upload page accepts PNG, JPEG, WebP, PDF, Word (`.doc` and `.docx`), CSV, and Excel.
@@ -22,12 +43,26 @@ Use clear headings such as `Meter`, `Date`, `Dial reading` for main/bulk snapsho
 timestamps use Nairobi time; ambiguous dates require correction. Missing numbers stay absent.
 
 `POST /water/imports` accepts multipart `file`. `GET /water/imports` lists recent jobs and
-`GET /water/imports/:id?page=1&status=pending` returns fifty rows with current meter matches,
-destinations, source values, issues, warnings, and confirmation tokens. Correct staged data with
+`GET /water/imports/:id?page=1` returns fifty rows with current meter matches,
+destinations, all source values, issues, warnings, suggestions, and confirmation tokens. The default
+preview includes clean rows and exceptions. Users acknowledge the complete preview before recording.
+Every confirmation includes its current previewToken; staged corrections invalidate it. Correct data with
 `PATCH /water/imports/:id/rows/:rowId`. `POST /water/imports/:id/confirm` accepts selected row IDs,
 their tokens, and reasons for warning overrides. `POST /water/imports/:id/confirm-ready` with
 `approved: true` records rows without warnings in background batches and holds exceptions for
 individual review. Interrupted jobs resume; committed rows are not written again.
+
+Suggestions rank registered meters using meter numbers, names, phones, plots and zones, and offer
+plausible digit, transposition and decimal corrections against reading history. They remain staged
+until selected and revalidated. A source name that differs from the household owning a known
+meter requires review. Credit remaining and cumulative counters remain distinct.
+
+AI and standard upload deletion use GET :id/deletion-preview, then DELETE :id with the returned
+token. The preview covers every created reading, payment, usage period, meter and customer. Reused
+records are preserved. Later independent records block deletion of their parent account or meter.
+Older uploads without ownership logs list possible related accounts for separate explicit
+confirmation; they are not assumed to belong to the upload. Removal is transactional, retains an
+audit, and deletes the privately stored AI source file with persistent retries on storage failure.
 
 Both imports and manual reading entry use the same history assessment. A bulk dial falling
 from 22,000 to 21,500 requires explicit confirmation and a reason. Checks also cover later

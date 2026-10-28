@@ -10,6 +10,8 @@ import { StorageModule } from "../storage/storage.module";
 import { WaterFileExtractionService } from "./water-file-extraction.service";
 import { WaterImportService } from "./water-import.service";
 import { WaterImportController } from "./water-import.controller";
+import { WaterImportSuggestionsService } from "./water-import-suggestions.service";
+import { WaterUploadRemovalService } from "./water-upload-removal.service";
 
 @Module({
   imports: [AiModule, WaterExpensesModule, StorageModule],
@@ -20,6 +22,8 @@ import { WaterImportController } from "./water-import.controller";
     WaterReadingReviewService,
     WaterFileExtractionService,
     WaterImportService,
+    WaterImportSuggestionsService,
+    WaterUploadRemovalService,
   ],
   exports: [WaterService],
 })

@@ -7,6 +7,7 @@ import type { WaterExpensesService } from "./water-expenses.service";
 import { CreateReadingDto } from "./dto/create-reading.dto";
 import { ConfigService } from "@nestjs/config";
 import { WaterReadingReviewService } from "./water-reading-review.service";
+import type { WaterUploadRemovalService } from "./water-upload-removal.service";
 
 const start = new Date("2026-09-30T21:00:00Z");
 const end = new Date("2026-10-31T21:00:00Z");
@@ -115,6 +116,7 @@ function fixture() {
       prisma as unknown as PrismaService,
       {} as WaterExpensesService,
       readingReview,
+      {} as WaterUploadRemovalService,
     ),
   };
 }
@@ -216,6 +218,7 @@ describe("Household reconciliation API", () => {
         prisma as unknown as PrismaService,
         new ConfigService({ JWT_ACCESS_SECRET: "test-only-reading-secret" }),
       ),
+      {} as WaterUploadRemovalService,
     );
     expect((await older.householdReconciliation("2026-10")).reconciliation).toMatchObject({
       measuredUsed: null,

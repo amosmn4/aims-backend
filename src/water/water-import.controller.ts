@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -23,7 +24,9 @@ import {
   ConfirmWaterImportDto,
   ConfirmReadyWaterImportDto,
   UpdateWaterImportRowDto,
+  RemoveWaterUploadDto,
 } from "./dto/water-import.dto";
+import { WaterUploadRemovalService } from "./water-upload-removal.service";
 
 @Controller("water/imports")
 @Roles("water")
@@ -31,6 +34,7 @@ export class WaterImportController {
   constructor(
     private readonly imports: WaterImportService,
     private readonly storage: StorageService,
+    private readonly removal: WaterUploadRemovalService,
   ) {}
 
   @Post()
@@ -55,6 +59,24 @@ export class WaterImportController {
       contentType: batch.mimeType,
       fileName: batch.fileName,
     });
+  }
+
+  @Get(":id/deletion-preview")
+  deletionPreview(
+    @Param("id") id: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("includeLegacy") includeLegacy?: string,
+  ) {
+    return this.removal.preview("ai", id, user, undefined, includeLegacy === "true");
+  }
+
+  @Delete(":id")
+  remove(
+    @Param("id") id: string,
+    @Body() dto: RemoveWaterUploadDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.removal.remove("ai", id, dto.token, user, dto.includeLegacyAccounts === true);
   }
 
   @Get(":id")
@@ -98,9 +120,9 @@ export class WaterImportController {
   @Post(":id/confirm-ready")
   confirmReady(
     @Param("id") id: string,
-    @Body() _dto: ConfirmReadyWaterImportDto,
+    @Body() dto: ConfirmReadyWaterImportDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.imports.beginRecording(id, user);
+    return this.imports.beginRecording(id, user, dto.previewToken);
   }
 }

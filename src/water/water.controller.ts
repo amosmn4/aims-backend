@@ -23,6 +23,7 @@ import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import { parsePaginationQuery } from "../common/pagination";
 import { WaterReadingReviewService } from "./water-reading-review.service";
 import { ReviewReadingDto } from "./dto/review-reading.dto";
+import { RemoveWaterUploadDto } from "./dto/water-import.dto";
 
 @Controller("water")
 @Roles("water")
@@ -296,10 +297,22 @@ export class WaterController {
     return this.waterService.createUpload(dto, user);
   }
 
-  // Deletes the upload together with the usage records it imported.
+  @Get("usage-uploads/:id/deletion-preview")
+  previewUploadDeletion(
+    @Param("id") id: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("includeLegacy") includeLegacy?: string,
+  ) {
+    return this.waterService.previewUploadDeletion(id, user, includeLegacy === "true");
+  }
+
   @Delete("usage-uploads/:id")
-  deleteUpload(@Param("id") id: string) {
-    return this.waterService.deleteUpload(id);
+  deleteUpload(
+    @Param("id") id: string,
+    @Body() dto: RemoveWaterUploadDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.waterService.deleteUpload(id, dto.token, user, dto.includeLegacyAccounts === true);
   }
 
   @Get("usage-records")

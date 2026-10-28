@@ -1,6 +1,7 @@
 import { BadGatewayException, BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 import { AiService } from "../ai/ai.service";
+import { plainAiText } from "../ai/plain-ai-text";
 import { isAdminOrCeo } from "../common/is-admin-or-ceo";
 import type { AuthenticatedUser } from "../auth/types/authenticated-user";
 import { ReportAccessService } from "./report-access.service";
@@ -219,9 +220,9 @@ Write the CEO a briefing of at most 250 words covering, in this order: what repe
         if (typeof issue.problem !== "string") return [];
         return [
           {
-            where: typeof issue.where === "string" ? issue.where : "",
-            problem: issue.problem,
-            fix: typeof issue.fix === "string" ? issue.fix : "",
+            where: typeof issue.where === "string" ? plainAiText(issue.where) : "",
+            problem: plainAiText(issue.problem),
+            fix: typeof issue.fix === "string" ? plainAiText(issue.fix) : "",
           },
         ];
       });
