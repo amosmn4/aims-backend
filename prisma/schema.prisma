@@ -377,8 +377,403 @@ model User {
   resourceAccessGrantsGiven  ResourceAccessGrant[]           @relation("ResourceAccessGrantCreatedBy")
   timelineExtensions         TimelineExtension[]             @relation("TimelineExtensionCreatedBy")
   notificationPreference     NotificationPreference?
+  opsProfile                 OpsStaff?
 
   @@map("users")
+}
+
+model OpsState {
+  id       String @id @db.VarChar(20)
+  revision Int    @default(0)
+  settings Json
+
+  @@map("ops_state")
+}
+
+model OpsDepartment {
+  id        String                 @id @db.VarChar(20)
+  name      String                 @db.VarChar(200)
+  blurb     String                 @db.Text
+  modules   Json
+  staff     OpsStaff[]
+  projects  OpsProjectDepartment[]
+  reports   OpsReport[]
+  documents OpsDocument[]
+  records   OpsModuleRecord[]
+
+  @@map("ops_departments")
+}
+
+enum OpsRole {
+  ceo
+  staff
+  system_admin
+}
+
+model OpsStaff {
+  id                String              @id @default(uuid()) @db.Char(36)
+  userId            String?             @unique @map("user_id") @db.Char(36)
+  name              String              @db.VarChar(200)
+  title             String              @db.VarChar(200)
+  dept              String?             @db.VarChar(20)
+  role              OpsRole             @default(staff)
+  active            Boolean             @default(true)
+  createdAt         DateTime            @default(now()) @map("created_at")
+  user              User?               @relation(fields: [userId], references: [id], onDelete: Restrict)
+  department        OpsDepartment?      @relation(fields: [dept], references: [id], onDelete: Restrict)
+  ledProjects       OpsProject[]
+  memberships       OpsProjectMember[]
+  tasks             OpsTask[]
+  reports           OpsReport[]
+  reviews           OpsReportReview[]
+  requests          OpsClientRequest[]
+  tenderMemberships OpsTenderMember[]
+  documents         OpsDocument[]
+  documentGrants    OpsDocumentGrant[]
+  businessGrants    OpsBusinessGrant[]
+  moduleGrants      OpsModuleGrant[]
+  records           OpsModuleRecord[]
+  invitations       OpsInvitation[]
+  sessions          OpsSession[]
+  weeklyReports     OpsWeeklyReport[]   @relation("OpsWeeklyAuthor")
+  weeklyReviews     OpsWeeklyReport[]   @relation("OpsWeeklyReviewer")
+  weeklyDeliveries  OpsWeeklyDelivery[]
+
+  @@index([dept])
+  @@map("ops_staff")
+}
+
+enum OpsWeeklyPhase {
+  plan
+  report
+}
+
+model OpsWeeklySettings {
+  id        String   @id @db.VarChar(20)
+  version   Int      @default(1)
+  settings  Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("ops_weekly_settings")
+}
+
+model OpsWeeklyReport {
+  id            String         @id @default(uuid()) @db.Char(36)
+  staffId       String         @map("staff_id") @db.Char(36)
+  weekStart     String         @map("week_start") @db.Char(10)
+  phase         OpsWeeklyPhase
+  version       Int            @default(1)
+  submission    Json
+  submittedAt   DateTime?      @map("submitted_at")
+  reviewedAt    DateTime?      @map("reviewed_at")
+  reviewerId    String?        @map("reviewer_id") @db.Char(36)
+  reviewComment String?        @map("review_comment") @db.Text
+  returnedAt    DateTime?      @map("returned_at")
+  returnComment String?        @map("return_comment") @db.Text
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  author        OpsStaff       @relation("OpsWeeklyAuthor", fields: [staffId], references: [id], onDelete: Restrict)
+  reviewer      OpsStaff?      @relation("OpsWeeklyReviewer", fields: [reviewerId], references: [id], onDelete: Restrict)
+
+  @@unique([staffId, weekStart, phase])
+  @@index([weekStart, phase, submittedAt])
+  @@map("ops_weekly_reports")
+}
+
+model OpsWeeklyDelivery {
+  id          String         @id @default(uuid()) @db.Char(36)
+  recipientId String         @map("recipient_id") @db.Char(36)
+  weekStart   String         @map("week_start") @db.Char(10)
+  phase       OpsWeeklyPhase
+  status      String         @default("pending") @db.VarChar(20)
+  attempts    Int            @default(0)
+  leaseToken  String?        @map("lease_token") @db.Char(36)
+  leaseUntil  DateTime?      @map("lease_until")
+  subject     String         @db.VarChar(255)
+  html        String         @db.LongText
+  plainText   String         @map("plain_text") @db.LongText
+  messageId   String         @unique @map("message_id") @db.VarChar(255)
+  sentAt      DateTime?      @map("sent_at")
+  lastError   String?        @map("last_error") @db.VarChar(500)
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+  recipient   OpsStaff       @relation(fields: [recipientId], references: [id], onDelete: Restrict)
+
+  @@unique([recipientId, weekStart, phase])
+  @@index([status, leaseUntil])
+  @@map("ops_weekly_deliveries")
+}
+
+model OpsClient {
+  id       String             @id @default(uuid()) @db.Char(36)
+  name     String             @db.VarChar(200)
+  contact  String             @db.VarChar(200)
+  services Json
+  projects OpsProject[]
+  requests OpsClientRequest[]
+
+  @@map("ops_clients")
+}
+
+model OpsProject {
+  id          String                 @id @default(uuid()) @db.Char(36)
+  name        String                 @db.VarChar(200)
+  client      String?                @db.Char(36)
+  lead        String                 @db.Char(36)
+  status      String                 @db.VarChar(30)
+  stage       String                 @db.VarChar(30)
+  progress    Int
+  due         String                 @db.Char(10)
+  summary     String                 @db.Text
+  customer    OpsClient?             @relation(fields: [client], references: [id], onDelete: Restrict)
+  leader      OpsStaff               @relation(fields: [lead], references: [id], onDelete: Restrict)
+  members     OpsProjectMember[]
+  departments OpsProjectDepartment[]
+  tasks       OpsTask[]
+  reports     OpsReport[]
+  documents   OpsDocument[]
+
+  @@index([client])
+  @@index([lead])
+  @@map("ops_projects")
+}
+
+model OpsProjectMember {
+  projectId String     @map("project_id") @db.Char(36)
+  personId  String     @map("person_id") @db.Char(36)
+  project   OpsProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  person    OpsStaff   @relation(fields: [personId], references: [id], onDelete: Restrict)
+
+  @@id([projectId, personId])
+  @@map("ops_project_members")
+}
+
+model OpsProjectDepartment {
+  projectId  String        @map("project_id") @db.Char(36)
+  deptId     String        @map("dept_id") @db.VarChar(20)
+  project    OpsProject    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  department OpsDepartment @relation(fields: [deptId], references: [id], onDelete: Restrict)
+
+  @@id([projectId, deptId])
+  @@map("ops_project_departments")
+}
+
+model OpsTask {
+  id          String        @id @default(uuid()) @db.Char(36)
+  title       String        @db.VarChar(200)
+  description String?       @db.Text
+  project     String        @db.Char(36)
+  assignee    String        @db.Char(36)
+  due         String        @db.Char(10)
+  priority    String        @db.VarChar(20)
+  status      String        @db.VarChar(20)
+  ceoComment  String?       @map("ceo_comment") @db.Text
+  parent      OpsProject    @relation(fields: [project], references: [id], onDelete: Restrict)
+  owner       OpsStaff      @relation(fields: [assignee], references: [id], onDelete: Restrict)
+  documents   OpsDocument[]
+
+  @@index([project])
+  @@index([assignee])
+  @@map("ops_tasks")
+}
+
+model OpsReport {
+  id         String            @id @default(uuid()) @db.Char(36)
+  title      String            @db.VarChar(200)
+  type       String            @db.VarChar(30)
+  project    String?           @db.Char(36)
+  dept       String            @db.VarChar(20)
+  author     String            @db.Char(36)
+  date       String            @db.Char(10)
+  progress   String?           @db.Text
+  blockers   String?           @db.Text
+  next       String?           @db.Text
+  reviewed   Boolean           @default(false)
+  comment    String?           @db.Text
+  parent     OpsProject?       @relation(fields: [project], references: [id], onDelete: Restrict)
+  department OpsDepartment     @relation(fields: [dept], references: [id], onDelete: Restrict)
+  writer     OpsStaff          @relation(fields: [author], references: [id], onDelete: Restrict)
+  reviews    OpsReportReview[]
+
+  @@index([project])
+  @@index([dept, date])
+  @@index([author])
+  @@map("ops_reports")
+}
+
+model OpsReportReview {
+  id         String    @id @default(uuid()) @db.Char(36)
+  reportId   String    @map("report_id") @db.Char(36)
+  reviewerId String    @map("reviewer_id") @db.Char(36)
+  comment    String?   @db.Text
+  createdAt  DateTime  @default(now()) @map("created_at")
+  report     OpsReport @relation(fields: [reportId], references: [id], onDelete: Restrict)
+  reviewer   OpsStaff  @relation(fields: [reviewerId], references: [id], onDelete: Restrict)
+
+  @@index([reportId, createdAt])
+  @@map("ops_report_reviews")
+}
+
+model OpsTender {
+  id      String            @id @default(uuid()) @db.Char(36)
+  title   String            @db.VarChar(200)
+  issuer  String            @db.VarChar(200)
+  value   Decimal           @db.Decimal(16, 2)
+  due     String            @db.Char(10)
+  stage   String            @db.VarChar(30)
+  notes   String?           @db.Text
+  members OpsTenderMember[]
+
+  @@map("ops_tenders")
+}
+
+model OpsTenderMember {
+  tenderId String    @map("tender_id") @db.Char(36)
+  personId String    @map("person_id") @db.Char(36)
+  tender   OpsTender @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  person   OpsStaff  @relation(fields: [personId], references: [id], onDelete: Restrict)
+
+  @@id([tenderId, personId])
+  @@map("ops_tender_members")
+}
+
+model OpsClientRequest {
+  id                 String     @id @default(uuid()) @db.Char(36)
+  title              String     @db.VarChar(200)
+  client             String?    @db.Char(36)
+  prospectClientName String?    @map("prospect_client_name") @db.VarChar(200)
+  source             String     @default("operations") @db.VarChar(20)
+  received           String     @db.Char(10)
+  handler            String     @db.Char(36)
+  status             String     @db.VarChar(30)
+  notes              String?    @db.Text
+  customer           OpsClient? @relation(fields: [client], references: [id], onDelete: Restrict)
+  owner              OpsStaff   @relation(fields: [handler], references: [id], onDelete: Restrict)
+
+  @@index([handler])
+  @@map("ops_client_requests")
+}
+
+model OpsBusiness {
+  id      String               @id @default(uuid()) @db.VarChar(36)
+  name    String               @db.VarChar(200)
+  sector  String               @db.VarChar(200)
+  finance OpsBusinessFinance[]
+  grants  OpsBusinessGrant[]
+
+  @@map("ops_businesses")
+}
+
+model OpsBusinessFinance {
+  id          String      @id @default(uuid()) @db.Char(36)
+  business    String      @db.VarChar(36)
+  month       String      @db.Char(7)
+  date        String      @db.Char(10)
+  description String      @db.Text
+  revenue     Decimal     @db.Decimal(16, 2)
+  expenses    Decimal     @db.Decimal(16, 2)
+  note        String?     @db.Text
+  company     OpsBusiness @relation(fields: [business], references: [id], onDelete: Restrict)
+
+  @@index([business, month])
+  @@map("ops_business_finance")
+}
+
+model OpsBusinessGrant {
+  personId   String      @map("person_id") @db.Char(36)
+  businessId String      @map("business_id") @db.VarChar(36)
+  kind       String      @db.VarChar(10)
+  person     OpsStaff    @relation(fields: [personId], references: [id], onDelete: Cascade)
+  business   OpsBusiness @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  @@id([personId, businessId, kind])
+  @@map("ops_business_grants")
+}
+
+model OpsDocument {
+  id         String             @id @default(uuid()) @db.Char(36)
+  name       String             @db.VarChar(200)
+  folder     String             @db.VarChar(200)
+  access     String             @db.VarChar(20)
+  owner      String             @db.Char(36)
+  updated    String             @db.Char(10)
+  project    String?            @db.Char(36)
+  task       String?            @db.Char(36)
+  weeklyRef  String?            @map("weekly_ref") @db.VarChar(100)
+  dept       String?            @db.VarChar(20)
+  storageKey String             @map("storage_key") @db.VarChar(200)
+  mime       String             @db.VarChar(200)
+  size       Int
+  creator    OpsStaff           @relation(fields: [owner], references: [id], onDelete: Restrict)
+  parent     OpsProject?        @relation(fields: [project], references: [id], onDelete: Restrict)
+  taskParent OpsTask?           @relation(fields: [task], references: [id], onDelete: Cascade)
+  department OpsDepartment?     @relation(fields: [dept], references: [id], onDelete: Restrict)
+  grants     OpsDocumentGrant[]
+
+  @@index([task])
+  @@index([weeklyRef])
+  @@map("ops_documents")
+}
+
+model OpsDocumentGrant {
+  documentId String      @map("document_id") @db.Char(36)
+  personId   String      @map("person_id") @db.Char(36)
+  document   OpsDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  person     OpsStaff    @relation(fields: [personId], references: [id], onDelete: Restrict)
+
+  @@id([documentId, personId])
+  @@map("ops_document_grants")
+}
+
+model OpsModuleRecord {
+  id         String        @id @default(uuid()) @db.Char(36)
+  dept       String        @db.VarChar(20)
+  module     String        @db.VarChar(200)
+  title      String        @db.VarChar(200)
+  owner      String        @db.Char(36)
+  date       String        @db.Char(10)
+  status     String        @db.VarChar(30)
+  notes      String        @db.Text
+  amount     Decimal?      @db.Decimal(16, 2)
+  department OpsDepartment @relation(fields: [dept], references: [id], onDelete: Restrict)
+  person     OpsStaff      @relation(fields: [owner], references: [id], onDelete: Restrict)
+
+  @@index([dept, module])
+  @@map("ops_module_records")
+}
+
+model OpsTemplate {
+  id       String @id @default(uuid()) @db.Char(36)
+  name     String @db.VarChar(200)
+  progress String @db.VarChar(200)
+  blockers String @db.VarChar(200)
+  next     String @db.VarChar(200)
+
+  @@map("ops_templates")
+}
+
+model OpsInvitation {
+  id        String    @id @default(uuid()) @db.Char(36)
+  staffId   String    @map("staff_id") @db.Char(36)
+  tokenHash String    @unique @map("token_hash") @db.Char(64)
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  staff     OpsStaff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@index([staffId])
+  @@map("ops_invitations")
+}
+
+model OpsSession {
+  id            String   @id @default(uuid()) @db.Char(36)
+  staffId       String   @map("staff_id") @db.Char(36)
+  refreshHash   String   @unique @map("refresh_hash") @db.Char(64)
+  idleExpiresAt DateTime @map("idle_expires_at")
+  expiresAt     DateTime @map("expires_at")
+  staff         OpsStaff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@index([staffId])
+  @@map("ops_sessions")
 }
 
 model UserRole {
@@ -1104,16 +1499,16 @@ model TaskDependency {
 // Milestones are date markers on a project's timeline — no dependency graph yet
 // (that's the Phase 3 Gantt work); this is deliberately simple: a title, a due date, done or not.
 model Milestone {
-  id          String   @id @default(uuid()) @db.Char(36)
-  projectId   String   @map("project_id") @db.Char(36)
+  id          String    @id @default(uuid()) @db.Char(36)
+  projectId   String    @map("project_id") @db.Char(36)
   title       String
-  description String?  @db.Text
-  dueDate     DateTime @map("due_date") @db.Date
-  isComplete  Boolean  @default(false) @map("is_complete")
+  description String?   @db.Text
+  dueDate     DateTime  @map("due_date") @db.Date
+  isComplete  Boolean   @default(false) @map("is_complete")
   completedAt DateTime? @map("completed_at")
-  createdBy   String?  @map("created_by") @db.Char(36)
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdBy   String?   @map("created_by") @db.Char(36)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
@@ -2266,8 +2661,8 @@ model WaterMeter {
   replacesMeter   WaterMeter?    @relation("MeterReplacement", fields: [replacesMeterId], references: [id], onDelete: SetNull)
   replacedByMeter WaterMeter?    @relation("MeterReplacement")
 
-  usageRecords WaterUsageRecord[]
-  readings     WaterMeterReading[]
+  usageRecords   WaterUsageRecord[]
+  readings       WaterMeterReading[]
   usageIntervals WaterMeterUsageInterval[]
 
   @@index([customerId])
@@ -2348,22 +2743,22 @@ model WaterMeterUsageInterval {
 }
 
 model WaterImportBatch {
-  id             String   @id @default(uuid()) @db.Char(36)
-  fileName       String   @map("file_name")
-  mimeType       String   @map("mime_type")
-  storageKey     String   @map("storage_key")
-  fileHash       String   @map("file_hash") @db.Char(64)
-  status         String   @default("queued") @db.VarChar(24)
-  uploadedBy     String   @map("uploaded_by") @db.Char(36)
-  totalRows      Int      @default(0) @map("total_rows")
-  previewVersion Int      @default(0) @map("preview_version")
-  processedParts Int      @default(0) @map("processed_parts")
-  totalParts     Int      @default(0) @map("total_parts")
+  id             String    @id @default(uuid()) @db.Char(36)
+  fileName       String    @map("file_name")
+  mimeType       String    @map("mime_type")
+  storageKey     String    @map("storage_key")
+  fileHash       String    @map("file_hash") @db.Char(64)
+  status         String    @default("queued") @db.VarChar(24)
+  uploadedBy     String    @map("uploaded_by") @db.Char(36)
+  totalRows      Int       @default(0) @map("total_rows")
+  previewVersion Int       @default(0) @map("preview_version")
+  processedParts Int       @default(0) @map("processed_parts")
+  totalParts     Int       @default(0) @map("total_parts")
   summary        Json?
-  error          String?  @db.Text
+  error          String?   @db.Text
   leaseUntil     DateTime? @map("lease_until")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
   rows WaterImportRow[]
 
@@ -2373,21 +2768,21 @@ model WaterImportBatch {
 }
 
 model WaterImportRow {
-  id          String   @id @default(uuid()) @db.Char(36)
-  batchId     String   @map("batch_id") @db.Char(36)
+  id          String    @id @default(uuid()) @db.Char(36)
+  batchId     String    @map("batch_id") @db.Char(36)
   position    Int
   source      String
   raw         Json
   data        Json
-  status      String   @default("pending") @db.VarChar(24)
+  status      String    @default("pending") @db.VarChar(24)
   issues      Json?
   warnings    Json?
-  targetType  String?  @map("target_type")
-  targetId    String?  @map("target_id") @db.Char(36)
-  confirmedBy String?  @map("confirmed_by") @db.Char(36)
+  targetType  String?   @map("target_type")
+  targetId    String?   @map("target_id") @db.Char(36)
+  confirmedBy String?   @map("confirmed_by") @db.Char(36)
   confirmedAt DateTime? @map("confirmed_at")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
 
   batch WaterImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
 
@@ -2738,11 +3133,32 @@ model PaymentLedgerEntry {
 }
 
 model PaymentLedgerSync {
-  id               String    @id @db.VarChar(40)
-  leaseToken       String?   @map("lease_token") @db.Char(36)
-  leaseUntil       DateTime? @map("lease_until")
-  lastSuccessAt    DateTime? @map("last_success_at")
-  lastError        String?   @map("last_error") @db.Text
+  id            String    @id @db.VarChar(40)
+  leaseToken    String?   @map("lease_token") @db.Char(36)
+  leaseUntil    DateTime? @map("lease_until")
+  lastSuccessAt DateTime? @map("last_success_at")
+  lastError     String?   @map("last_error") @db.Text
 
   @@map("payment_ledger_sync")
+}
+
+enum OpsModule {
+  water
+  blog
+  ledger
+}
+
+enum OpsModuleAccess {
+  view
+  manage
+}
+
+model OpsModuleGrant {
+  staffId String          @map("staff_id") @db.Char(36)
+  module  OpsModule
+  access  OpsModuleAccess
+  staff   OpsStaff        @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@id([staffId, module])
+  @@map("ops_module_grants")
 }

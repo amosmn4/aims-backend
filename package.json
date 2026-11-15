@@ -4,20 +4,28 @@
   "type": "commonjs",
   "scripts": {
     "build": "nest build",
-    "start": "nest start",
+    "build:ops": "nest build --path tsconfig.ops.json",
+    "start": "node --env-file-if-exists=.env scripts/start.cjs",
+    "dev": "nest start --watch",
     "start:dev": "nest start --watch",
+    "start:ops": "nest start --path tsconfig.ops.json --entryFile ops-main",
+    "start:ops:dev": "nest start --path tsconfig.ops.json --entryFile ops-main --watch",
     "start:prod": "node dist/main.js",
     "lint": "eslint \"{src,test,prisma}/**/*.ts\"",
     "format": "prettier --write .",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "prisma:seed": "ts-node prisma/seed.ts",
+    "prisma:seed": "node --env-file=.env -r ts-node/register prisma/seed.ts",
+    "ops:bootstrap": "node --env-file=.env -r ts-node/register prisma/ops-bootstrap.ts",
+    "ops:setup:local": "node --env-file=.env -r ts-node/register prisma/ops-local-admin.ts",
     "reset:demo-data": "ts-node prisma/reset-demo-data.ts",
     "water:seed": "ts-node prisma/seed-water.ts",
     "water:clear-seed": "ts-node prisma/clear-water-seed.ts",
     "water:import-register": "ts-node prisma/import-meter-register.ts",
     "seed:water": "ts-node prisma/seed-water.ts",
-    "test": "jest"
+    "test": "jest",
+    "start:ops:prod": "node dist-ops/ops-main.js",
+    "ops:check": "node --env-file-if-exists=.env scripts/check-ops-readiness.cjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1093.0",
@@ -81,6 +89,6 @@
     }
   },
   "prisma": {
-    "seed": "ts-node prisma/seed.ts"
+    "seed": "node --env-file=.env -r ts-node/register prisma/seed.ts"
   }
 }

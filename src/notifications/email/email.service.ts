@@ -2,9 +2,6 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import nodemailer, { type Transporter } from "nodemailer";
 
-// SMTP is optional — the app boots fine without it, and the digest job simply logs a warning
-// and sends nothing instead of throwing, matching the GoogleAnalyticsService/StorageService
-// degrade pattern used elsewhere in this app.
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
@@ -13,7 +10,7 @@ export class EmailService {
 
   constructor(config: ConfigService) {
     const host = config.get<string>("SMTP_HOST");
-    const port = config.get<number>("SMTP_PORT");
+    const port = Number(config.get<number>("SMTP_PORT"));
     const user = config.get<string>("SMTP_USER");
     const password = config.get<string>("SMTP_PASSWORD");
     const from = config.get<string>("SMTP_FROM");
@@ -27,6 +24,9 @@ export class EmailService {
       port,
       secure: port === 465,
       auth: { user, pass: password },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 30000,
     });
   }
 
@@ -34,10 +34,15 @@ export class EmailService {
     return !!this.transporter;
   }
 
-  async send(to: string, subject: string, html: string): Promise<boolean> {
+  async send(
+    to: string,
+    subject: string,
+    html: string,
+    options: { text?: string; messageId?: string } = {},
+  ): Promise<boolean> {
     if (!this.transporter || !this.from) return false;
     try {
-      await this.transporter.sendMail({ from: this.from, to, subject, html });
+      await this.transporter.sendMail({ from: this.from, to, subject, html, ...options });
       return true;
     } catch (err) {
       this.logger.error(

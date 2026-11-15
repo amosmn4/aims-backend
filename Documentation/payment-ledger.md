@@ -4,7 +4,7 @@ The central reporting ledger is stored in the AIMS MySQL database, in `payment_l
 
 The AIMS backend reads ledger lists, filters, totals, transaction details, and exports from its own database. Transaction snapshots retain provider payloads, notifications, destination, intent/order, water tokens, delivery attempts, callback requests/responses, and gateway audit history. Entries remain readable when the gateway is unavailable.
 
-## Access
+## Legacy access
 
 - CEO and system administrator: default full module access, including individual access administration.
 - Other users: no default access, including finance and water roles.
@@ -57,6 +57,16 @@ The AIMS base is `/api/v1/payment-ledger`:
 | `GET /meters?paybill=...&search=...` | Paybill-scoped meter lookup for allocation |
 
 Ledger filters are `q`, `system`, `paybill`, `destination`, `channel`, `status`, `paymentStatus`, `direction`, `review`, `from`, and `to`; pagination uses `page` and `pageSize`. Dates cover inclusive Nairobi calendar days. Totals keep currencies and incoming/outgoing money separate. Unit grants have no monetary amount and are excluded from cash totals. CSV export uses the same filters and escapes formula-like values.
+
+## Amsol Ops integration
+
+The Ops frontend exposes the existing Ledger at `/payment-ledger` through `/api/v1/ops/payment-ledger`. It retains the same list, totals, export, detail, synchronization and gateway action contracts above, except legacy individual grant endpoints are omitted. Permissions are assigned in Ops Admin using `PUT /api/v1/ops/accounts/:id/modules` with `If-Match` and a `module: "ledger"` grant of `none`, `view` or `manage`.
+
+Every Ops account, including the CEO, starts without Ledger access. Legacy CEO/system administrator defaults and legacy `ResourceAccessGrant` rows do not confer access through Ops. View permits transactions, totals, details, CSV export and sync status. Manage also permits synchronization, allocation, retry and payment system/key administration. The authenticated shared `User.id` remains the gateway actor and audit owner.
+
+Migration `20261111170000_ops_ledger_module` only expands the Ops grant enum; no Ledger transaction or sync state is copied or converted. Both adapters reuse the existing Ledger services and tables. A shared provider module registers one sync worker in a combined application, while the existing database lease coordinates separate API processes. Gateway endpoints, keys, callback destinations, acknowledgements and delivery behavior retain their existing contracts.
+
+`test/ops-ledger.verify.ts` verifies the adapter against an isolated local `_verify` database and mock gateway, including legacy read parity, individual grants, revocation, audited actions, stored reads during gateway failure and worker registration. The frontend `e2e-api/ledger.spec.ts` exercises the connected Ledger screens and forms with that mock. No live gateway action is required for these tests.
 
 ## Validation
 

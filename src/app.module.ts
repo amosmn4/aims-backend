@@ -45,6 +45,7 @@ import { ReportsModule } from "./reports/reports.module";
 import { ExpensesModule } from "./finance/expenses/expenses.module";
 import { CompanySettingsModule } from "./company-settings/company-settings.module";
 import { PaymentLedgerModule } from "./payment-ledger/payment-ledger.module";
+import { OpsModule } from "./ops/ops.module";
 
 @Module({
   imports: [
@@ -93,6 +94,7 @@ import { PaymentLedgerModule } from "./payment-ledger/payment-ledger.module";
     CompanySettingsModule,
     PermissionsModule,
     PaymentLedgerModule,
+    OpsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

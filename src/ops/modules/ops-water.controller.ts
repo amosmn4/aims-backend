@@ -1,0 +1,534 @@
+import { UseGuards } from "@nestjs/common";
+import { Public } from "../../auth/decorators/public.decorator";
+import { OpsAuthGuard } from "../ops-auth.guard";
+import { OpsFeature, OpsModuleGuard } from "../ops-module.guard";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from "@nestjs/common";
+import type { WaterMeterType } from "@prisma/client";
+import {
+  WaterService,
+  parseMeterStatusParam,
+  parseMeterTypeParam,
+  parseVendingSystemParam,
+} from "../../water/water.service";
+import { CreateAdjustmentDto } from "../../water/dto/create-adjustment.dto";
+import { CreateZoneDto } from "../../water/dto/create-zone.dto";
+import { UpdateZoneDto } from "../../water/dto/update-zone.dto";
+import { CreateCustomerDto } from "../../water/dto/create-customer.dto";
+import { UpdateCustomerDto } from "../../water/dto/update-customer.dto";
+import { CreateMeterDto } from "../../water/dto/create-meter.dto";
+import { UpdateMeterDto } from "../../water/dto/update-meter.dto";
+import { CreateReadingDto } from "../../water/dto/create-reading.dto";
+import { UpdateReadingDto } from "../../water/dto/update-reading.dto";
+import { RetireMeterDto } from "../../water/dto/retire-meter.dto";
+import { CreateUsageUploadDto } from "../../water/dto/create-usage-upload.dto";
+import { CurrentUser } from "../../auth/decorators/current-user.decorator";
+import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
+import { parsePaginationQuery } from "../../common/pagination";
+import { WaterReadingReviewService } from "../../water/water-reading-review.service";
+import { ReviewReadingDto } from "../../water/dto/review-reading.dto";
+import { RemoveWaterUploadDto } from "../../water/dto/water-import.dto";
+@Public()
+@UseGuards(OpsAuthGuard, OpsModuleGuard)
+@OpsFeature("water")
+@Controller("ops/water")
+export class OpsWaterController {
+  constructor(
+    private readonly waterService: WaterService,
+    private readonly readingReview: WaterReadingReviewService,
+  ) {}
+  @Get("zones")
+  listZones(
+    @Query("q")
+    q?: string,
+    @Query("page")
+    page?: string,
+    @Query("pageSize")
+    pageSize?: string,
+  ) {
+    return this.waterService.listZones({ q }, parsePaginationQuery(page, pageSize));
+  }
+  @Get("zones/all")
+  listAllZones() {
+    return this.waterService.listAllZones();
+  }
+  @Get("zones/:id/detail")
+  zoneDetail(
+    @Param("id")
+    id: string,
+    @Query("month")
+    month?: string,
+  ) {
+    return this.waterService.zoneDetail(id, month);
+  }
+  @Get("meters/unassigned")
+  unassignedMeters(
+    @Query("meterType")
+    meterType?: WaterMeterType,
+  ) {
+    return this.waterService.unassignedMeters(meterType);
+  }
+  @Post("zones/:id/meters")
+  assignMeters(
+    @Param("id")
+    id: string,
+    @Body()
+    body: {
+      meterIds: string[];
+    },
+  ) {
+    return this.waterService.assignMetersToZone(id, body.meterIds ?? []);
+  }
+  @Post("meters/to-main-line")
+  moveToMainLine(
+    @Body()
+    body: {
+      meterIds: string[];
+    },
+  ) {
+    return this.waterService.assignMetersToZone(null, body.meterIds ?? []);
+  }
+  @Get("settled")
+  settled(
+    @Query("months")
+    months?: string,
+  ) {
+    return this.waterService.settled({ months: months ? Number(months) : undefined });
+  }
+  @Get("adjustments")
+  listAdjustments(
+    @Query("zoneId")
+    zoneId?: string,
+    @Query("from")
+    from?: string,
+    @Query("to")
+    to?: string,
+  ) {
+    return this.waterService.listAdjustments({
+      zoneId,
+      from: from ? new Date(from) : undefined,
+      to: to ? new Date(to) : undefined,
+    });
+  }
+  @Post("adjustments")
+  createAdjustment(
+    @Body()
+    dto: CreateAdjustmentDto,
+    @CurrentUser()
+    user: AuthenticatedUser,
+  ) {
+    return this.waterService.createAdjustment(dto, user.id);
+  }
+  @Delete("adjustments/:id")
+  deleteAdjustment(
+    @Param("id")
+    id: string,
+  ) {
+    return this.waterService.deleteAdjustment(id);
+  }
+  @Get("zone-series")
+  zoneSeries(
+    @Query("granularity")
+    granularity?: "week" | "month",
+    @Query("periods")
+    periods?: string,
+  ) {
+    return this.waterService.zoneSeries({
+      granularity: granularity === "week" ? "week" : "month",
+      periods: periods ? Number(periods) : undefined,
+    });
+  }
+  @Get("meter-series")
+  meterSeries(
+    @Query("granularity")
+    granularity?: "week" | "month",
+    @Query("periods")
+    periods?: string,
+    @Query("meterType")
+    meterType?: WaterMeterType,
+  ) {
+    return this.waterService.meterSeries({
+      granularity: granularity === "week" ? "week" : "month",
+      periods: periods ? Number(periods) : undefined,
+      meterType,
+    });
+  }
+  @Post("zones")
+  createZone(
+    @Body()
+    dto: CreateZoneDto,
+  ) {
+    return this.waterService.createZone(dto);
+  }
+  @Patch("zones/:id")
+  updateZone(
+    @Param("id")
+    id: string,
+    @Body()
+    dto: UpdateZoneDto,
+  ) {
+    return this.waterService.updateZone(id, dto);
+  }
+  @Delete("zones/:id")
+  deleteZone(
+    @Param("id")
+    id: string,
+  ) {
+    return this.waterService.deleteZone(id);
+  }
+  @Get("customers")
+  findAllCustomers(
+    @Query("zoneId")
+    zoneId?: string,
+    @Query("q")
+    q?: string,
+    @Query("page")
+    page?: string,
+    @Query("pageSize")
+    pageSize?: string,
+  ) {
+    return this.waterService.findAllCustomers({ zoneId, q }, parsePaginationQuery(page, pageSize));
+  }
+  @Get("customers/:id")
+  getCustomerDetail(
+    @Param("id")
+    id: string,
+    @Query("months")
+    months?: string,
+  ) {
+    return this.waterService.getCustomerDetail(id, months ? Number(months) : undefined);
+  }
+  @Post("customers")
+  createCustomer(
+    @Body()
+    dto: CreateCustomerDto,
+  ) {
+    return this.waterService.createCustomer(dto);
+  }
+  @Patch("customers/:id")
+  updateCustomer(
+    @Param("id")
+    id: string,
+    @Body()
+    dto: UpdateCustomerDto,
+  ) {
+    return this.waterService.updateCustomer(id, dto);
+  }
+  @Delete("customers/:id")
+  deleteCustomer(
+    @Param("id")
+    id: string,
+  ) {
+    return this.waterService.deleteCustomer(id);
+  }
+  @Get("meters")
+  findAllMeters(
+    @Query("meterType")
+    meterType?: string,
+    @Query("zoneId")
+    zoneId?: string,
+    @Query("q")
+    q?: string,
+    @Query("vendingSystem")
+    vendingSystem?: string,
+    @Query("status")
+    status?: string,
+    @Query("page")
+    page?: string,
+    @Query("pageSize")
+    pageSize?: string,
+  ) {
+    return this.waterService.findAllMeters(
+      {
+        meterType: parseMeterTypeParam(meterType),
+        zoneId,
+        q,
+        vendingSystem: parseVendingSystemParam(vendingSystem),
+        status: parseMeterStatusParam(status),
+      },
+      parsePaginationQuery(page, pageSize),
+    );
+  }
+  @Get("household-reconciliation")
+  householdReconciliation(
+    @Query("month")
+    month?: string,
+  ) {
+    return this.waterService.householdReconciliation(month);
+  }
+  @Get("household-flags")
+  householdFlags(
+    @Query("months")
+    months?: string,
+  ) {
+    return this.waterService.householdFlags(months ? Number(months) : undefined);
+  }
+  @Get("meters/:id/balance-periods")
+  meterBalancePeriods(
+    @Param("id")
+    id: string,
+  ) {
+    return this.waterService.meterBalancePeriods(id);
+  }
+  @Post("meters/:id/take-out-of-use")
+  takeMeterOutOfUse(
+    @Param("id")
+    id: string,
+    @Body()
+    dto: RetireMeterDto,
+    @CurrentUser()
+    user: AuthenticatedUser,
+  ) {
+    return this.waterService.takeMeterOutOfUse(id, dto, user);
+  }
+  @Get("meters/:id")
+  getMeterDetail(
+    @Param("id")
+    id: string,
+    @Query("months")
+    months?: string,
+  ) {
+    return this.waterService.getMeterDetail(id, months ? Number(months) : undefined);
+  }
+  @Post("meters")
+  createMeter(
+    @Body()
+    dto: CreateMeterDto,
+  ) {
+    return this.waterService.createMeter(dto);
+  }
+  @Patch("meters/:id")
+  updateMeter(
+    @Param("id")
+    id: string,
+    @Body()
+    dto: UpdateMeterDto,
+  ) {
+    return this.waterService.updateMeter(id, dto);
+  }
+  @Delete("meters/:id")
+  deleteMeter(
+    @Param("id")
+    id: string,
+  ) {
+    return this.waterService.deleteMeter(id);
+  }
+  @Get("readings")
+  listReadings(
+    @Query("meterId")
+    meterId?: string,
+    @Query("meterType")
+    meterType?: string,
+    @Query("zoneId")
+    zoneId?: string,
+    @Query("q")
+    q?: string,
+    @Query("from")
+    from?: string,
+    @Query("to")
+    to?: string,
+    @Query("page")
+    page?: string,
+    @Query("pageSize")
+    pageSize?: string,
+  ) {
+    return this.waterService.listReadings(
+      { meterId, meterType: parseMeterTypeParam(meterType), zoneId, q, from, to },
+      parsePaginationQuery(page, pageSize),
+    );
+  }
+  @Post("readings")
+  createReading(
+    @Body()
+    dto: CreateReadingDto,
+    @CurrentUser()
+    user: AuthenticatedUser,
+  ) {
+    return this.waterService.createReading(dto, user);
+  }
+  @Post("readings/review")
+  reviewReading(
+    @Body()
+    dto: ReviewReadingDto,
+    @CurrentUser()
+    user: AuthenticatedUser,
+  ) {
+    return this.readingReview.assess(dto, user.id, undefined, dto.excludeId);
+  }
+  @Patch("readings/:id")
+  updateReading(
+    @Param("id")
+    id: string,
+    @Body()
+    dto: UpdateReadingDto,
+    @CurrentUser()
+    user: AuthenticatedUser,
+  ) {
+    return this.waterService.updateReading(id, dto, user);
+  }
+  @Delete("readings/:id")
+  deleteReading(
+    @Param("id")
+    id: string,
+  ) {
+    return this.waterService.deleteReading(id);
+  }
+  @Get("usage-uploads")
+  listUploads(
+    @CurrentUser()
+    user: AuthenticatedUser,
+    @Query("q")
+    q?: string,
+    @Query("month")
+    month?: string,
+    @Query("page")
+    page?: string,
+    @Query("pageSize")
+    pageSize?: string,
+  ) {
+    return this.waterService.listUploads(user, { q, month }, parsePaginationQuery(page, pageSize));
+  }
+  @Post("usage-uploads")
+  createUpload(
+    @Body()
+    dto: CreateUsageUploadDto,
+    @CurrentUser()
+    user: AuthenticatedUser,
+  ) {
+    return this.waterService.createUpload(dto, user);
+  }
+  @Get("usage-uploads/:id/deletion-preview")
+  previewUploadDeletion(
+    @Param("id")
+    id: string,
+    @CurrentUser()
+    user: AuthenticatedUser,
+    @Query("includeLegacy")
+    includeLegacy?: string,
+  ) {
+    return this.waterService.previewUploadDeletion(id, user, includeLegacy === "true");
+  }
+  @Delete("usage-uploads/:id")
+  deleteUpload(
+    @Param("id")
+    id: string,
+    @Body()
+    dto: RemoveWaterUploadDto,
+    @CurrentUser()
+    user: AuthenticatedUser,
+  ) {
+    return this.waterService.deleteUpload(id, dto.token, user, dto.includeLegacyAccounts === true);
+  }
+  @Get("usage-records")
+  listUsageRecords(
+    @Query("meterId")
+    meterId?: string,
+    @Query("customerId")
+    customerId?: string,
+    @Query("zoneId")
+    zoneId?: string,
+    @Query("dateFrom")
+    dateFrom?: string,
+    @Query("dateTo")
+    dateTo?: string,
+    @Query("page")
+    page?: string,
+    @Query("pageSize")
+    pageSize?: string,
+  ) {
+    return this.waterService.listUsageRecords(
+      { meterId, customerId, zoneId, dateFrom, dateTo },
+      parsePaginationQuery(page, pageSize),
+    );
+  }
+  @Get("dashboard")
+  dashboard(
+    @Query("zoneId")
+    zoneId?: string,
+    @Query("month")
+    month?: string,
+  ) {
+    return this.waterService.dashboard({ zoneId, month });
+  }
+  @Get("trend")
+  trend(
+    @Query("zoneId")
+    zoneId?: string,
+    @Query("months")
+    months?: string,
+    @Query("granularity")
+    granularity?: "week" | "month",
+    @Query("periods")
+    periods?: string,
+  ) {
+    return this.waterService.trend({
+      zoneId,
+      months: months ? Number(months) : undefined,
+      granularity: granularity === "week" ? "week" : "month",
+      periods: periods ? Number(periods) : undefined,
+    });
+  }
+  @Get("zone-comparison")
+  zoneComparison(
+    @Query("month")
+    month?: string,
+    @Query("dateFrom")
+    dateFrom?: string,
+    @Query("dateTo")
+    dateTo?: string,
+  ) {
+    return this.waterService.zoneComparison({
+      month,
+      dateFrom: dateFrom ? new Date(dateFrom) : undefined,
+      dateTo: dateTo ? new Date(dateTo) : undefined,
+    });
+  }
+  @Get("reports/summary")
+  reportSummary(
+    @Query("month")
+    month?: string,
+  ) {
+    return this.waterService.reportSummary({ month });
+  }
+  @Get("readings/series")
+  readingSeries(
+    @Query("meterType")
+    meterType: WaterMeterType,
+    @Query("bucket")
+    bucket: "day" | "week" | "month",
+    @Query("dateFrom")
+    dateFrom: string,
+    @Query("dateTo")
+    dateTo: string,
+    @Query("zoneId")
+    zoneId?: string,
+  ) {
+    return this.waterService.readingSeries({
+      meterType,
+      bucket,
+      zoneId,
+      dateFrom: new Date(dateFrom),
+      dateTo: new Date(dateTo),
+    });
+  }
+  @Get("readings/with-delta")
+  readingsWithDelta(
+    @Query("meterId")
+    meterId?: string,
+    @Query("meterType")
+    meterType?: WaterMeterType,
+    @Query("zoneId")
+    zoneId?: string,
+    @Query("dateFrom")
+    dateFrom?: string,
+    @Query("dateTo")
+    dateTo?: string,
+  ) {
+    return this.waterService.readingsWithDelta({
+      meterId,
+      meterType,
+      zoneId,
+      dateFrom: dateFrom ? new Date(dateFrom) : undefined,
+      dateTo: dateTo ? new Date(dateTo) : undefined,
+    });
+  }
+}

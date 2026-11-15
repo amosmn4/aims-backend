@@ -25,6 +25,6 @@ import { WaterUploadRemovalService } from "./water-upload-removal.service";
     WaterImportSuggestionsService,
     WaterUploadRemovalService,
   ],
-  exports: [WaterService],
+  exports: [WaterService, WaterImportService, WaterUploadRemovalService],
 })
 export class WaterModule {}

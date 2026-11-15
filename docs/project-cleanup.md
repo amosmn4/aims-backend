@@ -9,7 +9,9 @@ all TanStack route files, Nest module registrations, tests and operational scrip
 
 ## Removed files
 
-All paths below are relative to `frontend/src`.
+All paths below are relative to the legacy `frontend/src` at the time of this earlier cleanup.
+The standalone legacy `frontend` repository has since been retired; Amsol Ops is now the active
+frontend.
 
 | Group                      | Files                                                                                                                                                                                                                                                                                                                                                                             | Reason                                                                       |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |

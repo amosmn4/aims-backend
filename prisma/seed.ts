@@ -92,8 +92,10 @@ async function main() {
     update: {},
   });
 
-  const adminEmail = process.env.SEED_ADMIN_EMAIL ?? "admin@amsol.com";
-  const adminPassword = process.env.SEED_ADMIN_PASSWORD ?? "ChangeMe!2026";
+  const adminEmail = process.env.SEED_ADMIN_EMAIL?.trim().toLowerCase();
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD;
+  if (!adminEmail || !adminPassword)
+    throw new Error("Set SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD in backend/.env before seeding.");
   const passwordHash = await bcrypt.hash(adminPassword, 10);
 
   // `update` deliberately re-applies the password every run — if you change SEED_ADMIN_PASSWORD
@@ -112,13 +114,12 @@ async function main() {
     update: { passwordHash, isActive: true },
   });
 
-  for (const role of ["system_admin"] as const) {
-    await prisma.userRole.upsert({
-      where: { userId_role: { userId: admin.id, role } },
-      create: { userId: admin.id, role },
-      update: {},
-    });
-  }
+  await prisma.userRole.deleteMany({ where: { userId: admin.id, role: "ceo" } });
+  await prisma.userRole.upsert({
+    where: { userId_role: { userId: admin.id, role: "system_admin" } },
+    create: { userId: admin.id, role: "system_admin" },
+    update: {},
+  });
 
   console.log(
     `Seed complete — ${DEPARTMENTS.length} departments, ${SERVICE_LINES.length} service lines, 1 office, 1 System Administrator (${adminEmail}).`,

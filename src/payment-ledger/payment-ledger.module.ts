@@ -1,17 +1,12 @@
 import { Module } from "@nestjs/common";
-import { PaymentGatewayService } from "./payment-gateway.service";
 import { PaymentLedgerAccessService } from "./payment-ledger-access.service";
 import { PaymentLedgerController } from "./payment-ledger.controller";
 import { PaymentLedgerService } from "./payment-ledger.service";
-import { PaymentLedgerSyncService } from "./payment-ledger-sync.service";
+import { PaymentLedgerInfrastructureModule } from "./payment-ledger-infrastructure.module";
 
 @Module({
+  imports: [PaymentLedgerInfrastructureModule],
   controllers: [PaymentLedgerController],
-  providers: [
-    PaymentGatewayService,
-    PaymentLedgerAccessService,
-    PaymentLedgerService,
-    PaymentLedgerSyncService,
-  ],
+  providers: [PaymentLedgerAccessService, PaymentLedgerService],
 })
 export class PaymentLedgerModule {}

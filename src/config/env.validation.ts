@@ -18,10 +18,18 @@ const envSchema = z.object({
   JWT_REFRESH_TTL: z.string().default("7d"),
 
   PORT: z.coerce.number().int().positive().default(4000),
+  OPS_PORT: z.coerce.number().int().min(1).max(65535).default(4002),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   // No default here — main.ts falls back to a hardcoded localhost origin only when this is
   // genuinely absent from the environment, so that fallback logic lives in exactly one place.
   CORS_ORIGIN: z.string().min(1).optional(),
+  OPS_FRONTEND_URL: z.string().url().optional(),
+  OPS_HOST: z.string().min(1).default("127.0.0.1"),
+  OPS_TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
+  OPS_EMAIL_JOBS_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
 
   SEED_ADMIN_EMAIL: z.string().email().optional(),
   SEED_ADMIN_PASSWORD: z.string().min(1).optional(),
