@@ -10,6 +10,8 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import * as bcrypt from "bcrypt";
 import { PrismaService } from "../prisma/prisma.service";
 import { type Viewer } from "./ops.schemas";
+import { EmailService } from "../notifications/email/email.service";
+import { escapeHtml } from "../reports/report-email.util";
 
 export const OPS_COOKIE = "amsol_ops_refresh";
 export const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -21,6 +23,7 @@ export class OpsAuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly email: EmailService,
   ) {}
 
   private secret() {
@@ -234,6 +237,85 @@ export class OpsAuthService {
       await db.opsInvitation.updateMany({
         where: { staffId: viewer.id, usedAt: null },
         data: { usedAt: new Date() },
+      });
+    });
+    return { success: true };
+  }
+
+  async forgotPassword(email: string) {
+    const staff = await this.prisma.opsStaff.findFirst({
+      where: { active: true, user: { email, isActive: true } },
+      include: { user: true },
+    });
+    if (!staff?.user) return { success: true };
+    const origin = this.config.get<string>("OPS_FRONTEND_URL");
+    if (!origin || !this.email.isConfigured()) return { success: true };
+    const token = randomBytes(32).toString("hex");
+    await this.prisma.$transaction(async (db) => {
+      await db.opsPasswordReset.updateMany({
+        where: { staffId: staff.id, usedAt: null },
+        data: { usedAt: new Date() },
+      });
+      await db.opsPasswordReset.create({
+        data: {
+          staffId: staff.id,
+          tokenHash: hashToken(token),
+          expiresAt: new Date(Date.now() + 3600000),
+        },
+      });
+    });
+    await this.email.send(
+      staff.user.email,
+      "Reset your Amsol Ops password",
+      `<p>Use this link to reset your password. It expires in one hour.</p><p><a href="${escapeHtml(`${new URL(origin).origin}/login?reset=${token}`)}">Reset password</a></p>`,
+    );
+    return { success: true };
+  }
+
+  async resetPassword(token: string, password: string) {
+    const passwordHash = await bcrypt.hash(password, 12);
+    await this.prisma.$transaction(async (db) => {
+      const reset = await db.opsPasswordReset.findUnique({
+        where: { tokenHash: hashToken(token) },
+      });
+      if (!reset || reset.usedAt || reset.expiresAt <= new Date())
+        throw new BadRequestException("This reset link is invalid or expired.");
+      const staff = await db.opsStaff.findUnique({
+        where: { id: reset.staffId },
+        include: { user: true },
+      });
+      if (!staff?.active || !staff.user?.isActive)
+        throw new BadRequestException("This reset link is invalid or expired.");
+      const claim = await db.opsPasswordReset.updateMany({
+        where: { id: reset.id, usedAt: null, expiresAt: { gt: new Date() } },
+        data: { usedAt: new Date() },
+      });
+      if (!claim.count) throw new BadRequestException("This reset link has already been used.");
+      await db.user.update({ where: { id: staff.user.id }, data: { passwordHash } });
+      await db.opsPasswordReset.updateMany({
+        where: { staffId: staff.id, usedAt: null },
+        data: { usedAt: new Date() },
+      });
+      await db.opsInvitation.updateMany({
+        where: { staffId: staff.id, usedAt: null },
+        data: { usedAt: new Date() },
+      });
+      await db.passwordSetupToken.updateMany({
+        where: { userId: staff.user.id, usedAt: null },
+        data: { usedAt: new Date() },
+      });
+      await db.opsSession.deleteMany({ where: { staffId: staff.id } });
+      await db.opsState.update({
+        where: { id: "workspace" },
+        data: { revision: { increment: 1 } },
+      });
+      await db.auditLog.create({
+        data: {
+          userId: staff.user.id,
+          action: "ops.password.reset",
+          entityType: "ops_staff",
+          entityId: staff.id,
+        },
       });
     });
     return { success: true };

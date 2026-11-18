@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ForbiddenException,
   UnauthorizedException,
+  NotFoundException,
 } from "@nestjs/common";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
 import type { PrismaService } from "../../prisma/prisma.service";
@@ -11,18 +12,20 @@ import type { Viewer } from "../ops.schemas";
 import { OpsTendersService } from "./ops-tenders.service";
 
 describe("OpsTendersService", () => {
-  const findUnique = jest.fn<
-    (query: { where: { id: string }; include: { roles: true } }) => Promise<unknown>
-  >();
+  const findUnique =
+    jest.fn<(query: { where: { id: string }; include: { roles: true } }) => Promise<unknown>>();
   const findAll = jest.fn<(filters: object, user: AuthenticatedUser) => Promise<unknown>>();
   const findMany = jest.fn<() => Promise<unknown[]>>();
   const findFirst = jest.fn<() => Promise<unknown>>();
-  const update = jest.fn<
-    (id: string, value: { accountManagerId: string }, user: AuthenticatedUser) => Promise<unknown>
-  >();
+  const update =
+    jest.fn<
+      (id: string, value: { accountManagerId: string }, user: AuthenticatedUser) => Promise<unknown>
+    >();
   const prisma = {
     user: { findUnique },
     opsStaff: { findMany, findFirst },
+    opsModuleGrant: { upsert: jest.fn<() => Promise<object>>().mockResolvedValue({}) },
+    tender: { findFirst: jest.fn<() => Promise<null>>().mockResolvedValue(null) },
   } as unknown as PrismaService;
   const tenders = { findAll, update } as unknown as TendersService;
   const service = new OpsTendersService(prisma, tenders);
@@ -37,6 +40,7 @@ describe("OpsTendersService", () => {
     active: true,
     email: "viewer@example.com",
     sessionId: "session-id",
+    modules: { tender: "manage" },
   };
   const ceoViewer: Viewer = {
     ...viewer,
@@ -52,26 +56,32 @@ describe("OpsTendersService", () => {
     update.mockReset();
   });
 
-  it("uses the linked AIMS identity and its roles to read production tenders", async () => {
+  it("scopes staff to assigned tenders even when the linked identity has a legacy CEO role", async () => {
     findUnique.mockImplementation(async () => ({
       id: userId,
       email: viewer.email,
       isActive: true,
       departmentId: "department-id",
-      roles: [{ role: "tender" }],
+      roles: [{ role: "ceo" }],
     }));
     findAll.mockImplementation(async () => []);
 
     await expect(service.list(viewer)).resolves.toEqual([]);
-    expect(findAll).toHaveBeenCalledWith(
-      {},
-      {
-        id: userId,
-        email: viewer.email,
-        roles: ["tender"],
-        departmentId: "department-id",
-      } satisfies AuthenticatedUser,
+    expect(findAll).toHaveBeenCalledWith({ assignedUserId: userId }, {
+      id: userId,
+      email: viewer.email,
+      roles: ["tender"],
+      departmentId: "department-id",
+    } satisfies AuthenticatedUser);
+  });
+  it("rejects an unassigned module and an out-of-scope detail before delegating", async () => {
+    await expect(service.list({ ...viewer, modules: {} })).rejects.toBeInstanceOf(
+      ForbiddenException,
     );
+    await expect(service.detail(viewer, "another-tender")).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(findAll).not.toHaveBeenCalled();
   });
 
   it("rejects unlinked or inactive identities", async () => {
@@ -106,9 +116,9 @@ describe("OpsTendersService", () => {
     }));
     update.mockImplementation(async () => ({ id: "tender-id" }));
 
-    await expect(
-      service.assign(ceoViewer, "tender-id", "staff-user-id"),
-    ).resolves.toEqual({ id: "tender-id" });
+    await expect(service.assign(ceoViewer, "tender-id", "staff-user-id")).resolves.toEqual({
+      id: "tender-id",
+    });
     expect(update).toHaveBeenCalledWith(
       "tender-id",
       { accountManagerId: "staff-user-id" },
@@ -118,8 +128,8 @@ describe("OpsTendersService", () => {
       ForbiddenException,
     );
     findFirst.mockImplementation(async () => null);
-    await expect(
-      service.assign(ceoViewer, "tender-id", "inactive-user-id"),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.assign(ceoViewer, "tender-id", "inactive-user-id")).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
   });
 });

@@ -74,7 +74,7 @@ async function verify() {
     }
     for (const path of ["ops/water/zones", "ops/blog/posts"]) {
       assert.equal((await call(path)).status, 401);
-      assert.equal((await call(path, ceo)).status, 403);
+      assert.equal((await call(path, ceo)).status, 200);
       assert.equal((await call(path, staff)).status, 403);
     }
     checks++;
@@ -187,7 +187,7 @@ async function verify() {
       | undefined;
     for (let attempt = 0; attempt < 100; attempt++) {
       detail = await (await call("ops/water/imports/" + batchId, ceo)).json();
-      if (["review", "completed", "failed"].includes(detail.status)) break;
+      if (detail && ["review", "completed", "failed"].includes(detail.status)) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.ok(detail);

@@ -117,4 +117,26 @@ export class OpsAuthController {
     );
     return this.auth.changePassword(viewer, dto.currentPassword, dto.newPassword);
   }
+
+  @Post("forgot-password")
+  @HttpCode(200)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  forgot(@Body() body: unknown) {
+    const dto = parse(
+      z.object({ email: z.string().trim().toLowerCase().email().max(200) }).strict(),
+      body,
+    );
+    return this.auth.forgotPassword(dto.email);
+  }
+
+  @Post("reset-password")
+  @HttpCode(200)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  reset(@Body() body: unknown) {
+    const dto = parse(
+      z.object({ token: z.string().regex(/^[a-f0-9]{64}$/), password: passwordSchema }).strict(),
+      body,
+    );
+    return this.auth.resetPassword(dto.token, dto.password);
+  }
 }

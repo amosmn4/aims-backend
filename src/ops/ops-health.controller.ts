@@ -11,14 +11,27 @@ export class OpsHealthController {
   async health() {
     try {
       await this.prisma.$queryRaw`SELECT 1`;
-      const initialized = await this.prisma.opsState.count({ where: { id: "workspace" } });
-      await this.prisma.opsWeeklySettings.count();
-      if (!initialized) throw new Error("Ops setup required");
-      return { status: "ready" };
     } catch {
       throw new ServiceUnavailableException(
-        "Ops is not ready. Check database migrations and initialization.",
+        "Ops database is unavailable. Check backend database configuration and connectivity.",
       );
     }
+
+    let initialized: number;
+    try {
+      initialized = await this.prisma.opsState.count({ where: { id: "workspace" } });
+      await this.prisma.opsWeeklySettings.count();
+    } catch {
+      throw new ServiceUnavailableException(
+        "Ops database tables are missing. Apply the Prisma migrations before starting Ops.",
+      );
+    }
+
+    if (!initialized)
+      throw new ServiceUnavailableException(
+        "Ops is not initialized. Run `npm run ops:bootstrap -- EXISTING_ADMIN_EMAIL` once.",
+      );
+
+    return { status: "ready" };
   }
 }

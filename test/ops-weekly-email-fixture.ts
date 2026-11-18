@@ -6,6 +6,8 @@ export async function startWeeklyEmailFixture() {
   let failing = false;
   let runSchedule: (() => Promise<void>) | undefined;
   let resetWeekly: (() => Promise<void>) | undefined;
+  let runWorkflows: (() => Promise<void>) | undefined;
+  let changeClock: ((now: string) => void) | undefined;
   const smtp = tcpServer((socket) => {
     socket.write("220 ops-weekly-fixture ESMTP\r\n");
     let buffer = "";
@@ -52,6 +54,13 @@ export async function startWeeklyEmailFixture() {
     try {
       if (req.method === "POST" && req.url === "/fail") failing = JSON.parse(raw).fail === true;
       if (req.method === "POST" && req.url === "/tick") await runSchedule?.();
+      if (req.method === "POST" && req.url === "/workflow-tick") await runWorkflows?.();
+      if (req.method === "POST" && req.url === "/clock") {
+        const now = JSON.parse(raw).now;
+        if (typeof now !== "string" || !Number.isFinite(new Date(now).getTime()))
+          throw new Error("Invalid fixture clock");
+        changeClock?.(now);
+      }
       if (req.method === "POST" && req.url === "/reset") {
         await resetWeekly?.();
         messages.length = 0;
@@ -72,6 +81,10 @@ export async function startWeeklyEmailFixture() {
       server.listen(port, "127.0.0.1", resolve);
     });
   return {
+    setWorkflows: (run: () => Promise<void>, clock: (now: string) => void) => {
+      runWorkflows = run;
+      changeClock = clock;
+    },
     setReset: (reset: () => Promise<void>) => {
       resetWeekly = reset;
     },

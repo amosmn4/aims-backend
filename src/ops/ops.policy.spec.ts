@@ -98,6 +98,67 @@ function workspace(): Workspace {
 }
 
 describe("Ops permission and workflow boundaries", () => {
+  it("separates business management from finance and never grants all finance businesses by department", () => {
+    const data = workspace();
+    data.businessAccess = [{ person: viewer.id, business: "business", manage: true }];
+    expect(visibleWorkspace(viewer, data).businesses).toHaveLength(1);
+    expect(visibleWorkspace(viewer, data).businessFinance).toEqual([]);
+    expect(
+      visibleWorkspace({ ...viewer, dept: "finance" }, { ...data, businessAccess: [] })
+        .businessFinance,
+    ).toEqual([]);
+    expect(() =>
+      authorizeWrite(viewer, "businessFinance", data.businessFinance[0]!, undefined, data),
+    ).toThrow();
+    data.businessAccess[0]!.finance = "view";
+    expect(visibleWorkspace(viewer, data).businessFinance).toHaveLength(1);
+    expect(() =>
+      authorizeWrite(viewer, "businessFinance", data.businessFinance[0]!, undefined, data),
+    ).toThrow();
+    data.businessAccess[0]!.finance = "manage";
+    expect(() =>
+      authorizeWrite(viewer, "businessFinance", data.businessFinance[0]!, undefined, data),
+    ).not.toThrow();
+  });
+
+  it("uses explicit client and request assignments rather than another handler's department", () => {
+    const data = workspace();
+    data.clients = [
+      { id: "client", name: "Client", contact: "Person", services: ["HR"], assignees: ["other"] },
+    ];
+    data.clientRequests[0]!.handler = "other";
+    expect(visibleWorkspace({ ...viewer, dept: "operations" }, data).clientRequests).toEqual([]);
+    expect(visibleWorkspace(viewer, data).clients).toEqual([]);
+    data.clients[0]!.assignedDept = "hr";
+    data.clientRequests[0]!.assignedDept = "hr";
+    expect(visibleWorkspace(viewer, data).clients).toHaveLength(1);
+    expect(visibleWorkspace(viewer, data).clientRequests).toHaveLength(1);
+  });
+
+  it("allows own standalone urgent tasks and denies assigning someone else's work", () => {
+    const data = workspace();
+    const task = {
+      ...data.tasks[0]!,
+      project: "",
+      assignee: viewer.id,
+      source: "contingency" as const,
+      priority: "Urgent" as const,
+      subtasks: [{ id: "subtask", title: "Check", done: false }],
+    };
+    expect(() => authorizeWrite(viewer, "tasks", task, undefined, data)).not.toThrow();
+    expect(() =>
+      authorizeWrite(viewer, "tasks", { ...task, assignee: "other" }, task, data),
+    ).toThrow();
+    expect(() =>
+      authorizeWrite(
+        viewer,
+        "tasks",
+        { ...task, subtasks: [{ ...task.subtasks[0]!, done: true }] },
+        task,
+        data,
+      ),
+    ).not.toThrow();
+  });
   it("blocks self-promotion through staff profiles and permissions through view changes", () => {
     const data = workspace();
     expect(() =>
@@ -242,6 +303,26 @@ describe("Ops permission and workflow boundaries", () => {
     expect(() =>
       validateWorkspace({ ...data, projects: [{ ...data.projects[0], status: "completed" }] }),
     ).toThrow("100%");
+  });
+
+  it("requires existing authority before moving projects or standalone tasks between businesses", () => {
+    const data = workspace();
+    data.businessAccess = [{ person: viewer.id, business: "managed", manage: true }];
+    const project = { ...data.projects[0], business: "other-business", lead: "other" };
+    const task = { ...data.tasks[0], project: "", business: "other-business" };
+    expect(() =>
+      authorizeWrite(viewer, "projects", { ...project, business: "managed" }, project, data),
+    ).toThrow("permission");
+    expect(() =>
+      authorizeWrite(viewer, "tasks", { ...task, business: "managed" }, task, data),
+    ).toThrow("permission");
+    data.businessAccess.push({ person: viewer.id, business: "other-business", manage: true });
+    expect(() =>
+      authorizeWrite(viewer, "projects", { ...project, business: "managed" }, project, data),
+    ).not.toThrow();
+    expect(() =>
+      authorizeWrite(viewer, "tasks", { ...task, business: "managed" }, task, data),
+    ).not.toThrow();
   });
 
   it("retains a usable CEO and validates real dates and unexpected payload fields", () => {

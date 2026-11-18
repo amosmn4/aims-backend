@@ -1,6 +1,6 @@
 # Amsol Ops backend
 
-Ops extends the existing NestJS, Prisma and MySQL backend. Its controllers, services, permissions, sessions and tables are contained under src/ops and ops_*. Water Project, Blog and Ledger have guarded Ops adapters that reuse their existing services and data. Ops weekly reporting has its own schedules and leaves legacy report schedules unchanged.
+Ops extends the existing NestJS, Prisma and MySQL backend. Its controllers, services, permissions, sessions and tables are contained under src/ops and ops_*. Water Project, Blog and Ledger have guarded Ops adapters that reuse their existing services and data. Ops owns reporting. The combined backend no longer registers the legacy report modules or their email schedules. See [Ops workflows](ops-workflows.md) for the migration and current permission rules.
 
 ## Local setup
 
@@ -33,7 +33,7 @@ running. The optional `start:ops` entry point is Ops-only and does not start the
 modules' workers.
 
 The application includes hourly notification sweeps, daily notification digests and website
-analytics, report schedules, 5-second Water import polling, 30-second Water cleanup and payment
+analytics, 5-second Water import polling, 30-second Water cleanup, staff submission scheduling and payment
 ledger synchronization, and 60-second Ops weekly-email delivery checks. Email, gateway, schedule,
 and storage configuration gate the jobs that depend on those services. In multi-instance
 deployments, use one scheduler-enabled backend instance unless each job has an explicit
@@ -73,8 +73,8 @@ New staff can exist without a login. Inviting them links or creates a User witho
 | Manage clients                 | All | Create and edit                                              |
 | Manage tenders                 | All | Assigned tenders; new tenders include self                   |
 | Manage service requests        | All | Operations staff, or own assigned requests                   |
-| Manage monthly finances        | All | Finance department                                           |
-| Read business figures          | All | Finance department, home business or explicit grant          |
+| Manage monthly finances        | All | Explicit finance manage grant for that business              |
+| Read business figures          | All | Explicit finance view or manage grant for that business      |
 | Manage staff accounts/settings | Yes | No                                                           |
 | Edit own display name          | Yes | Yes                                                          |
 | Manage department registers    | All | Own records in own department                                |
@@ -130,20 +130,20 @@ Email invitations are implemented. In-app reminders use saved report dates and O
 
 Migration 20261112110000_ops_weekly_reporting adds ops_weekly_settings, ops_weekly_reports and ops_weekly_deliveries, plus ops_staff.created_at for reporting eligibility. It does not alter existing operational tables. Each linked staff member has one versioned record per reporting Monday and phase (plan or report). Saved drafts are private. Submissions are immutable until a CEO returns them for correction. Reviews and returns are audited; submitted and returned snapshots remain in audit history.
 
-Weekly API routes are under /api/v1/ops/weekly and use the existing Ops session guard. Staff read/write their own records only. CEOs read submissions, administer schedules, review/return records and view their own email delivery history. Independent record versions detect stale writes without advancing the unrelated workspace revision. Mutations recheck current account activation and authority in their transaction. All protected Ops responses use private, no-store caching.
+Weekly API routes are under /api/v1/ops/weekly and use the existing Ops session guard. Staff read/write their own records only. CEOs read submissions, administer schedules, review/return records and view their own email delivery history. Independent record versions detect stale weekly writes; materializing tasks advances the workspace revision. Mutations recheck current account activation and authority in their transaction. All protected Ops responses use private, no-store caching.
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET, PUT | /weekly/settings | Read the cycle or save CEO-controlled settings and version |
-| GET | /weekly/reports?week=YYYY-MM-DD | Own records or CEO staff overview |
-| GET | /weekly/reports/:week/:staffId | Own record details or CEO view |
-| PUT | /weekly/reports/:week/:phase | Save a draft or submit; body version, submit and submission |
-| POST | /weekly/submissions/:id/review | Review with record version and optional comment |
-| POST | /weekly/submissions/:id/return | Return with record version and required correction reason |
-| GET | /weekly/submissions/:id/history | Authorized submission/review/correction history |
-| GET | /weekly/brief?week=...&phase=plan | CEO preview; phase also accepts report |
-| GET, POST | /weekly/deliveries | Delivery history or explicit send to the requesting CEO |
-| POST | /weekly/deliveries/:id/retry | Confirmed retry of that CEO's failed/unconfirmed delivery |
+| Method    | Path                              | Purpose                                                     |
+| --------- | --------------------------------- | ----------------------------------------------------------- |
+| GET, PUT  | /weekly/settings                  | Read the cycle or save CEO-controlled settings and version  |
+| GET       | /weekly/reports?week=YYYY-MM-DD   | Own records or CEO staff overview                           |
+| GET       | /weekly/reports/:week/:staffId    | Own record details or CEO view                              |
+| PUT       | /weekly/reports/:week/:phase      | Save a draft or submit; body version, submit and submission |
+| POST      | /weekly/submissions/:id/review    | Review with record version and optional comment             |
+| POST      | /weekly/submissions/:id/return    | Return with record version and required correction reason   |
+| GET       | /weekly/submissions/:id/history   | Authorized submission/review/correction history             |
+| GET       | /weekly/brief?week=...&phase=plan | CEO preview; phase also accepts report                      |
+| GET, POST | /weekly/deliveries                | Delivery history or explicit send to the requesting CEO     |
+| POST      | /weekly/deliveries/:id/retry      | Confirmed retry of that CEO's failed/unconfirmed delivery   |
 
 The CEO chooses the first reporting week, each submission deadline, and two separate email days/times. Reports may be due in the following week. Delivery is the first chosen time at or after its deadline, always in Africa/Nairobi. The plan and report each cover the selected week, rather than combining different periods in one email. Every active CEO receives one consolidated email per week and phase containing all eligible staff and missing submissions. Uninvited/inactive profiles are not marked overdue; a new profile is expected only for deadlines after it joined Ops.
 
@@ -155,7 +155,7 @@ Run test/ops-weekly.verify.ts against the separate _verify database and test/ops
 
 ## Production module adapters
 
-The additive 20261111150000_ops_module_grants migration adds ops_module_grants only. The 20261111170000_ops_ledger_module migration expands its module enum to include ledger. Each linked Ops account has independent water/blog/ledger grants of view or manage; an absent row means no access. CEO accounts administer grants through PUT /api/v1/ops/accounts/:id/modules with If-Match and body {"module":"ledger","access":"view"}; access also accepts none or manage. CEOs require their own grant to use a module. Grants are audited and returned in account metadata. Every module request reloads the session and grants, including media streams, source downloads and Ledger exports.
+The additive 20261111150000_ops_module_grants migration adds ops_module_grants only. The 20261111170000_ops_ledger_module migration expands its module enum to include ledger. Each linked Ops account has independent water/blog/ledger grants of view or manage; an absent row means no access. CEO accounts administer grants through PUT /api/v1/ops/accounts/:id/modules with If-Match and body {"module":"ledger","access":"view"}; access also accepts none or manage. CEOs have full Water, Blog, Tender and Inventory access. Payment Ledger retains its explicit grant requirement. Grants are audited and returned in account metadata. Every module request reloads the session and grants, including media streams, source downloads and Ledger exports.
 
 New guarded controllers live in src/ops/modules and delegate to the existing Water and Blog services. Provider composition does not mount legacy controllers in the dedicated Ops app. The linked User.id is used for authorship, uploadedBy, reading confirmation signatures and import ownership. Legacy roles and capabilities are not modified. Read-only users cannot create, edit, delete, upload, publish or generate shared insights; personal assistant conversations remain available.
 

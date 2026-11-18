@@ -505,12 +505,15 @@ model OpsWeeklyDelivery {
 }
 
 model OpsClient {
-  id       String             @id @default(uuid()) @db.Char(36)
-  name     String             @db.VarChar(200)
-  contact  String             @db.VarChar(200)
-  services Json
-  projects OpsProject[]
-  requests OpsClientRequest[]
+  id           String             @id @default(uuid()) @db.Char(36)
+  name         String             @db.VarChar(200)
+  contact      String             @db.VarChar(200)
+  services     Json
+  assignees    Json?
+  assignedDept String?            @map("assigned_dept") @db.VarChar(20)
+  business     String             @default("b0") @db.VarChar(36)
+  projects     OpsProject[]
+  requests     OpsClientRequest[]
 
   @@map("ops_clients")
 }
@@ -525,6 +528,7 @@ model OpsProject {
   progress    Int
   due         String                 @db.Char(10)
   summary     String                 @db.Text
+  business    String                 @default("b0") @db.VarChar(36)
   customer    OpsClient?             @relation(fields: [client], references: [id], onDelete: Restrict)
   leader      OpsStaff               @relation(fields: [lead], references: [id], onDelete: Restrict)
   members     OpsProjectMember[]
@@ -562,13 +566,17 @@ model OpsTask {
   id          String        @id @default(uuid()) @db.Char(36)
   title       String        @db.VarChar(200)
   description String?       @db.Text
-  project     String        @db.Char(36)
+  project     String?       @db.Char(36)
   assignee    String        @db.Char(36)
   due         String        @db.Char(10)
   priority    String        @db.VarChar(20)
   status      String        @db.VarChar(20)
   ceoComment  String?       @map("ceo_comment") @db.Text
-  parent      OpsProject    @relation(fields: [project], references: [id], onDelete: Restrict)
+  business    String        @default("b0") @db.VarChar(36)
+  weekStart   String?       @map("week_start") @db.Char(10)
+  source      String        @default("project") @db.VarChar(20)
+  subtasks    Json?
+  parent      OpsProject?   @relation(fields: [project], references: [id], onDelete: Restrict)
   owner       OpsStaff      @relation(fields: [assignee], references: [id], onDelete: Restrict)
   documents   OpsDocument[]
 
@@ -578,22 +586,29 @@ model OpsTask {
 }
 
 model OpsReport {
-  id         String            @id @default(uuid()) @db.Char(36)
-  title      String            @db.VarChar(200)
-  type       String            @db.VarChar(30)
-  project    String?           @db.Char(36)
-  dept       String            @db.VarChar(20)
-  author     String            @db.Char(36)
-  date       String            @db.Char(10)
-  progress   String?           @db.Text
-  blockers   String?           @db.Text
-  next       String?           @db.Text
-  reviewed   Boolean           @default(false)
-  comment    String?           @db.Text
-  parent     OpsProject?       @relation(fields: [project], references: [id], onDelete: Restrict)
-  department OpsDepartment     @relation(fields: [dept], references: [id], onDelete: Restrict)
-  writer     OpsStaff          @relation(fields: [author], references: [id], onDelete: Restrict)
-  reviews    OpsReportReview[]
+  id            String            @id @default(uuid()) @db.Char(36)
+  title         String            @db.VarChar(200)
+  type          String            @db.VarChar(30)
+  project       String?           @db.Char(36)
+  dept          String            @db.VarChar(20)
+  author        String            @db.Char(36)
+  date          String            @db.Char(10)
+  progress      String?           @db.Text
+  blockers      String?           @db.Text
+  next          String?           @db.Text
+  reviewed      Boolean           @default(false)
+  comment       String?           @db.Text
+  month         String?           @db.Char(7)
+  status        String            @default("submitted") @db.VarChar(20)
+  business      String            @default("b0") @db.VarChar(36)
+  taskIds       Json?             @map("task_ids")
+  taskSnapshots Json?             @map("task_snapshots")
+  attachments   Json?
+  leaveSnapshot Json?             @map("leave_snapshot")
+  parent        OpsProject?       @relation(fields: [project], references: [id], onDelete: Restrict)
+  department    OpsDepartment     @relation(fields: [dept], references: [id], onDelete: Restrict)
+  writer        OpsStaff          @relation(fields: [author], references: [id], onDelete: Restrict)
+  reviews       OpsReportReview[]
 
   @@index([project])
   @@index([dept, date])
@@ -645,6 +660,8 @@ model OpsClientRequest {
   source             String     @default("operations") @db.VarChar(20)
   received           String     @db.Char(10)
   handler            String     @db.Char(36)
+  assignedDept       String?    @map("assigned_dept") @db.VarChar(20)
+  business           String     @default("b0") @db.VarChar(36)
   status             String     @db.VarChar(30)
   notes              String?    @db.Text
   customer           OpsClient? @relation(fields: [client], references: [id], onDelete: Restrict)
@@ -691,23 +708,26 @@ model OpsBusinessGrant {
 }
 
 model OpsDocument {
-  id         String             @id @default(uuid()) @db.Char(36)
-  name       String             @db.VarChar(200)
-  folder     String             @db.VarChar(200)
-  access     String             @db.VarChar(20)
-  owner      String             @db.Char(36)
-  updated    String             @db.Char(10)
-  project    String?            @db.Char(36)
-  task       String?            @db.Char(36)
-  weeklyRef  String?            @map("weekly_ref") @db.VarChar(100)
-  dept       String?            @db.VarChar(20)
-  storageKey String             @map("storage_key") @db.VarChar(200)
-  mime       String             @db.VarChar(200)
+  id         String               @id @default(uuid()) @db.Char(36)
+  name       String               @db.VarChar(200)
+  folder     String               @db.VarChar(200)
+  access     String               @db.VarChar(20)
+  owner      String               @db.Char(36)
+  updated    String               @db.Char(10)
+  project    String?              @db.Char(36)
+  task       String?              @db.Char(36)
+  weeklyRef  String?              @map("weekly_ref") @db.VarChar(100)
+  report     String?              @db.Char(36)
+  version    Int                  @default(1)
+  versions   OpsDocumentVersion[]
+  dept       String?              @db.VarChar(20)
+  storageKey String               @map("storage_key") @db.VarChar(200)
+  mime       String               @db.VarChar(200)
   size       Int
-  creator    OpsStaff           @relation(fields: [owner], references: [id], onDelete: Restrict)
-  parent     OpsProject?        @relation(fields: [project], references: [id], onDelete: Restrict)
-  taskParent OpsTask?           @relation(fields: [task], references: [id], onDelete: Cascade)
-  department OpsDepartment?     @relation(fields: [dept], references: [id], onDelete: Restrict)
+  creator    OpsStaff             @relation(fields: [owner], references: [id], onDelete: Restrict)
+  parent     OpsProject?          @relation(fields: [project], references: [id], onDelete: Restrict)
+  taskParent OpsTask?             @relation(fields: [task], references: [id], onDelete: Cascade)
+  department OpsDepartment?       @relation(fields: [dept], references: [id], onDelete: Restrict)
   grants     OpsDocumentGrant[]
 
   @@index([task])
@@ -3146,6 +3166,64 @@ enum OpsModule {
   water
   blog
   ledger
+  inventory
+  tender
+}
+
+model OpsDocumentVersion {
+  id         String      @id @default(uuid()) @db.Char(36)
+  documentId String      @map("document_id") @db.Char(36)
+  version    Int
+  name       String      @db.VarChar(200)
+  storageKey String      @map("storage_key") @db.VarChar(200)
+  mime       String      @db.VarChar(200)
+  size       Int
+  uploadedBy String      @map("uploaded_by") @db.Char(36)
+  createdAt  DateTime    @default(now()) @map("created_at")
+  document   OpsDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, version])
+  @@map("ops_document_versions")
+}
+
+model OpsLeave {
+  id        String   @id @default(uuid()) @db.Char(36)
+  staffId   String   @map("staff_id") @db.Char(36)
+  start     String   @db.Char(10)
+  end       String   @db.Char(10)
+  note      String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([staffId, start, end])
+  @@map("ops_leave")
+}
+
+model OpsSubmissionSchedule {
+  id            String    @id @default(uuid()) @db.Char(36)
+  staffId       String    @map("staff_id") @db.Char(36)
+  kind          String    @db.VarChar(20)
+  target        String    @db.VarChar(100)
+  runAt         DateTime  @map("run_at")
+  status        String    @default("pending") @db.VarChar(20)
+  reminderState String    @default("pending") @map("reminder_state") @db.VarChar(20)
+  leaseUntil    DateTime? @map("lease_until")
+  lastError     String?   @map("last_error") @db.VarChar(500)
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@unique([staffId, kind, target])
+  @@index([status, runAt])
+  @@map("ops_submission_schedules")
+}
+
+model OpsPasswordReset {
+  id        String    @id @default(uuid()) @db.Char(36)
+  staffId   String    @map("staff_id") @db.Char(36)
+  tokenHash String    @unique @map("token_hash") @db.Char(64)
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+
+  @@index([staffId])
+  @@map("ops_password_resets")
 }
 
 enum OpsModuleAccess {

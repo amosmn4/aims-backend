@@ -1,6 +1,7 @@
 import { DiscoveryService } from "@nestjs/core";
 import { startWeeklyEmailFixture } from "./ops-weekly-email-fixture";
 import { WeeklyDeliveryService } from "../src/ops/weekly/weekly-delivery.service";
+import { OpsWorkflowsService } from "../src/ops/ops-workflows.service";
 import { startLedgerFixture } from "./ops-ledger-fixture";
 import { PaymentLedgerModule } from "../src/payment-ledger/payment-ledger.module";
 import { PaymentLedgerSyncService } from "../src/payment-ledger/payment-ledger-sync.service";
@@ -14,6 +15,7 @@ import * as bcrypt from "bcrypt";
 import cookieParser from "cookie-parser";
 import { PrismaService } from "../src/prisma/prisma.service";
 import { WaterController } from "../src/water/water.controller";
+import { WaterModule } from "../src/water/water.module";
 import { WaterExpensesController } from "../src/water/water-expenses.controller";
 import { opsFeatureProviders } from "../src/ops/modules/ops-feature.providers";
 import { StorageModule } from "../src/storage/storage.module";
@@ -105,6 +107,7 @@ async function start() {
       ScheduleModule.forRoot(),
       Infrastructure,
       OpsModule,
+      WaterModule,
       BlogModule,
       StorageModule,
       PaymentLedgerModule,
@@ -130,6 +133,13 @@ async function start() {
   );
   await app.listen(4001, "127.0.0.1");
   weeklyEmailFixture?.setReset(async () => {
+    await db.opsTask.deleteMany({
+      where: {
+        weekStart: { not: null },
+        source: { not: "project" },
+        owner: { user: { email: { in: ["staff@ops-verify.local", "it@ops-verify.local"] } } },
+      },
+    });
     await db.opsWeeklyReport.deleteMany({
       where: {
         author: { user: { email: { in: ["staff@ops-verify.local", "it@ops-verify.local"] } } },
@@ -140,6 +150,17 @@ async function start() {
     });
     await db.opsWeeklySettings.deleteMany({ where: { id: "workspace" } });
   });
+  weeklyEmailFixture?.setWorkflows(
+    async () => {
+      config.set("OPS_EMAIL_JOBS_ENABLED", true);
+      try {
+        await app.get(OpsWorkflowsService).tick();
+      } finally {
+        config.set("OPS_EMAIL_JOBS_ENABLED", false);
+      }
+    },
+    (now) => config.set("OPS_WEEKLY_TEST_NOW", now),
+  );
   weeklyEmailFixture?.setScheduler(async () => {
     config.set("OPS_EMAIL_JOBS_ENABLED", true);
     try {

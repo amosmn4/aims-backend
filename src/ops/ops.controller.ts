@@ -67,11 +67,54 @@ export class OpsController {
   ) {
     const page = parse(z.coerce.number().int().min(1).max(100000).default(1), query.page);
     const limit = parse(z.coerce.number().int().min(1).max(200).default(50), query.limit);
-    const search = parse(z.string().max(200).default(""), query.search).toLowerCase();
-    const { workspace, revision: currentRevision } = await this.ops.workspace(viewer);
-    const rows = workspace[collection(name)].filter(
-      (row) => !search || JSON.stringify(row).toLowerCase().includes(search),
+    const search = parse(z.string().trim().max(200).default(""), query.search).toLowerCase();
+    const scope = parse(
+      z.object({
+        business: z.string().max(100).optional(),
+        dept: z.string().max(100).optional(),
+        assignee: z.string().max(100).optional(),
+        author: z.string().max(100).optional(),
+        status: z.string().max(100).optional(),
+        month: z.string().max(100).optional(),
+        project: z.string().max(100).optional(),
+      }),
+      query,
     );
+    const { workspace, revision: currentRevision } = await this.ops.workspace(viewer);
+    const rows = workspace[collection(name)]
+      .filter((row) => {
+        const record = row as Record<string, unknown>;
+        return Object.entries(scope).every(([key, value]) => {
+          if (!value) return true;
+          if (key === "assignee" && name === "clients")
+            return Array.isArray(record.assignees) && record.assignees.includes(value);
+          const field =
+            key === "business" && name === "businesses"
+              ? record.id
+              : key === "dept" && name === "tasks"
+                ? workspace.people.find((person) => person.id === record.assignee)?.dept
+                : record[key];
+          return field === value;
+        });
+      })
+      .filter((row) => {
+        const record = row as Record<string, unknown>;
+        const text = [
+          "name",
+          "title",
+          "description",
+          "notes",
+          "progress",
+          "blockers",
+          "next",
+          "contact",
+          "sector",
+          "services",
+        ]
+          .map((key) => record[key] ?? "")
+          .join(" ");
+        return !search || text.toLowerCase().includes(search);
+      });
     return {
       items: rows.slice((page - 1) * limit, page * limit),
       page,
@@ -152,6 +195,22 @@ export class OpsController {
     return this.ops.account(viewer, id, dto.role, dto.active, revision(req));
   }
 
+  @Patch("staff/:id")
+  updateStaff(
+    @OpsViewer() viewer: Viewer,
+    @Param("id") id: string,
+    @Body() body: unknown,
+    @Req() req: Request,
+  ) {
+    return this.ops.updateStaff(viewer, id, body, revision(req));
+  }
+
+  @Delete("accounts/:id")
+  @HttpCode(200)
+  removeAccount(@OpsViewer() viewer: Viewer, @Param("id") id: string, @Req() req: Request) {
+    return this.ops.removeAccount(viewer, id, revision(req));
+  }
+
   @Put("business-permissions/:person")
   permissions(
     @OpsViewer() viewer: Viewer,
@@ -167,11 +226,30 @@ export class OpsController {
             .array(z.string().max(36))
             .max(500)
             .refine((values) => new Set(values).size === values.length),
+          permissions: z
+            .array(
+              z
+                .object({
+                  business: z.string().max(36),
+                  manage: z.boolean().optional(),
+                  finance: z.enum(["view", "manage"]).optional(),
+                })
+                .strict(),
+            )
+            .max(500)
+            .optional(),
         })
         .strict(),
       body,
     );
-    return this.ops.businessPermissions(viewer, person, dto.home, dto.grants, revision(req));
+    return this.ops.businessPermissions(
+      viewer,
+      person,
+      dto.home,
+      dto.grants,
+      revision(req),
+      dto.permissions,
+    );
   }
 
   @Post("invitations")

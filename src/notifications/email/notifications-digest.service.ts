@@ -46,7 +46,10 @@ export class NotificationsDigestService {
     }
 
     const unread = await this.prisma.notification.findMany({
-      where: { isRead: false },
+      where: {
+        isRead: false,
+        type: { notIn: ["report_due", "report_submitted", "report_reviewed", "report_comment"] },
+      },
       include: { user: { select: { email: true, fullName: true } } },
       orderBy: { createdAt: "desc" },
     });

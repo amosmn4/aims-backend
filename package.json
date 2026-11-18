@@ -25,7 +25,8 @@
     "seed:water": "ts-node prisma/seed-water.ts",
     "test": "jest",
     "start:ops:prod": "node dist-ops/ops-main.js",
-    "ops:check": "node --env-file-if-exists=.env scripts/check-ops-readiness.cjs"
+    "ops:check": "node --env-file-if-exists=.env scripts/check-ops-readiness.cjs",
+    "ops:backfill:weekly-tasks": "node --env-file-if-exists=.env -r ts-node/register prisma/ops-backfill-weekly-tasks.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1093.0",

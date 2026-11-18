@@ -10,6 +10,8 @@ export interface InventoryFilters {
   status?: InventoryStatus;
   condition?: InventoryCondition;
   officeId?: string;
+  departmentId?: string;
+  assignedUserId?: string;
   q?: string;
 }
 
@@ -44,6 +46,8 @@ export class InventoryService {
           ...(filters.status && { status: filters.status }),
           ...(filters.condition && { condition: filters.condition }),
           ...(filters.officeId && { officeId: filters.officeId }),
+          ...(filters.departmentId && { departmentId: filters.departmentId }),
+          ...(filters.assignedUserId && { assignedUserId: filters.assignedUserId }),
           ...(filters.q && {
             OR: [
               { deviceName: { contains: filters.q } },
@@ -88,8 +92,18 @@ export class InventoryService {
           serialNumber: dto.serialNumber,
           assignedTo: dto.assignedTo,
           officeId: dto.officeId,
-          purchaseDate: dto.purchaseDate ? new Date(dto.purchaseDate) : undefined,
-          warrantyExpiry: dto.warrantyExpiry ? new Date(dto.warrantyExpiry) : undefined,
+          purchaseDate:
+            dto.purchaseDate === undefined
+              ? undefined
+              : dto.purchaseDate
+                ? new Date(dto.purchaseDate)
+                : null,
+          warrantyExpiry:
+            dto.warrantyExpiry === undefined
+              ? undefined
+              : dto.warrantyExpiry
+                ? new Date(dto.warrantyExpiry)
+                : null,
           notes: dto.notes,
           purchaseCost: dto.purchaseCost ?? undefined,
           usefulLifeMonths: dto.usefulLifeMonths ?? undefined,
@@ -117,8 +131,18 @@ export class InventoryService {
           serialNumber: dto.serialNumber,
           assignedTo: dto.assignedTo,
           officeId: dto.officeId,
-          purchaseDate: dto.purchaseDate ? new Date(dto.purchaseDate) : undefined,
-          warrantyExpiry: dto.warrantyExpiry ? new Date(dto.warrantyExpiry) : undefined,
+          purchaseDate:
+            dto.purchaseDate === undefined
+              ? undefined
+              : dto.purchaseDate
+                ? new Date(dto.purchaseDate)
+                : null,
+          warrantyExpiry:
+            dto.warrantyExpiry === undefined
+              ? undefined
+              : dto.warrantyExpiry
+                ? new Date(dto.warrantyExpiry)
+                : null,
           notes: dto.notes,
           purchaseCost: dto.purchaseCost === undefined ? undefined : dto.purchaseCost,
           usefulLifeMonths: dto.usefulLifeMonths === undefined ? undefined : dto.usefulLifeMonths,

@@ -25,6 +25,7 @@ function probe(
   method = "GET",
   handler = WaterProbe.prototype.read,
   controller: typeof WaterProbe | typeof BlogProbe | typeof LedgerProbe = WaterProbe,
+  role = "staff",
 ) {
   const request = {
     method,
@@ -32,7 +33,7 @@ function probe(
       id: "ops-id",
       userId: "legacy-id",
       email: "staff@example.test",
-      role: "ceo",
+      role,
       modules,
     },
     user: undefined as unknown,
@@ -49,11 +50,21 @@ function probe(
 }
 
 describe("Individual Ops module permissions", () => {
-  it("denies an unassigned CEO and keeps module grants separate", () => {
+  it("denies unassigned staff and keeps module grants separate", () => {
     expect(probe({}).run).toThrow(ForbiddenException);
     expect(probe({ water: "manage" }, "GET", BlogProbe.prototype.read, BlogProbe).run).toThrow(
       ForbiddenException,
     );
+  });
+  it("gives the CEO full Water and Blog access while retaining Ledger grants", () => {
+    expect(probe({}, "POST", WaterProbe.prototype.write, WaterProbe, "ceo").run()).toBe(true);
+    expect(probe({}, "GET", BlogProbe.prototype.read, BlogProbe, "ceo").run()).toBe(true);
+    expect(probe({}, "GET", LedgerProbe.prototype.read, LedgerProbe, "ceo").run).toThrow(
+      ForbiddenException,
+    );
+    expect(
+      probe({ water: "manage" }, "GET", WaterProbe.prototype.read, WaterProbe, "system_admin").run,
+    ).toThrow(ForbiddenException);
   });
   it("allows reads and maps authorship to the linked legacy identity", () => {
     const check = probe({ water: "view" });

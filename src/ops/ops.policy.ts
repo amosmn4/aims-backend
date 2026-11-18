@@ -18,7 +18,31 @@ export function canReadProject(viewer: Viewer, project: Records["projects"]) {
   );
 }
 
+export function businessGrant(viewer: Viewer, data: Workspace, business = "b0") {
+  return data.businessAccess.find(
+    (grant) => grant.person === viewer.id && grant.business === business,
+  );
+}
+
+export function canReadBusiness(viewer: Viewer, data: Workspace, business = "b0") {
+  return (
+    viewer.role === "ceo" ||
+    business === "b0" ||
+    !!businessGrant(viewer, data, business) ||
+    data.staffBusiness.some((grant) => grant.person === viewer.id && grant.business === business)
+  );
+}
+
+export function canReadFinance(viewer: Viewer, data: Workspace, business: string) {
+  return viewer.role === "ceo" || !!businessGrant(viewer, data, business)?.finance;
+}
+
 export function canReadDocument(viewer: Viewer, doc: Records["documents"], data: Workspace) {
+  if (doc.report) {
+    const report = data.reports.find((row) => row.id === doc.report);
+    if (!report || (report.status === "draft" && report.author !== viewer.id)) return false;
+    return viewer.role === "ceo" || report.author === viewer.id;
+  }
   if (viewer.role === "ceo" || doc.owner === viewer.id || doc.access === "public") return true;
   if (doc.access === "department") return doc.dept === viewer.dept;
   if (doc.access === "project")
@@ -65,44 +89,58 @@ export function visibleWorkspace(viewer: Viewer, data: Workspace): Workspace {
       templates: [],
     };
   }
-  if (viewer.role === "ceo") return withoutSystemAdmins;
-  const projects = data.projects.filter((project) => canReadProject(viewer, project));
-  const projectIds = new Set(projects.map((project) => project.id));
-  const businessIds = new Set([
-    ...data.businessAccess
-      .filter((grant) => grant.person === viewer.id)
-      .map((grant) => grant.business),
-    ...data.staffBusiness
-      .filter((grant) => grant.person === viewer.id)
-      .map((grant) => grant.business),
-  ]);
-  const businesses = data.businesses.filter(
-    (business) => viewer.dept === "finance" || businessIds.has(business.id),
+  if (viewer.role === "ceo")
+    return {
+      ...withoutSystemAdmins,
+      reports: data.reports.filter(
+        (report) => report.status !== "draft" || report.author === viewer.id,
+      ),
+      documents: data.documents.filter((doc) => canReadDocument(viewer, doc, data)),
+    };
+  const projects = data.projects.filter(
+    (project) =>
+      canReadProject(viewer, project) || businessGrant(viewer, data, project.business)?.manage,
   );
-  const financeIds = new Set(businesses.map((business) => business.id));
+  const projectIds = new Set(projects.map((project) => project.id));
+  const businesses = data.businesses.filter((business) =>
+    canReadBusiness(viewer, data, business.id),
+  );
   const requests = data.clientRequests.filter(
     (request) =>
-      viewer.dept === "operations" ||
-      (viewer.dept === "marketing" && request.source === "marketing") ||
       request.handler === viewer.id ||
-      (!!viewer.dept &&
-        data.people.some((person) => person.id === request.handler && person.dept === viewer.dept)),
+      (!!viewer.dept && request.assignedDept === viewer.dept) ||
+      businessGrant(viewer, data, request.business)?.manage,
   );
   return {
-    ...data,
+    ...withoutSystemAdmins,
     projects,
-    tasks: data.tasks.filter((task) => projectIds.has(task.project)),
+    clients: data.clients.filter(
+      (client) =>
+        client.assignees?.includes(viewer.id) ||
+        (!!viewer.dept && client.assignedDept === viewer.dept) ||
+        businessGrant(viewer, data, client.business)?.manage ||
+        projects.some((project) => project.client === client.id),
+    ),
+    tasks: data.tasks.filter(
+      (task) =>
+        task.assignee === viewer.id ||
+        projectIds.has(task.project) ||
+        businessGrant(viewer, data, task.business)?.manage,
+    ),
     reports: data.reports.filter(
       (report) =>
-        report.author === viewer.id ||
-        report.dept === viewer.dept ||
-        (!!report.project && projectIds.has(report.project)),
+        (report.status !== "draft" || report.author === viewer.id) &&
+        (report.author === viewer.id ||
+          report.dept === viewer.dept ||
+          (!!report.project && projectIds.has(report.project))),
     ),
     documents: data.documents.filter((doc) => canReadDocument(viewer, doc, data)),
     tenders: data.tenders.filter((tender) => tender.members.includes(viewer.id)),
     clientRequests: requests,
     businesses,
-    businessFinance: data.businessFinance.filter((row) => financeIds.has(row.business)),
+    businessFinance: data.businessFinance.filter((row) =>
+      canReadFinance(viewer, data, row.business),
+    ),
     businessAccess: data.businessAccess.filter((grant) => grant.person === viewer.id),
     staffBusiness: data.staffBusiness.filter((grant) => grant.person === viewer.id),
     accounts: data.accounts.filter((account) => account.personId === viewer.id),
@@ -144,35 +182,70 @@ export function authorizeWrite<K extends Collection>(
         person.dept === old.dept;
       break;
     }
-    case "clients":
-      allowed = !deleting;
+    case "clients": {
+      const client = next as Records["clients"];
+      const old = previous as Records["clients"] | undefined;
+      allowed =
+        !deleting &&
+        (!old ||
+          !!old.assignees?.includes(viewer.id) ||
+          old.assignedDept === viewer.dept ||
+          !!businessGrant(viewer, data, old.business)?.manage) &&
+        canReadBusiness(viewer, data, client.business) &&
+        (!!client.assignees?.includes(viewer.id) ||
+          (!!viewer.dept && client.assignedDept === viewer.dept) ||
+          !!businessGrant(viewer, data, client.business)?.manage);
       break;
+    }
     case "projects": {
       const project = next as Records["projects"];
       const old = previous as Records["projects"] | undefined;
-      allowed = old
-        ? old.lead === viewer.id && project.lead === viewer.id
-        : !deleting &&
-          project.lead === viewer.id &&
-          !!viewer.dept &&
-          project.depts.includes(viewer.dept);
+      allowed =
+        (!!businessGrant(viewer, data, project.business)?.manage &&
+          (!old ||
+            old.lead === viewer.id ||
+            !!businessGrant(viewer, data, old.business)?.manage)) ||
+        (old
+          ? old.lead === viewer.id && project.lead === viewer.id
+          : !deleting &&
+            project.lead === viewer.id &&
+            !!viewer.dept &&
+            project.depts.includes(viewer.dept));
+      allowed = allowed && canReadBusiness(viewer, data, project.business);
       break;
     }
     case "tasks": {
       const task = next as Records["tasks"];
       const old = previous as Records["tasks"] | undefined;
+      if (!task.project && (!old || !old.project)) {
+        allowed =
+          canReadBusiness(viewer, data, task.business) &&
+          ((task.assignee === viewer.id && (!old || old.assignee === viewer.id)) ||
+            (!!businessGrant(viewer, data, task.business)?.manage &&
+              (!old ||
+                old.assignee === viewer.id ||
+                !!businessGrant(viewer, data, old.business)?.manage)));
+        break;
+      }
       const project = data.projects.find((item) => item.id === task.project);
       const oldProject = old && data.projects.find((item) => item.id === old.project);
+      const businessManager =
+        !!businessGrant(viewer, data, project?.business)?.manage &&
+        (!oldProject || !!businessGrant(viewer, data, oldProject.business)?.manage);
       if (
-        !project?.members.includes(viewer.id) ||
-        (old && !oldProject?.members.includes(viewer.id))
+        !businessManager &&
+        (!project?.members.includes(viewer.id) || (old && !oldProject?.members.includes(viewer.id)))
       )
         break;
-      const manages = project.lead === viewer.id && (!old || oldProject?.lead === viewer.id);
+      const manages =
+        businessManager ||
+        (project?.lead === viewer.id && (!old || oldProject?.lead === viewer.id));
       const ownStatus =
         old?.assignee === viewer.id &&
         Object.entries(task).every(
-          ([key, value]) => key === "status" || value === old[key as keyof typeof old],
+          ([key, value]) =>
+            ["status", "subtasks"].includes(key) ||
+            JSON.stringify(value) === JSON.stringify(old[key as keyof typeof old]),
         );
       allowed = manages || (!deleting && !!ownStatus) || (!old && task.assignee === viewer.id);
       break;
@@ -182,6 +255,7 @@ export function authorizeWrite<K extends Collection>(
       const old = previous as Records["reports"] | undefined;
       const project = report.project && data.projects.find((item) => item.id === report.project);
       allowed =
+        canReadBusiness(viewer, data, report.business) &&
         report.author === viewer.id &&
         !report.reviewed &&
         !report.comment &&
@@ -195,7 +269,13 @@ export function authorizeWrite<K extends Collection>(
       allowed =
         doc.owner === viewer.id &&
         (!old || old.owner === viewer.id) &&
-        (!doc.task || data.tasks.some((task) => task.id === doc.task && task.project === doc.project)) &&
+        (!doc.task ||
+          data.tasks.some(
+            (task) =>
+              task.id === doc.task &&
+              (task.project || undefined) === doc.project &&
+              (task.project || task.assignee === viewer.id),
+          )) &&
         (!old || old.task === doc.task) &&
         (!doc.project ||
           data.projects.some(
@@ -214,13 +294,27 @@ export function authorizeWrite<K extends Collection>(
       const request = next as Records["clientRequests"];
       const old = previous as Records["clientRequests"] | undefined;
       allowed =
-        (viewer.dept === request.source && ["operations", "marketing"].includes(request.source)) ||
-        (request.handler === viewer.id && (!old || old.handler === viewer.id));
+        canReadBusiness(viewer, data, request.business) &&
+        (!old ||
+          old.handler === viewer.id ||
+          (!!viewer.dept && old.assignedDept === viewer.dept) ||
+          !!businessGrant(viewer, data, old.business)?.manage) &&
+        (request.handler === viewer.id ||
+          (!!viewer.dept && request.assignedDept === viewer.dept) ||
+          !!businessGrant(viewer, data, request.business)?.manage);
       break;
     }
-    case "businessFinance":
-      allowed = viewer.dept === "finance";
+    case "businesses":
+      allowed = !!previous && !deleting && !!businessGrant(viewer, data, next.id)?.manage;
       break;
+    case "businessFinance": {
+      const row = next as Records["businessFinance"];
+      const old = previous as Records["businessFinance"] | undefined;
+      allowed =
+        businessGrant(viewer, data, row.business)?.finance === "manage" &&
+        (!old || businessGrant(viewer, data, old.business)?.finance === "manage");
+      break;
+    }
     case "moduleRecords": {
       const record = next as Records["moduleRecords"];
       const old = previous as Records["moduleRecords"] | undefined;
@@ -259,12 +353,20 @@ export function validateWorkspace(data: Workspace) {
       fail("Completed projects require Completed stage, completed status and 100% progress.");
   }
   for (const row of data.tasks)
-    if (!project(row.project)?.members.includes(row.assignee))
+    if (
+      !person(row.assignee) ||
+      (row.project && !project(row.project)?.members.includes(row.assignee))
+    )
       fail(
         "Tasks must be assigned to project team members. Reassign their tasks before removing a team member.",
       );
   for (const row of data.documents)
-    if (row.task && !data.tasks.some((task) => task.id === row.task && task.project === row.project))
+    if (
+      row.task &&
+      !data.tasks.some(
+        (task) => task.id === row.task && (task.project || undefined) === row.project,
+      )
+    )
       fail("Task attachments must belong to a task in the selected project.");
   for (const row of data.reports) {
     if (!person(row.author) || (row.project && !project(row.project)))
@@ -273,6 +375,23 @@ export function validateWorkspace(data: Workspace) {
     if (row.project && !project(row.project)?.depts.includes(row.dept))
       fail("Choose a department involved in the project.");
   }
+  for (const row of [
+    ...data.clients,
+    ...data.projects,
+    ...data.tasks,
+    ...data.reports,
+    ...data.clientRequests,
+  ])
+    if (row.business && !business(row.business)) fail("Choose an existing business.");
+  for (const row of data.clients)
+    if (
+      row.assignees?.some((id) => !person(id)) ||
+      (row.assignedDept && !data.departments.some((dept) => dept.id === row.assignedDept))
+    )
+      fail("Choose existing staff and departments for client assignments.");
+  for (const row of data.clientRequests)
+    if (row.assignedDept && !data.departments.some((dept) => dept.id === row.assignedDept))
+      fail("Choose an existing request department.");
   for (const row of data.clientRequests)
     if (
       (!!row.client && !client(row.client)) ||
@@ -291,6 +410,11 @@ export function validateWorkspace(data: Workspace) {
     if (!person(row.person) || !business(row.business))
       fail("Business grants must reference existing staff and businesses.");
   for (const row of data.documents) {
+    if (
+      row.report &&
+      !data.reports.some((report) => report.id === row.report && report.author === row.owner)
+    )
+      fail("Report attachments must belong to an existing report by their owner.");
     if (
       !person(row.owner) ||
       (row.project && !project(row.project)) ||

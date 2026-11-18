@@ -47,7 +47,7 @@ export class OpsService {
     private readonly storage: StorageService,
   ) {}
 
-  async workspace(viewer: Viewer) {
+  async workspace(viewer: Viewer, scheduledId?: string) {
     const initialized = await this.prisma.opsState.findUnique({ where: { id: "workspace" } });
     if (!initialized)
       throw new ServiceUnavailableException(
@@ -55,9 +55,25 @@ export class OpsService {
       );
     return this.prisma.$transaction(
       async (db) => {
-        await this.assertCurrentAccess(db, viewer);
+        await this.assertCurrentAccess(db, viewer, scheduledId);
         const data = await this.repository.load(db);
-        return { workspace: visibleWorkspace(viewer, data.workspace), revision: data.revision };
+        const workspace = visibleWorkspace(viewer, data.workspace);
+        if (
+          viewer.role === "ceo" &&
+          workspace.documents.some((doc) => doc.weeklyRef && doc.owner !== viewer.id)
+        ) {
+          const submitted = await db.opsWeeklyReport.findMany({
+            where: { submittedAt: { not: null } },
+            select: { staffId: true, weekStart: true, phase: true },
+          });
+          const refs = new Set(
+            submitted.map((row) => `weekly:${row.staffId}:${row.weekStart}:${row.phase}`),
+          );
+          workspace.documents = workspace.documents.filter(
+            (doc) => !doc.weeklyRef || doc.owner === viewer.id || refs.has(doc.weeklyRef),
+          );
+        }
+        return { workspace, revision: data.revision };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
     );
@@ -67,6 +83,7 @@ export class OpsService {
     viewer: Viewer,
     revision: number,
     action: (db: OpsTransaction, data: Workspace) => Promise<T>,
+    scheduledId?: string,
   ) {
     try {
       return await this.prisma.$transaction(
@@ -79,7 +96,7 @@ export class OpsService {
             throw new ConflictException(
               "The workspace changed. Reload it and review your changes before saving again.",
             );
-          await this.assertCurrentAccess(db, viewer);
+          await this.assertCurrentAccess(db, viewer, scheduledId);
           const { workspace } = await this.repository.load(db);
           return action(db, workspace);
         },
@@ -105,8 +122,23 @@ export class OpsService {
     collection: K,
     value: unknown,
     revision: number,
+    scheduledId?: string,
   ) {
     const record = parse(schemas[collection] as unknown as z.ZodType<Records[K]>, value);
+    if (
+      scheduledId &&
+      (collection !== "reports" ||
+        !(await this.prisma.opsSubmissionSchedule.findFirst({
+          where: {
+            id: scheduledId,
+            staffId: viewer.id,
+            target: record.id,
+            kind: "monthly",
+            status: "processing",
+          },
+        })))
+    )
+      throw new ForbiddenException("This scheduled submission is no longer active.");
     if (collection === "projects") {
       const project = record as Records["projects"];
       project.summary = sanitizeRichText(project.summary);
@@ -116,66 +148,118 @@ export class OpsService {
       const task = record as Records["tasks"];
       task.description = sanitizeRichText(task.description) ?? undefined;
     }
-    return this.mutate(viewer, revision, async (db, data) => {
-      const previous = (data[collection] as Records[K][]).find((row) => row.id === record.id);
-      authorizeWrite(viewer, collection, record, previous, data);
-      if (collection === "documents") {
-        if (!previous) throw new BadRequestException("Use Upload document to attach a file.");
-        const doc = record as Records["documents"];
-        const old = previous as Records["documents"];
-        if (
-          doc.owner !== old.owner ||
-          doc.fileKey !== old.fileKey ||
-          doc.mime !== old.mime ||
-          doc.task !== old.task ||
-          doc.weeklyRef !== old.weeklyRef
-        )
-          throw new BadRequestException(
-            "File ownership, content and attachment association cannot be changed through document metadata.",
-          );
-        if (
-          old.weeklyRef &&
-          (doc.access !== "restricted" || doc.allowed?.some((personId) => personId !== old.owner))
-        )
-          throw new BadRequestException(
-            "Weekly attachments must remain private to their author and the CEO.",
-          );
-      }
-      if (collection === "tasks" && viewer.role !== "ceo") {
-        const task = record as Records["tasks"];
-        const old = previous as Records["tasks"] | undefined;
-        if (task.ceoComment !== old?.ceoComment)
-          throw new BadRequestException("Only the CEO can add or change a task comment.");
-      }
-      if (collection === "reports") {
-        const report = record as Records["reports"];
-        const old = previous as Records["reports"] | undefined;
-        if (old?.reviewed)
-          throw new BadRequestException("Reviewed reports are locked. Submit a new update.");
-        if (report.reviewed || report.comment)
-          throw new BadRequestException("Use the report review action to record a review.");
-        if (old && old.author !== report.author)
-          throw new BadRequestException("Report authors cannot be changed.");
-      }
-      const next = {
-        ...data,
-        [collection]: [
-          ...(data[collection] as Records[K][]).filter((row) => row.id !== record.id),
+    return this.mutate(
+      viewer,
+      revision,
+      async (db, data) => {
+        const previous = (data[collection] as Records[K][]).find((row) => row.id === record.id);
+        authorizeWrite(viewer, collection, record, previous, data);
+        if (collection === "documents") {
+          if (!previous) throw new BadRequestException("Use Upload document to attach a file.");
+          const doc = record as Records["documents"];
+          const old = previous as Records["documents"];
+          if (
+            doc.owner !== old.owner ||
+            doc.fileKey !== old.fileKey ||
+            doc.mime !== old.mime ||
+            doc.task !== old.task ||
+            doc.report !== old.report ||
+            doc.weeklyRef !== old.weeklyRef
+          )
+            throw new BadRequestException(
+              "File ownership, content and attachment association cannot be changed through document metadata.",
+            );
+          if (
+            (old.weeklyRef || old.report) &&
+            (doc.access !== "restricted" || doc.allowed?.some((personId) => personId !== old.owner))
+          )
+            throw new BadRequestException(
+              "Submission attachments must remain private to their author and the CEO.",
+            );
+        }
+        if (collection === "tasks" && viewer.role !== "ceo") {
+          const task = record as Records["tasks"];
+          const old = previous as Records["tasks"] | undefined;
+          if (task.ceoComment !== old?.ceoComment)
+            throw new BadRequestException("Only the CEO can add or change a task comment.");
+        }
+        if (collection === "reports") {
+          const report = record as Records["reports"];
+          const old = previous as Records["reports"] | undefined;
+          if (old?.reviewed)
+            throw new BadRequestException("Reviewed reports are locked. Submit a new update.");
+          if (report.reviewed || report.comment)
+            throw new BadRequestException("Use the report review action to record a review.");
+          if (old && old.author !== report.author)
+            throw new BadRequestException("Report authors cannot be changed.");
+          if (old && old.status !== "draft" && report.status === "draft")
+            throw new BadRequestException("Submitted reports cannot be changed back to drafts.");
+          report.month ??= report.date.slice(0, 7);
+          report.status ??= "submitted";
+          const selected = data.tasks.filter((task) => report.taskIds?.includes(task.id));
+          if (
+            selected.length !== new Set(report.taskIds ?? []).size ||
+            selected.some((task) => task.assignee !== viewer.id)
+          )
+            throw new BadRequestException("Select only your own current tasks.");
+          if (
+            (report.attachments ?? []).some(
+              (id) =>
+                !data.documents.some(
+                  (doc) => doc.id === id && doc.owner === viewer.id && doc.report === report.id,
+                ),
+            )
+          )
+            throw new BadRequestException(
+              "Upload attachments for this report before selecting them.",
+            );
+          if (report.status === "submitted" && (!report.progress?.trim() || !report.title.trim()))
+            throw new BadRequestException("Add your progress before submitting the report.");
+          report.taskSnapshots = selected.map((task) => ({
+            id: task.id,
+            title: task.title,
+            status: task.status,
+            due: task.due,
+            source: task.source ?? "project",
+            priority: task.priority,
+            subtasks: task.subtasks ?? [],
+          }));
+          const monthEnd = new Date(`${report.month}-01T12:00:00Z`);
+          monthEnd.setUTCMonth(monthEnd.getUTCMonth() + 1);
+          monthEnd.setUTCDate(0);
+          const startOfMonth = `${report.month}-01`;
+          const endOfMonth = monthEnd.toISOString().slice(0, 10);
+          report.leaveSnapshot = (
+            await db.opsLeave.findMany({
+              where: { staffId: viewer.id, start: { lte: endOfMonth }, end: { gte: startOfMonth } },
+            })
+          ).map(({ start, end, note }) => ({
+            start: start < startOfMonth ? startOfMonth : start,
+            end: end > endOfMonth ? endOfMonth : end,
+            note,
+          }));
+        }
+        const next = {
+          ...data,
+          [collection]: [
+            ...(data[collection] as Records[K][]).filter((row) => row.id !== record.id),
+            record,
+          ],
+        };
+        validateWorkspace(next);
+        await this.repository.save(db, collection, record);
+        await this.audit(
+          db,
+          viewer,
+          `ops.${collection}.${previous ? "updated" : "created"}`,
+          record.id,
+          previous,
           record,
-        ],
-      };
-      validateWorkspace(next);
-      await this.repository.save(db, collection, record);
-      await this.audit(
-        db,
-        viewer,
-        `ops.${collection}.${previous ? "updated" : "created"}`,
-        record.id,
-        previous,
-        record,
-      );
-      return { id: record.id };
-    });
+        );
+        return { id: record.id };
+      },
+      scheduledId,
+    );
   }
 
   async remove(viewer: Viewer, collection: Collection, id: string, revision: number) {
@@ -184,6 +268,32 @@ export class OpsService {
       const previous = data[collection].find((row) => row.id === id);
       if (!previous) throw new NotFoundException("Record not found.");
       authorizeWrite(viewer, collection, previous, previous, data, true);
+      if (collection === "people") {
+        const staff = await this.managedStaff(db, id);
+        const linked =
+          data.projects.some((row) => row.lead === id || row.members.includes(id)) ||
+          data.tasks.some((row) => row.assignee === id) ||
+          data.reports.some((row) => row.author === id) ||
+          data.tenders.some((row) => row.members.includes(id)) ||
+          data.clients.some((row) => row.assignees?.includes(id)) ||
+          data.clientRequests.some((row) => row.handler === id) ||
+          data.documents.some((row) => row.owner === id || row.allowed?.includes(id)) ||
+          data.moduleRecords.some((row) => row.owner === id);
+        const history = await Promise.all([
+          db.opsWeeklyReport.count({ where: { OR: [{ staffId: id }, { reviewerId: id }] } }),
+          db.opsReportReview.count({ where: { reviewerId: id } }),
+          db.opsWeeklyDelivery.count({ where: { recipientId: id } }),
+          db.opsDocumentVersion.count({ where: { uploadedBy: id } }),
+          db.opsLeave.count({ where: { staffId: id } }),
+        ]);
+        if (linked || history.some(Boolean))
+          throw new BadRequestException(
+            "This staff member has linked work or reporting history. Deactivate or delete their Ops account to remove access while keeping the staff record.",
+          );
+        await db.opsPasswordReset.deleteMany({ where: { staffId: id } });
+        await db.opsSubmissionSchedule.deleteMany({ where: { staffId: id } });
+        if (staff.userId) await this.invalidateStaffAccess(db, id, staff.userId);
+      }
       if (collection === "departments" || (collection === "businesses" && id === "b0"))
         throw new BadRequestException("This workspace record cannot be deleted.");
       if (collection === "reports" && (previous as Records["reports"]).reviewed)
@@ -191,12 +301,26 @@ export class OpsService {
       validateWorkspace({
         ...data,
         [collection]: data[collection].filter((row) => row.id !== id),
+        ...(collection === "people"
+          ? {
+              accounts: data.accounts.filter((row) => row.personId !== id),
+              businessAccess: data.businessAccess.filter((row) => row.person !== id),
+              staffBusiness: data.staffBusiness.filter((row) => row.person !== id),
+            }
+          : {}),
         ...(collection === "tasks"
           ? { documents: data.documents.filter((document) => document.task !== id) }
           : {}),
       });
       if (collection === "documents") {
         const document = previous as Records["documents"];
+        if (
+          document.report &&
+          data.reports.some(
+            (report) => report.id === document.report && report.attachments?.includes(id),
+          )
+        )
+          throw new BadRequestException("Remove this attachment from an editable report first.");
         if (document.weeklyRef) {
           const [, staffId, weekStart, phase] = document.weeklyRef.split(":");
           if (staffId && weekStart && (phase === "plan" || phase === "report")) {
@@ -213,7 +337,13 @@ export class OpsService {
               );
           }
         }
-        storageKeys.push((await db.opsDocument.findUniqueOrThrow({ where: { id } })).storageKey);
+        const file = await db.opsDocument.findUniqueOrThrow({
+          where: { id },
+          include: { versions: true },
+        });
+        storageKeys.push(
+          ...new Set([file.storageKey, ...file.versions.map((version) => version.storageKey)]),
+        );
       } else if (collection === "tasks") {
         const attachments = await db.opsDocument.findMany({
           where: { task: id },
@@ -236,7 +366,8 @@ export class OpsService {
     return this.mutate(viewer, revision, async (db, data) => {
       const report = data.reports.find((row) => row.id === id);
       if (!report) throw new NotFoundException("Report not found.");
-      if (report.reviewed) throw new ConflictException("This report has already been reviewed.");
+      if (report.reviewed || report.status === "draft")
+        throw new ConflictException("Only submitted, unreviewed reports can be reviewed.");
       await db.opsReportReview.create({
         data: { reportId: id, reviewerId: viewer.id, comment: comment?.trim() || null },
       });
@@ -333,12 +464,96 @@ export class OpsService {
     });
   }
 
+  private async managedStaff(db: OpsTransaction, id: string) {
+    const staff = await db.opsStaff.findUnique({ where: { id }, include: { user: true } });
+    if (!staff) throw new NotFoundException("Staff member not found.");
+    if (staff.role !== "staff")
+      throw new ForbiddenException("Only staff accounts can be managed here.");
+    return staff;
+  }
+
+  private async invalidateStaffAccess(db: OpsTransaction, staffId: string, userId: string) {
+    const now = new Date();
+    await db.opsSession.deleteMany({ where: { staffId } });
+    await db.opsInvitation.updateMany({
+      where: { staffId, usedAt: null },
+      data: { usedAt: now },
+    });
+    await db.opsPasswordReset.updateMany({
+      where: { staffId, usedAt: null },
+      data: { usedAt: now },
+    });
+    await db.passwordSetupToken.updateMany({
+      where: { userId, usedAt: null },
+      data: { usedAt: now },
+    });
+  }
+
+  updateStaff(viewer: Viewer, id: string, value: unknown, revision: number) {
+    assertCeo(viewer);
+    const dto = parse(
+      schemas.people.omit({ id: true }).extend({
+        email: z.string().trim().toLowerCase().email().max(200).optional(),
+      }),
+      value,
+    );
+    return this.mutate(viewer, revision, async (db, data) => {
+      const staff = await this.managedStaff(db, id);
+      if (dto.email && !staff.userId)
+        throw new BadRequestException("Invite this staff member to create their sign-in account.");
+      const emailChanged = dto.email !== undefined && dto.email !== staff.user?.email;
+      if (emailChanged) {
+        const duplicate = await db.user.findUnique({ where: { email: dto.email } });
+        if (duplicate && duplicate.id !== staff.userId)
+          throw new ConflictException("Another account already uses this email address.");
+      }
+      const { email, ...profile } = dto;
+      validateWorkspace({
+        ...data,
+        people: data.people.map((row) => (row.id === id ? { ...row, ...profile } : row)),
+      });
+      await db.opsStaff.update({ where: { id }, data: profile });
+      if (emailChanged && staff.userId) {
+        await db.user.update({ where: { id: staff.userId }, data: { email } });
+        await this.invalidateStaffAccess(db, id, staff.userId);
+      }
+      await this.audit(
+        db,
+        viewer,
+        "ops.staff.updated",
+        id,
+        { name: staff.name, title: staff.title, dept: staff.dept, email: staff.user?.email },
+        dto,
+      );
+      return { success: true };
+    });
+  }
+
+  removeAccount(viewer: Viewer, id: string, revision: number) {
+    assertCeo(viewer);
+    return this.mutate(viewer, revision, async (db) => {
+      const staff = await this.managedStaff(db, id);
+      if (!staff.userId) throw new NotFoundException("Account not found.");
+      await this.invalidateStaffAccess(db, id, staff.userId);
+      await db.opsSubmissionSchedule.updateMany({
+        where: { staffId: id, status: { in: ["pending", "processing", "failed"] } },
+        data: { status: "cancelled", leaseUntil: null },
+      });
+      await db.opsModuleGrant.deleteMany({ where: { staffId: id } });
+      await db.opsBusinessGrant.deleteMany({ where: { personId: id } });
+      await db.opsStaff.update({ where: { id }, data: { userId: null, active: false } });
+      await this.audit(db, viewer, "ops.accounts.deleted", id, { email: staff.user?.email });
+      return { success: true };
+    });
+  }
+
   businessPermissions(
     viewer: Viewer,
     person: string,
     home: string | null,
     grants: string[],
     revision: number,
+    permissions: { business: string; manage?: boolean; finance?: "view" | "manage" }[] = [],
   ) {
     assertCeo(viewer);
     return this.mutate(viewer, revision, async (db, data) => {
@@ -350,13 +565,27 @@ export class OpsService {
         ],
         businessAccess: [
           ...data.businessAccess.filter((row) => row.person !== person),
-          ...grants.map((business) => ({ person, business })),
+          ...grants.map((business) => ({
+            person,
+            business,
+            ...permissions.find((row) => row.business === business),
+          })),
         ],
       };
       validateWorkspace(next);
       await db.opsBusinessGrant.deleteMany({ where: { personId: person } });
       const rows = [
         ...grants.map((businessId) => ({ personId: person, businessId, kind: "grant" })),
+        ...permissions
+          .filter((row) => row.manage && grants.includes(row.business))
+          .map((row) => ({ personId: person, businessId: row.business, kind: "manage" })),
+        ...permissions
+          .filter((row) => row.finance && grants.includes(row.business))
+          .map((row) => ({
+            personId: person,
+            businessId: row.business,
+            kind: row.finance === "manage" ? "fin_manage" : "fin_view",
+          })),
         ...(home ? [{ personId: person, businessId: home, kind: "home" }] : []),
       ];
       if (rows.length) await db.opsBusinessGrant.createMany({ data: rows });
@@ -448,10 +677,7 @@ export class OpsService {
     const origin = this.frontendUrl();
     const token = randomBytes(32).toString("hex");
     const result = await this.mutate(viewer, revision, async (db) => {
-      const staff = await db.opsStaff.findUnique({
-        where: { id },
-        include: { user: { select: { email: true, isActive: true } } },
-      });
+      const staff = await this.managedStaff(db, id);
       if (!staff?.user?.isActive || !staff.active)
         throw new BadRequestException("Activate the Ops account before renewing its invitation.");
       await db.opsInvitation.updateMany({
@@ -482,7 +708,7 @@ export class OpsService {
     const dto = parse(
       z
         .object({
-          module: z.enum(["water", "blog", "ledger"]),
+          module: z.enum(["water", "blog", "ledger", "inventory", "tender"]),
           access: z.enum(["none", "view", "manage"]),
         })
         .strict(),
@@ -515,6 +741,17 @@ export class OpsService {
   ) {
     if (!file || file.size === 0) throw new BadRequestException("Choose a non-empty file.");
     const record = parse(schemas.documents, value);
+    if (record.report) {
+      const report = await this.prisma.opsReport.findFirst({
+        where: { id: record.report, author: viewer.id, reviewed: false },
+      });
+      if (
+        !report ||
+        record.access !== "restricted" ||
+        record.allowed?.some((id) => id !== viewer.id)
+      )
+        throw new BadRequestException("Report attachments must belong to your editable draft.");
+    }
     if (
       record.weeklyRef &&
       (record.access !== "restricted" ||
@@ -530,6 +767,14 @@ export class OpsService {
     await this.storage.write(key, file.buffer);
     try {
       await this.mutate(viewer, revision, async (db, data) => {
+        if (
+          record.report &&
+          !data.reports.some(
+            (report) =>
+              report.id === record.report && report.author === viewer.id && !report.reviewed,
+          )
+        )
+          throw new BadRequestException("Upload attachments to your editable report.");
         if (data.documents.some((doc) => doc.id === record.id))
           throw new ConflictException("Document already exists.");
         authorizeWrite(viewer, "documents", record, undefined, data);
@@ -547,10 +792,22 @@ export class OpsService {
             project: record.project,
             task: record.task,
             weeklyRef: record.weeklyRef,
+            report: record.report,
             dept: record.dept,
             storageKey: key,
             mime: file.mimetype || "application/octet-stream",
             size: file.size,
+          },
+        });
+        await db.opsDocumentVersion.create({
+          data: {
+            documentId: record.id,
+            version: 1,
+            name: record.name,
+            storageKey: key,
+            mime: file.mimetype || "application/octet-stream",
+            size: file.size,
+            uploadedBy: viewer.id,
           },
         });
         if (record.access === "restricted" && record.allowed?.length)
@@ -577,23 +834,31 @@ export class OpsService {
     return this.prisma.opsDocument.findUniqueOrThrow({ where: { id } });
   }
 
-  private async assertCurrentAccess(db: OpsTransaction, viewer: Viewer) {
+  private async assertCurrentAccess(db: OpsTransaction, viewer: Viewer, scheduledId?: string) {
     const [staff, session] = await Promise.all([
       db.opsStaff.findUnique({
         where: { id: viewer.id },
         include: { user: { select: { isActive: true } } },
       }),
-      db.opsSession.findUnique({ where: { id: viewer.sessionId } }),
+      scheduledId ? undefined : db.opsSession.findUnique({ where: { id: viewer.sessionId } }),
     ]);
     if (
       !staff?.active ||
       !staff.user?.isActive ||
-      !session ||
-      session.staffId !== viewer.id ||
-      session.expiresAt <= new Date() ||
-      session.idleExpiresAt <= new Date()
+      (!scheduledId &&
+        (!session ||
+          session.staffId !== viewer.id ||
+          session.expiresAt <= new Date() ||
+          session.idleExpiresAt <= new Date()))
     )
       throw new UnauthorizedException("Your session has expired. Sign in again.");
+    if (
+      scheduledId &&
+      !(await db.opsSubmissionSchedule.findFirst({
+        where: { id: scheduledId, staffId: viewer.id, kind: "monthly", status: "processing" },
+      }))
+    )
+      throw new UnauthorizedException("This scheduled submission is no longer active.");
     if (staff.role !== viewer.role || staff.dept !== viewer.dept)
       throw new ConflictException("Your permissions changed. Reload the workspace.");
   }

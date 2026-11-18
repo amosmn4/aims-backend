@@ -12,6 +12,7 @@ import { StorageService } from "../../storage/storage.service";
 import { assertCeo } from "../ops.policy";
 import { parse, type Viewer } from "../ops.schemas";
 import { WeeklyClock } from "./weekly-clock";
+import { syncWeeklyTasks } from "./weekly-tasks";
 import {
   addDays,
   defaultWeeklySettings,
@@ -24,6 +25,7 @@ import {
   phaseSchema,
   weekSchema,
   weeklySaveSchema,
+  weeklyItemSchema,
   weeklySettingsSchema,
   weeklySubmissionSchema,
   sanitizeWeeklySubmission,
@@ -179,11 +181,20 @@ export class WeeklyService {
       tasks: tasks.map((task) => ({
         id: task.id,
         title: task.title,
-        project: task.parent.name,
+        project: task.parent?.name ?? "Weekly work",
         status: task.status,
         due: task.due,
+        weekStart: task.weekStart,
+        priority: task.priority,
+        source: task.source,
+        business: task.business,
+        subtasks: task.subtasks,
       })),
       reportOpensAt: this.reportOpens(week, schedule.settings).toISOString(),
+      leave: await this.db.opsLeave.findMany({
+        where: { staffId, start: { lte: addDays(week, 6) }, end: { gte: week } },
+        select: { start: true, end: true, note: true },
+      }),
       deadlines: {
         plan: scheduleFor(week, "plan", schedule.settings).deadline.toISOString(),
         report: scheduleFor(week, "report", schedule.settings).deadline.toISOString(),
@@ -199,6 +210,11 @@ export class WeeklyService {
       ...parsed,
       submission: parse(weeklySubmissionSchema, sanitizeWeeklySubmission(parsed.submission)),
     };
+    if (
+      new Set(dto.submission.items.map((item) => item.taskId ?? item.id)).size !==
+      dto.submission.items.length
+    )
+      throw new BadRequestException("Include each task only once in a submission.");
     const schedule = await this.settings();
     if (!schedule.configured)
       throw new BadRequestException("The CEO must configure weekly reporting first.");
@@ -223,6 +239,28 @@ export class WeeklyService {
     try {
       const result = await this.db.$transaction(async (tx) => {
         await this.actor(tx, viewer);
+        dto.submission.leave = (
+          await tx.opsLeave.findMany({
+            where: { staffId: viewer.id, start: { lte: addDays(week, 6) }, end: { gte: week } },
+            select: { start: true, end: true, note: true },
+          })
+        ).map((row) => ({
+          ...row,
+          start: row.start < week ? week : row.start,
+          end: row.end > addDays(week, 6) ? addDays(week, 6) : row.end,
+        }));
+        const businessIds = [...new Set(dto.submission.items.map((item) => item.business ?? "b0"))];
+        for (const business of businessIds) {
+          if (
+            !(await tx.opsBusiness.findUnique({ where: { id: business } })) ||
+            (viewer.role !== "ceo" &&
+              business !== "b0" &&
+              !(await tx.opsBusinessGrant.findFirst({
+                where: { personId: viewer.id, businessId: business },
+              })))
+          )
+            throw new ForbiddenException("Choose an assigned business for weekly tasks.");
+        }
         const existing = await tx.opsWeeklyReport.findUnique({
           where: { staffId_weekStart_phase: { staffId: viewer.id, weekStart: week, phase } },
         });
@@ -302,6 +340,23 @@ export class WeeklyService {
             );
         }
         if (phase === "report" && dto.submit) {
+          const current = await tx.opsTask.findMany({
+            where: {
+              assignee: viewer.id,
+              id: { in: dto.submission.items.map((item) => item.taskId ?? item.id) },
+            },
+          });
+          dto.submission.items = dto.submission.items.map((item) => {
+            const task = current.find((row) => row.id === (item.taskId ?? item.id));
+            return task
+              ? {
+                  ...item,
+                  subtasks: parse(weeklyItemSchema.shape.subtasks, task.subtasks ?? []),
+                  priority:
+                    item.priority ?? (task.priority as "Urgent" | "High" | "Medium" | "Low"),
+                }
+              : item;
+          });
           if (plan?.submittedAt) {
             const items = parse(weeklySubmissionSchema, plan.submission).items;
             if (items.some((item) => !dto.submission.items.some((result) => result.id === item.id)))
@@ -316,6 +371,13 @@ export class WeeklyService {
           returnedAt: null,
           returnComment: null,
         };
+        if (dto.submit) {
+          await syncWeeklyTasks(tx, viewer.id, week, phase, dto.submission);
+          await tx.opsState.update({
+            where: { id: "workspace" },
+            data: { revision: { increment: 1 } },
+          });
+        }
         let id: string;
         if (existing) {
           const changed = await tx.opsWeeklyReport.updateMany({
@@ -431,6 +493,7 @@ export class WeeklyService {
     });
     if (
       !person?.active ||
+      person.role === "system_admin" ||
       !person.user?.isActive ||
       person.userId !== viewer.userId ||
       (ceo && person.role !== "ceo")

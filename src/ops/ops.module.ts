@@ -30,6 +30,10 @@ import { OpsRepository } from "./ops.repository";
 import { OpsService } from "./ops.service";
 import { TendersModule } from "../crm/tenders/tenders.module";
 import { WaterModule } from "../water/water.module";
+import { InventoryService } from "../it/inventory/inventory.service";
+import { OpsInventoryController } from "./modules/ops-inventory.controller";
+import { OpsWorkflowsController } from "./ops-workflows.controller";
+import { OpsWorkflowsService } from "./ops-workflows.service";
 
 @Module({
   imports: [
@@ -40,6 +44,8 @@ import { WaterModule } from "../water/water.module";
     WaterModule,
   ],
   controllers: [
+    OpsInventoryController,
+    OpsWorkflowsController,
     OpsHealthController,
     WeeklyController,
     OpsLedgerController,
@@ -54,6 +60,8 @@ import { WaterModule } from "../water/water.module";
     OpsTendersController,
   ],
   providers: [
+    InventoryService,
+    OpsWorkflowsService,
     WeeklyService,
     WeeklyClock,
     WeeklyDeliveryService,

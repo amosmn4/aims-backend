@@ -48,6 +48,7 @@ const ALL_STAGES: TenderStage[] = [
 const PROGRESS_STAGES: TenderStage[] = ["identified", "applying", "submitted", "won"];
 
 export interface TenderFilters {
+  assignedUserId?: string;
   departmentId?: string;
   serviceLineId?: string;
   stage?: TenderStage;
@@ -96,6 +97,12 @@ async function tenderDeptFilter(
 
 function buildWhere(filters: TenderFilters): Prisma.TenderWhereInput {
   return {
+    ...(filters.assignedUserId && {
+      OR: [
+        { accountManagerId: filters.assignedUserId },
+        { resources: { some: { userId: filters.assignedUserId } } },
+      ],
+    }),
     ...(filters.departmentId && { departmentId: filters.departmentId }),
     ...(filters.serviceLineId && { serviceLineId: filters.serviceLineId }),
     ...(filters.stage && { stage: filters.stage }),

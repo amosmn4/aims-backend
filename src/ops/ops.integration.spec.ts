@@ -25,6 +25,11 @@ import { OpsRepository } from "./ops.repository";
 import { OpsService } from "./ops.service";
 import type { Workspace } from "./ops.schemas";
 
+jest.mock("sanitize-html", () => {
+  const { createRequire } = process.getBuiltinModule("module");
+  return createRequire(__filename)("sanitize-html");
+});
+
 const databaseUrl = process.env.OPS_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
 const password = "OpsVerification2026!";
@@ -229,12 +234,17 @@ suite("Ops HTTP API with isolated MySQL", () => {
   });
 
   it("persists the client, project, team and task flow with relationship validation", async () => {
-    await change(`records/clients/${clientId}`, {
-      id: clientId,
-      name: "API Test Client",
-      contact: "Contact",
-      services: ["Recruitment"],
-    });
+    await change(
+      `records/clients/${clientId}`,
+      {
+        id: clientId,
+        name: "API Test Client",
+        contact: "Contact",
+        services: ["Recruitment"],
+        assignees: [staffId],
+      },
+      staffToken,
+    );
     await change(`records/projects/${projectId}`, {
       id: projectId,
       name: "API Test Project",
@@ -332,7 +342,7 @@ suite("Ops HTTP API with isolated MySQL", () => {
       { ...report, progress: "Rewritten" },
       ceoToken,
       "PUT",
-      400,
+      403,
     );
     const history = await call(`ops/reports/${reportId}/reviews`, staffToken);
     expect(await history.json()).toEqual([
@@ -375,23 +385,33 @@ suite("Ops HTTP API with isolated MySQL", () => {
     };
     await change(`records/businessFinance/${financeId}`, row);
     const duplicateId = randomUUID();
-    await change(
-      `records/businessFinance/${duplicateId}`,
-      { ...row, id: duplicateId, date: "2026-11-20", description: "Consulting income" },
-    );
+    await change(`records/businessFinance/${duplicateId}`, {
+      ...row,
+      id: duplicateId,
+      date: "2026-11-20",
+      description: "Consulting income",
+    });
     expect(
       (await snapshot(staffToken)).workspace.businessFinance.some(
         (entry) => entry.business === businessId,
       ),
     ).toBe(false);
     await change(`business-permissions/${staffId}`, { home: null, grants: [businessId] });
+    expect(
+      (await snapshot(staffToken)).workspace.businessFinance.some(
+        (entry) => entry.business === businessId,
+      ),
+    ).toBe(false);
+    await change(`business-permissions/${staffId}`, {
+      home: null,
+      grants: [businessId],
+      permissions: [{ business: businessId, finance: "view" }],
+    });
     const staffFinance = (await snapshot(staffToken)).workspace.businessFinance.filter(
       (entry) => entry.business === businessId,
     );
     expect(staffFinance).toHaveLength(2);
-    expect(
-      staffFinance.find((entry) => entry.id === financeId)?.revenue,
-    ).toBe(10.25);
+    expect(staffFinance.find((entry) => entry.id === financeId)?.revenue).toBe(10.25);
     await change(
       `records/businessFinance/${financeId}`,
       { ...row, revenue: 50 },
@@ -523,14 +543,19 @@ suite("Ops HTTP API with isolated MySQL", () => {
     expect(
       (await snapshot(outsiderToken)).workspace.tenders.some((row) => row.id === tenderId),
     ).toBe(false);
-    await change(`records/clientRequests/${requestId}`, {
-      id: requestId,
-      title: "Service request",
-      client: clientId,
-      received: "2026-11-11",
-      handler: staffId,
-      status: "Received",
-    });
+    await change(
+      `records/clientRequests/${requestId}`,
+      {
+        id: requestId,
+        title: "Service request",
+        client: clientId,
+        source: "operations",
+        received: "2026-11-11",
+        handler: staffId,
+        status: "Received",
+      },
+      staffToken,
+    );
     expect(
       (await snapshot(staffToken)).workspace.clientRequests.some((row) => row.id === requestId),
     ).toBe(true);
@@ -576,6 +601,154 @@ suite("Ops HTTP API with isolated MySQL", () => {
       await call(`ops/records/tenders?search=${tenderId}`, outsiderToken)
     ).json();
     expect(hidden.total).toBe(0);
+  });
+
+  it("corrects a staff email, revokes old sessions and links, and resends to the corrected address", async () => {
+    const wrongEmail = `incorrect-${randomUUID()}@ops.test`;
+    const correctEmail = `corrected-${randomUUID()}@ops.test`;
+    const user = await prisma.user.create({
+      data: { email: wrongEmail, passwordHash: await bcrypt.hash(password, 4) },
+    });
+    const staff = await prisma.opsStaff.create({
+      data: { userId: user.id, name: "Email correction", title: "Consultant", dept: "hr" },
+    });
+    const initial = await change(
+      `accounts/${staff.id}/invitation`,
+      undefined,
+      ceoToken,
+      "POST",
+      201,
+    );
+    const oldLink = new URL(initial.invitationUrl).searchParams.get("token")!;
+    const login = await call("ops/auth/login", undefined, {
+      method: "POST",
+      body: JSON.stringify({ email: wrongEmail, password }),
+    });
+    const oldSession = (await login.json()).accessToken;
+    const reset = await prisma.opsPasswordReset.create({
+      data: {
+        staffId: staff.id,
+        tokenHash: randomUUID().replaceAll("-", "").padEnd(64, "a"),
+        expiresAt: new Date(Date.now() + 3600000),
+      },
+    });
+    const profile = {
+      name: staff.name,
+      title: "Senior Consultant",
+      dept: "hr",
+      email: correctEmail.toUpperCase(),
+    };
+    await change(`staff/${staff.id}`, profile, staffToken, "PATCH", 403);
+    await change(`staff/${ceoId}`, profile, ceoToken, "PATCH", 403);
+    await change(`staff/${staff.id}`, { ...profile, email: staffEmail }, ceoToken, "PATCH", 409);
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).email).toBe(
+      wrongEmail,
+    );
+    await change(`staff/${staff.id}`, profile, ceoToken, "PATCH");
+    expect((await snapshot()).workspace.accounts.find((row) => row.id === staff.id)?.email).toBe(
+      correctEmail,
+    );
+    expect((await call("ops/workspace", oldSession)).status).toBe(401);
+    expect((await call(`ops/auth/invitation?token=${oldLink}`)).status).toBe(401);
+    expect(
+      (await prisma.opsPasswordReset.findUniqueOrThrow({ where: { id: reset.id } })).usedAt,
+    ).not.toBeNull();
+    expect(
+      (
+        await call("ops/auth/login", undefined, {
+          method: "POST",
+          body: JSON.stringify({ email: wrongEmail, password }),
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await call("ops/auth/login", undefined, {
+          method: "POST",
+          body: JSON.stringify({ email: correctEmail, password }),
+        })
+      ).status,
+    ).toBe(200);
+    const renewed = await change(
+      `accounts/${staff.id}/invitation`,
+      undefined,
+      ceoToken,
+      "POST",
+      201,
+    );
+    const token = new URL(renewed.invitationUrl).searchParams.get("token")!;
+    expect(await (await call(`ops/auth/invitation?token=${token}`)).json()).toEqual({
+      email: correctEmail,
+    });
+  });
+
+  it("deletes Ops account access while retaining linked staff history and the shared identity", async () => {
+    const address = `remove-access-${randomUUID()}@ops.test`;
+    const user = await prisma.user.create({
+      data: { email: address, passwordHash: await bcrypt.hash(password, 4) },
+    });
+    const staff = await prisma.opsStaff.create({
+      data: { userId: user.id, name: "Retained Staff", title: "Consultant", dept: "hr" },
+    });
+    const task = await prisma.opsTask.create({
+      data: {
+        title: "Retained work",
+        assignee: staff.id,
+        due: "2026-12-01",
+        priority: "High",
+        status: "To do",
+      },
+    });
+    await prisma.opsModuleGrant.create({
+      data: { staffId: staff.id, module: "inventory", access: "view" },
+    });
+    const invitation = await change(
+      `accounts/${staff.id}/invitation`,
+      undefined,
+      ceoToken,
+      "POST",
+      201,
+    );
+    const token = new URL(invitation.invitationUrl).searchParams.get("token")!;
+    const login = await call("ops/auth/login", undefined, {
+      method: "POST",
+      body: JSON.stringify({ email: address, password }),
+    });
+    const session = (await login.json()).accessToken;
+    const failed = await change(`records/people/${staff.id}`, undefined, ceoToken, "DELETE", 400);
+    expect(failed.message).toContain("linked work or reporting history");
+    await change(`accounts/${staff.id}`, undefined, staffToken, "DELETE", 403);
+    await change(`accounts/${ceoId}`, undefined, ceoToken, "DELETE", 403);
+    await change(`accounts/${staff.id}`, undefined, ceoToken, "DELETE");
+    const retained = await prisma.opsStaff.findUniqueOrThrow({ where: { id: staff.id } });
+    expect(retained.userId).toBeNull();
+    expect(retained.active).toBe(false);
+    expect(await prisma.user.findUnique({ where: { id: user.id } })).not.toBeNull();
+    expect(await prisma.opsTask.findUnique({ where: { id: task.id } })).not.toBeNull();
+    expect(await prisma.opsModuleGrant.count({ where: { staffId: staff.id } })).toBe(0);
+    expect((await call("ops/workspace", session)).status).toBe(401);
+    expect((await call(`ops/auth/invitation?token=${token}`)).status).toBe(401);
+    expect((await snapshot()).workspace.accounts.some((row) => row.id === staff.id)).toBe(false);
+  });
+
+  it("deletes an unused staff entry with its account and business grants in one transaction", async () => {
+    const address = `unused-staff-${randomUUID()}@ops.test`;
+    await change(
+      "invitations",
+      { name: "Unused Staff", title: "Consultant", dept: "hr", email: address, role: "staff" },
+      ceoToken,
+      "POST",
+      201,
+    );
+    const staff = await prisma.opsStaff.findFirstOrThrow({ where: { user: { email: address } } });
+    await prisma.opsBusinessGrant.create({
+      data: { personId: staff.id, businessId: "b0", kind: "grant" },
+    });
+    await change(`records/people/${staff.id}`, undefined, ceoToken, "DELETE");
+    expect(await prisma.opsStaff.findUnique({ where: { id: staff.id } })).toBeNull();
+    expect(await prisma.opsInvitation.count({ where: { staffId: staff.id } })).toBe(0);
+    expect(await prisma.opsBusinessGrant.count({ where: { personId: staff.id } })).toBe(0);
+    expect(await prisma.user.findUnique({ where: { email: address } })).not.toBeNull();
   });
 
   it("changes passwords, revokes other Ops sessions and logs out the current session", async () => {

@@ -15,7 +15,6 @@ import { InvoicesModule } from "./finance/invoices/invoices.module";
 import { BudgetsModule } from "./finance/budgets/budgets.module";
 import { PayrollComplianceModule } from "./finance/payroll-compliance/payroll-compliance.module";
 import { FinanceUploadsModule } from "./finance/finance-uploads/finance-uploads.module";
-import { FinanceReportsModule } from "./finance/finance-reports/finance-reports.module";
 import { ProjectsModule } from "./project-management/projects/projects.module";
 import { TasksModule } from "./project-management/tasks/tasks.module";
 import { TimelineExtensionsModule } from "./project-management/timeline-extensions/timeline-extensions.module";
@@ -41,7 +40,6 @@ import { ThreadsModule } from "./threads/threads.module";
 import { MyWorkModule } from "./my-work/my-work.module";
 import { WaterModule } from "./water/water.module";
 import { PermissionsModule } from "./permissions/permissions.module";
-import { ReportsModule } from "./reports/reports.module";
 import { ExpensesModule } from "./finance/expenses/expenses.module";
 import { CompanySettingsModule } from "./company-settings/company-settings.module";
 import { PaymentLedgerModule } from "./payment-ledger/payment-ledger.module";
@@ -64,7 +62,6 @@ import { OpsModule } from "./ops/ops.module";
     BudgetsModule,
     PayrollComplianceModule,
     FinanceUploadsModule,
-    FinanceReportsModule,
     ProjectsModule,
     TasksModule,
     TimelineExtensionsModule,
@@ -89,7 +86,6 @@ import { OpsModule } from "./ops/ops.module";
     ThreadsModule,
     MyWorkModule,
     WaterModule,
-    ReportsModule,
     ExpensesModule,
     CompanySettingsModule,
     PermissionsModule,

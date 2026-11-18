@@ -38,6 +38,22 @@ export const weeklyItemSchema = z
     title: z.string().trim().min(1).max(200),
     detail: z.string().trim().max(2000),
     status: z.enum(["planned", "completed", "in_progress", "pending", "blocked", "cancelled"]),
+    due: weeklyDate.optional(),
+    priority: z.enum(["Urgent", "High", "Medium", "Low"]).optional(),
+    source: z.enum(["planned", "ad_hoc", "contingency", "project"]).optional(),
+    business: z.string().max(36).optional(),
+    subtasks: z
+      .array(
+        z
+          .object({
+            id: z.string().uuid(),
+            title: z.string().trim().min(1).max(200),
+            done: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(100)
+      .optional(),
   })
   .strict();
 export const weeklySubmissionSchema = z
@@ -58,6 +74,11 @@ export const weeklySubmissionSchema = z
     blockers: z.string().trim().max(5000),
     nextWeek: z.string().trim().max(5000),
     noWorkReason: z.string().trim().max(2000),
+    leave: z
+      .array(
+        z.object({ start: weeklyDate, end: weeklyDate, note: z.string().nullable().optional() }),
+      )
+      .optional(),
   })
   .strict();
 export const weeklySaveSchema = z

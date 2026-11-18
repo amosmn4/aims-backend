@@ -18,9 +18,18 @@ import { assertCeo, assertSystemAdmin } from "../ops.policy";
 import { WeeklyService } from "./weekly.service";
 import { WeeklyDeliveryService } from "./weekly-delivery.service";
 import { AllowHtml } from "../../common/sanitize";
+import { IsBoolean, IsInt, IsObject, Min } from "class-validator";
 
 class WeeklySaveBody {
+  @IsInt()
+  @Min(0)
+  version!: number;
+
+  @IsBoolean()
+  submit!: boolean;
+
   @AllowHtml()
+  @IsObject()
   submission!: unknown;
 }
 

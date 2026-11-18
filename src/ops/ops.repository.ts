@@ -86,7 +86,12 @@ export class OpsRepository {
               row.moduleGrants.map((grant) => [grant.module, grant.access]),
             ),
           })),
-        clients: clients.map((row) => ({ ...row, services: row.services as string[] })),
+        clients: clients.map((row) => ({
+          ...row,
+          services: row.services as string[],
+          assignees: (row.assignees as string[] | null) ?? [],
+          assignedDept: optional(row.assignedDept),
+        })),
         projects: projects.map(({ departments: depts, members, client, ...row }) => ({
           ...row,
           client: optional(client),
@@ -97,6 +102,10 @@ export class OpsRepository {
         })),
         tasks: tasks.map((row) => ({
           ...row,
+          project: row.project ?? "",
+          weekStart: optional(row.weekStart),
+          source: row.source as Records["tasks"]["source"],
+          subtasks: (row.subtasks as Records["tasks"]["subtasks"]) ?? [],
           status: row.status as Records["tasks"]["status"],
           priority: row.priority as Records["tasks"]["priority"],
           description: optional(row.description),
@@ -111,6 +120,12 @@ export class OpsRepository {
           blockers: optional(row.blockers),
           next: optional(row.next),
           comment: optional(row.comment),
+          month: optional(row.month),
+          status: row.status as Records["reports"]["status"],
+          taskIds: (row.taskIds as string[] | null) ?? [],
+          attachments: (row.attachments as string[] | null) ?? [],
+          taskSnapshots: (row.taskSnapshots as Records["reports"]["taskSnapshots"]) ?? [],
+          leaveSnapshot: (row.leaveSnapshot as Records["reports"]["leaveSnapshot"]) ?? [],
         })),
         tenders: tenders.map(({ members, ...row }) => ({
           ...row,
@@ -126,6 +141,7 @@ export class OpsRepository {
           source: row.source as Records["clientRequests"]["source"],
           status: row.status as Records["clientRequests"]["status"],
           notes: optional(row.notes),
+          assignedDept: optional(row.assignedDept),
         })),
         businesses,
         businessFinance: finance.map((row) => ({
@@ -136,8 +152,38 @@ export class OpsRepository {
           note: optional(row.note),
         })),
         businessAccess: grants
-          .filter((row) => row.kind === "grant")
-          .map((row) => ({ person: row.personId, business: row.businessId })),
+          .filter((row) => row.kind !== "home")
+          .filter(
+            (row, index, rows) =>
+              rows.findIndex(
+                (item) => item.personId === row.personId && item.businessId === row.businessId,
+              ) === index,
+          )
+          .map((row) => ({
+            person: row.personId,
+            business: row.businessId,
+            manage: grants.some(
+              (item) =>
+                item.personId === row.personId &&
+                item.businessId === row.businessId &&
+                item.kind === "manage",
+            ),
+            finance: grants.some(
+              (item) =>
+                item.personId === row.personId &&
+                item.businessId === row.businessId &&
+                item.kind === "fin_manage",
+            )
+              ? ("manage" as const)
+              : grants.some(
+                    (item) =>
+                      item.personId === row.personId &&
+                      item.businessId === row.businessId &&
+                      item.kind === "fin_view",
+                  )
+                ? ("view" as const)
+                : undefined,
+          })),
         staffBusiness: grants
           .filter((row) => row.kind === "home")
           .map((row) => ({ person: row.personId, business: row.businessId })),
@@ -151,6 +197,8 @@ export class OpsRepository {
           project: optional(row.project),
           task: optional(row.task),
           weeklyRef: optional(row.weeklyRef),
+          report: optional(row.report),
+          version: row.version,
           dept: optional(row.dept) as Records["documents"]["dept"],
           allowed: row.grants.map((grant) => grant.personId),
           fileKey: row.id,
@@ -183,7 +231,12 @@ export class OpsRepository {
       }
       case "clients": {
         const row = record as Records["clients"];
-        return db.opsClient.upsert({ where: { id: row.id }, create: row, update: row });
+        const data = {
+          ...row,
+          assignees: row.assignees ?? [],
+          assignedDept: row.assignedDept ?? null,
+        };
+        return db.opsClient.upsert({ where: { id: row.id }, create: data, update: data });
       }
       case "projects": {
         const { members, depts, ...row } = record as Records["projects"];
@@ -200,7 +253,13 @@ export class OpsRepository {
       }
       case "tasks": {
         const row = record as Records["tasks"];
-        return db.opsTask.upsert({ where: { id: row.id }, create: row, update: row });
+        const data = {
+          ...row,
+          project: row.project || null,
+          weekStart: row.weekStart ?? null,
+          subtasks: row.subtasks ?? [],
+        };
+        return db.opsTask.upsert({ where: { id: row.id }, create: data, update: data });
       }
       case "reports": {
         const row = record as Records["reports"];
@@ -211,6 +270,10 @@ export class OpsRepository {
           blockers: row.blockers ?? null,
           next: row.next ?? null,
           comment: row.comment ?? null,
+          taskIds: row.taskIds ?? [],
+          attachments: row.attachments ?? [],
+          taskSnapshots: JSON.parse(JSON.stringify(row.taskSnapshots ?? [])),
+          leaveSnapshot: JSON.parse(JSON.stringify(row.leaveSnapshot ?? [])),
         };
         return db.opsReport.upsert({ where: { id: row.id }, create: data, update: data });
       }
@@ -229,6 +292,7 @@ export class OpsRepository {
           ...row,
           client: row.client ?? null,
           prospectClientName: row.prospectClientName ?? null,
+          assignedDept: row.assignedDept ?? null,
           notes: row.notes ?? null,
         };
         return db.opsClientRequest.upsert({ where: { id: row.id }, create: data, update: data });
@@ -266,6 +330,7 @@ export class OpsRepository {
           fileKey: _fileKey,
           mime: _mime,
           sample: _sample,
+          version: _version,
           ...row
         } = record as Records["documents"];
         await db.opsDocument.update({

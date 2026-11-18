@@ -54,7 +54,15 @@ export const schemas = {
     .strict(),
   people: z.object({ id, name: text, title: text, dept: departmentId.nullable() }).strict(),
   clients: z
-    .object({ id, name: text, contact: text, services: z.array(text).min(1).max(50) })
+    .object({
+      id,
+      name: text,
+      contact: text,
+      services: z.array(text).min(1).max(50),
+      assignees: ids.optional(),
+      assignedDept: departmentId.optional(),
+      business: id.or(z.literal("b0")).optional(),
+    })
     .strict(),
   projects: z
     .object({
@@ -69,6 +77,7 @@ export const schemas = {
       progress: z.number().int().min(0).max(100),
       due: date,
       summary: z.string().trim().min(1).max(5000),
+      business: id.or(z.literal("b0")).optional(),
     })
     .strict(),
   tasks: z
@@ -76,19 +85,26 @@ export const schemas = {
       id,
       title: text,
       description: z.string().max(10000).optional(),
-      project: id,
+      project: id.or(z.literal("")),
       assignee: id,
       due: date,
-      priority: z.enum(["High", "Medium", "Low"]),
+      priority: z.enum(["Urgent", "High", "Medium", "Low"]),
       status: z.enum(["To do", "In progress", "Done"]),
       ceoComment: z.string().max(10000).optional(),
+      business: id.or(z.literal("b0")).optional(),
+      weekStart: date.optional(),
+      source: z.enum(["project", "planned", "ad_hoc", "contingency"]).optional(),
+      subtasks: z
+        .array(z.object({ id, title: text, done: z.boolean() }).strict())
+        .max(100)
+        .optional(),
     })
     .strict(),
   reports: z
     .object({
       id,
       title: text,
-      type: z.enum(["Project update", "Weekly department", "Ad-hoc"]),
+      type: z.enum(["Monthly", "Project update", "Weekly department", "Ad-hoc"]),
       project: id.optional(),
       dept: departmentId,
       author: id,
@@ -98,6 +114,30 @@ export const schemas = {
       next: z.string().max(10000).optional(),
       reviewed: z.boolean(),
       comment: z.string().max(10000).optional(),
+      month: z
+        .string()
+        .regex(/^\d{4}-(0[1-9]|1[0-2])$/)
+        .optional(),
+      status: z.enum(["draft", "submitted"]).optional(),
+      business: id.or(z.literal("b0")).optional(),
+      taskIds: ids.optional(),
+      attachments: ids.optional(),
+      taskSnapshots: z
+        .array(
+          z.object({
+            id,
+            title: text,
+            status: z.string(),
+            due: date,
+            source: z.string(),
+            priority: z.enum(["Urgent", "High", "Medium", "Low"]).optional(),
+            subtasks: z.array(z.object({ id, title: text, done: z.boolean() })).optional(),
+          }),
+        )
+        .optional(),
+      leaveSnapshot: z
+        .array(z.object({ start: date, end: date, note: z.string().nullable().optional() }))
+        .optional(),
     })
     .strict(),
   tenders: z
@@ -129,6 +169,8 @@ export const schemas = {
       source: z.enum(["operations", "marketing"]),
       received: date,
       handler: id,
+      assignedDept: departmentId.optional(),
+      business: id.or(z.literal("b0")).optional(),
       status: z.enum(["Received", "In progress", "Closed"]),
       notes: z.string().max(5000).optional(),
     })
@@ -161,6 +203,8 @@ export const schemas = {
       project: id.optional(),
       task: id.optional(),
       weeklyRef: z.string().max(100).optional(),
+      report: id.optional(),
+      version: z.number().int().min(1).optional(),
       dept: departmentId.optional(),
       allowed: ids.optional(),
       fileKey: id.optional(),
@@ -190,7 +234,9 @@ export type OpsPerson = Records["people"] & {
   role: "ceo" | "staff" | "system_admin";
   active: boolean;
 };
-export type ModulePermissions = Partial<Record<"water" | "blog" | "ledger", "view" | "manage">>;
+export type ModulePermissions = Partial<
+  Record<"water" | "blog" | "ledger" | "inventory" | "tender", "view" | "manage">
+>;
 export type Viewer = OpsPerson & { sessionId: string; email: string; modules?: ModulePermissions };
 export type Workspace = { [K in Collection]: Records[K][] } & {
   version: 1;
@@ -203,7 +249,12 @@ export type Workspace = { [K in Collection]: Records[K][] } & {
     hasPassword: boolean;
     modules?: ModulePermissions;
   }[];
-  businessAccess: { person: string; business: string }[];
+  businessAccess: {
+    person: string;
+    business: string;
+    manage?: boolean;
+    finance?: "view" | "manage";
+  }[];
   staffBusiness: { person: string; business: string }[];
   settings: z.infer<typeof settingsSchema>;
 };
