@@ -18,7 +18,17 @@ import { assertCeo, assertSystemAdmin } from "../ops.policy";
 import { WeeklyService } from "./weekly.service";
 import { WeeklyDeliveryService } from "./weekly-delivery.service";
 import { AllowHtml } from "../../common/sanitize";
-import { IsBoolean, IsInt, IsObject, Min } from "class-validator";
+import { IsArray, IsBoolean, IsInt, IsObject, Min } from "class-validator";
+
+class WeeklyAppendBody {
+  @IsInt()
+  @Min(1)
+  version!: number;
+
+  @AllowHtml()
+  @IsArray()
+  items!: unknown[];
+}
 
 class WeeklySaveBody {
   @IsInt()
@@ -83,6 +93,19 @@ export class WeeklyController {
     @Body() body: unknown,
   ) {
     return this.weekly.review(viewer, id, body);
+  }
+  @Get("submissions")
+  submissions(@OpsViewer() viewer: Viewer, @Query() query: Record<string, string>) {
+    return this.weekly.submissions(viewer, query);
+  }
+  @Post("submissions/:id/tasks")
+  @HttpCode(200)
+  appendTasks(
+    @OpsViewer() viewer: Viewer,
+    @Param("id", ParseUUIDPipe) id: string,
+    @Body() body: WeeklyAppendBody,
+  ) {
+    return this.weekly.appendTasks(viewer, id, body);
   }
   @Post("submissions/:id/return")
   @HttpCode(200)

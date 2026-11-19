@@ -24,6 +24,10 @@ import { OpsController } from "./ops.controller";
 import { OpsRepository } from "./ops.repository";
 import { OpsService } from "./ops.service";
 import type { Workspace } from "./ops.schemas";
+import { WeeklyController } from "./weekly/weekly.controller";
+import { WeeklyService } from "./weekly/weekly.service";
+import { WeeklyClock } from "./weekly/weekly-clock";
+import { WeeklyDeliveryService } from "./weekly/weekly-delivery.service";
 
 jest.mock("sanitize-html", () => {
   const { createRequire } = process.getBuiltinModule("module");
@@ -141,8 +145,9 @@ suite("Ops HTTP API with isolated MySQL", () => {
     });
     config.set("SMTP_HOST", "");
     config.set("S3_BUCKET", "");
+    config.set("OPS_WEEKLY_TEST_NOW", "2026-11-20T16:00:00Z");
     @Module({
-      controllers: [OpsAuthController, OpsController, LegacyProbe],
+      controllers: [OpsAuthController, OpsController, WeeklyController, LegacyProbe],
       providers: [
         Reflector,
         JwtService,
@@ -152,6 +157,9 @@ suite("Ops HTTP API with isolated MySQL", () => {
         OpsAuthGuard,
         OpsRepository,
         OpsService,
+        WeeklyService,
+        WeeklyClock,
+        { provide: WeeklyDeliveryService, useValue: {} },
         JwtStrategy,
         StorageService,
         {
@@ -749,6 +757,148 @@ suite("Ops HTTP API with isolated MySQL", () => {
     expect(await prisma.opsInvitation.count({ where: { staffId: staff.id } })).toBe(0);
     expect(await prisma.opsBusinessGrant.count({ where: { personId: staff.id } })).toBe(0);
     expect(await prisma.user.findUnique({ where: { email: address } })).not.toBeNull();
+  });
+
+  it("lists only personal weekly submissions and appends tasks with versioned history and task-state preservation", async () => {
+    const user = await prisma.user.create({
+      data: {
+        email: `weekly-ui-${randomUUID()}@ops.test`,
+        passwordHash: await bcrypt.hash(password, 4),
+      },
+    });
+    const staff = await prisma.opsStaff.create({
+      data: { userId: user.id, name: "Weekly UI", title: "Consultant", dept: "hr" },
+    });
+    const login = await call("ops/auth/login", undefined, {
+      method: "POST",
+      body: JSON.stringify({ email: user.email, password }),
+    });
+    const token = (await login.json()).accessToken;
+    const settings = await (await call("ops/weekly/settings", ceoToken)).json();
+    await call("ops/weekly/settings", ceoToken, {
+      method: "PUT",
+      body: JSON.stringify({
+        version: settings.version,
+        settings: { ...settings.settings, startWeek: "2026-11-16" },
+      }),
+    });
+    const weeklyCall = (path: string, body: unknown, who = token) =>
+      call(`ops/weekly/${path}`, who, { method: "POST", body: JSON.stringify(body) });
+    const first = {
+      id: randomUUID(),
+      title: "Original task",
+      detail: "Expected result",
+      status: "planned",
+    };
+    const submission = {
+      summary: "Complete the weekly work",
+      items: [first],
+      blockers: "",
+      nextWeek: "",
+      noWorkReason: "",
+    };
+    const saved = await call("ops/weekly/reports/2026-11-16/plan", token, {
+      method: "PUT",
+      body: JSON.stringify({ version: 0, submit: true, submission }),
+    });
+    expect(saved.status).toBe(200);
+    const plan = await saved.json();
+    const original = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: plan.id } });
+    await prisma.opsTask.update({ where: { id: first.id }, data: { status: "Done" } });
+    expect(
+      (
+        await weeklyCall(
+          `submissions/${plan.id}/review`,
+          { version: 1, comment: "Reviewed" },
+          ceoToken,
+        )
+      ).status,
+    ).toBe(200);
+    const added = {
+      id: randomUUID(),
+      title: "Urgent additional task",
+      detail: "New result",
+      status: "planned",
+      priority: "Urgent",
+      source: "contingency",
+    };
+    expect(
+      (await weeklyCall(`submissions/${plan.id}/tasks`, { version: 1, items: [added] })).status,
+    ).toBe(409);
+    expect(
+      (await weeklyCall(`submissions/${plan.id}/tasks`, { version: 2, items: [added] }, staffToken))
+        .status,
+    ).toBe(404);
+    expect(
+      (await weeklyCall(`submissions/${plan.id}/tasks`, { version: 2, items: [added] }, ceoToken))
+        .status,
+    ).toBe(403);
+    expect(
+      (
+        await weeklyCall(`submissions/${plan.id}/tasks`, {
+          version: 2,
+          items: [{ ...added, taskId }],
+        })
+      ).status,
+    ).toBe(403);
+    const results = await Promise.all([
+      weeklyCall(`submissions/${plan.id}/tasks`, { version: 2, items: [added] }),
+      weeklyCall(`submissions/${plan.id}/tasks`, {
+        version: 2,
+        items: [{ ...added, id: randomUUID() }],
+      }),
+    ]);
+    expect(results.map((row) => row.status).sort()).toEqual([200, 409]);
+    const updated = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: plan.id } });
+    const content = updated.submission as unknown as typeof submission;
+    expect(content.items).toHaveLength(2);
+    expect(content.items[0]).toEqual(first);
+    expect(updated.submittedAt).toEqual(original.submittedAt);
+    expect(updated.reviewedAt).toBeNull();
+    expect((await prisma.opsTask.findUniqueOrThrow({ where: { id: first.id } })).status).toBe(
+      "Done",
+    );
+    expect(await prisma.opsTask.findUnique({ where: { id: content.items[1].id } })).not.toBeNull();
+    const history = await (await call(`ops/weekly/submissions/${plan.id}/history`, token)).json();
+    expect(
+      history.find((row: { action: string }) => row.action === "ops.weekly.tasks_added").newValue
+        .previousSubmission.items,
+    ).toHaveLength(1);
+    const own = await (await call("ops/weekly/submissions?phase=plan", token)).json();
+    expect(own.items.map((row: { staffId: string }) => row.staffId)).toEqual([staff.id]);
+    expect(
+      (await call(`ops/weekly/submissions?phase=plan&staffId=${staff.id}`, staffToken)).status,
+    ).toBe(400);
+    const hidden = await (await call("ops/weekly/submissions?phase=plan", outsiderToken)).json();
+    expect(hidden.items.some((row: { id: string }) => row.id === plan.id)).toBe(false);
+    expect((await call(`ops/weekly/submissions/${plan.id}/history`, outsiderToken)).status).toBe(
+      404,
+    );
+    const report = await call("ops/weekly/reports/2026-11-16/report", token, {
+      method: "PUT",
+      body: JSON.stringify({
+        version: 0,
+        submit: true,
+        submission: {
+          ...content,
+          items: content.items.map((item) => ({
+            ...item,
+            taskId: item.id,
+            id: randomUUID(),
+            status: "completed",
+          })),
+        },
+      }),
+    });
+    expect(report.status).toBe(200);
+    expect(
+      (
+        await weeklyCall(`submissions/${plan.id}/tasks`, {
+          version: updated.version,
+          items: [{ ...added, id: randomUUID() }],
+        })
+      ).status,
+    ).toBe(409);
   });
 
   it("changes passwords, revokes other Ops sessions and logs out the current session", async () => {

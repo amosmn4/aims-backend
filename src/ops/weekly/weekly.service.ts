@@ -202,6 +202,149 @@ export class WeeklyService {
     };
   }
 
+  async submissions(viewer: Viewer, query: Record<string, string>) {
+    if (viewer.role !== "staff") throw new ForbiddenException("Staff access is required.");
+    const dto = parse(
+      z
+        .object({
+          phase: phaseSchema,
+          week: weekSchema.optional(),
+          status: z.enum(["submitted", "draft", "reviewed", "returned"]).optional(),
+          page: z.coerce.number().int().min(1).max(100000).default(1),
+        })
+        .strict(),
+      query,
+    );
+    const where: Prisma.OpsWeeklyReportWhereInput = {
+      staffId: viewer.id,
+      phase: dto.phase,
+      ...(dto.week ? { weekStart: dto.week } : {}),
+      ...(dto.status === "submitted" ? { submittedAt: { not: null } } : {}),
+      ...(dto.status === "reviewed" ? { reviewedAt: { not: null } } : {}),
+      ...(dto.status === "draft" ? { submittedAt: null, returnedAt: null } : {}),
+      ...(dto.status === "returned" ? { submittedAt: null, returnedAt: { not: null } } : {}),
+    };
+    const schedule = await this.settings();
+    const [total, rows] = await this.db.$transaction([
+      this.db.opsWeeklyReport.count({ where }),
+      this.db.opsWeeklyReport.findMany({
+        where,
+        orderBy: [{ weekStart: "desc" }, { id: "desc" }],
+        skip: (dto.page - 1) * 20,
+        take: 20,
+      }),
+    ]);
+    return {
+      total,
+      page: dto.page,
+      limit: 20,
+      items: rows.map((row) => this.serialize(row, schedule.settings)),
+    };
+  }
+
+  async appendTasks(viewer: Viewer, id: string, value: unknown) {
+    if (viewer.role !== "staff") throw new ForbiddenException("Staff access is required.");
+    const dto = parse(
+      z
+        .object({
+          version: z.number().int().min(1),
+          items: z.array(weeklyItemSchema).min(1).max(100),
+        })
+        .strict(),
+      value,
+    );
+    const additions = sanitizeWeeklySubmission({
+      summary: "",
+      blockers: "",
+      nextWeek: "",
+      noWorkReason: "",
+      items: dto.items,
+    }).items;
+    if (additions.some((item) => item.status !== "planned" || !item.title.trim()))
+      throw new BadRequestException("Add planned tasks with a title.");
+    try {
+      return await this.db.$transaction(async (tx) => {
+        await tx.opsState.update({
+          where: { id: "workspace" },
+          data: { revision: { increment: 1 } },
+        });
+        await this.actor(tx, viewer);
+        const plan = await tx.opsWeeklyReport.findUnique({ where: { id } });
+        if (!plan || plan.staffId !== viewer.id || plan.phase !== "plan")
+          throw new NotFoundException("Weekly plan not found.");
+        if (!plan.submittedAt || plan.version !== dto.version)
+          throw new ConflictException("This plan changed. Reload it before adding tasks.");
+        const report = await tx.opsWeeklyReport.findUnique({
+          where: {
+            staffId_weekStart_phase: {
+              staffId: viewer.id,
+              weekStart: plan.weekStart,
+              phase: "report",
+            },
+          },
+        });
+        if (report?.submittedAt)
+          throw new ConflictException(
+            "This week's report is already submitted. Ask the CEO to return the report before adding tasks to its plan.",
+          );
+        const previous = parse(weeklySubmissionSchema, plan.submission);
+        const submission = parse(weeklySubmissionSchema, {
+          ...previous,
+          items: [...previous.items, ...additions],
+        });
+        if (
+          new Set(submission.items.map((item) => item.taskId ?? item.id)).size !==
+          submission.items.length
+        )
+          throw new BadRequestException("Each task can appear only once in a plan.");
+        for (const item of additions) {
+          const business = item.business ?? "b0";
+          if (
+            !(await tx.opsBusiness.findUnique({ where: { id: business } })) ||
+            (business !== "b0" &&
+              !(await tx.opsBusinessGrant.findFirst({
+                where: { personId: viewer.id, businessId: business },
+              })))
+          )
+            throw new ForbiddenException("Choose an assigned business for weekly tasks.");
+          const task = await tx.opsTask.findUnique({ where: { id: item.taskId ?? item.id } });
+          if (item.taskId ? !task || task.assignee !== viewer.id : !!task)
+            throw new ForbiddenException(
+              "Link only your own tasks, or add a new task with a unique identifier.",
+            );
+        }
+        const changed = await tx.opsWeeklyReport.updateMany({
+          where: { id, version: dto.version, submittedAt: { not: null } },
+          data: {
+            submission: submission as Prisma.InputJsonObject,
+            version: { increment: 1 },
+            reviewedAt: null,
+            reviewerId: null,
+            reviewComment: null,
+          },
+        });
+        if (!changed.count)
+          throw new ConflictException("This plan changed. Reload it before adding tasks.");
+        await syncWeeklyTasks(
+          tx,
+          viewer.id,
+          plan.weekStart,
+          "plan",
+          { ...submission, items: additions },
+          true,
+        );
+        await this.audit(tx, viewer, "ops.weekly.tasks_added", id, {
+          previousSubmission: plan.submission,
+          submission: submission as Prisma.InputJsonObject,
+          addedTaskIds: additions.map((item) => item.taskId ?? item.id),
+        });
+        return { id, version: dto.version + 1, success: true };
+      });
+    } catch (error) {
+      this.conflict(error);
+    }
+  }
+
   async save(viewer: Viewer, rawWeek: string, rawPhase: string, value: unknown) {
     const week = parse(weekSchema, rawWeek);
     const phase = parse(phaseSchema, rawPhase);
@@ -238,6 +381,10 @@ export class WeeklyService {
     const storageKeys: string[] = [];
     try {
       const result = await this.db.$transaction(async (tx) => {
+        await tx.opsState.update({
+          where: { id: "workspace" },
+          data: { revision: { increment: 1 } },
+        });
         await this.actor(tx, viewer);
         dto.submission.leave = (
           await tx.opsLeave.findMany({
@@ -359,7 +506,14 @@ export class WeeklyService {
           });
           if (plan?.submittedAt) {
             const items = parse(weeklySubmissionSchema, plan.submission).items;
-            if (items.some((item) => !dto.submission.items.some((result) => result.id === item.id)))
+            if (
+              items.some(
+                (item) =>
+                  !dto.submission.items.some(
+                    (result) => (result.taskId ?? result.id) === (item.taskId ?? item.id),
+                  ),
+              )
+            )
               throw new BadRequestException(
                 "Include an outcome for every task in your submitted plan.",
               );
@@ -373,10 +527,6 @@ export class WeeklyService {
         };
         if (dto.submit) {
           await syncWeeklyTasks(tx, viewer.id, week, phase, dto.submission);
-          await tx.opsState.update({
-            where: { id: "workspace" },
-            data: { revision: { increment: 1 } },
-          });
         }
         let id: string;
         if (existing) {
