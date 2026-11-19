@@ -11,6 +11,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { StorageService } from "../../storage/storage.service";
 import { assertCeo } from "../ops.policy";
 import { parse, type Viewer } from "../ops.schemas";
+import { auditActor, loadOpsSession } from "../ops-session";
 import { WeeklyClock } from "./weekly-clock";
 import { syncWeeklyTasks } from "./weekly-tasks";
 import {
@@ -637,6 +638,21 @@ export class WeeklyService {
     return new Date(`${addDays(week, day)}T00:00:00+03:00`);
   }
   private async actor(tx: Prisma.TransactionClient, viewer: Viewer, ceo = false) {
+    if (viewer.sessionId !== "scheduler") {
+      const { viewer: current } = await loadOpsSession(
+        tx,
+        viewer.sessionId,
+        undefined,
+        viewer.sessionVersion ?? 0,
+      );
+      if (
+        current.id !== viewer.id ||
+        current.userId !== viewer.userId ||
+        current.role !== viewer.role ||
+        current.dept !== viewer.dept
+      )
+        throw new ForbiddenException("Your Ops access changed. Sign in again.");
+    }
     const person = await tx.opsStaff.findUnique({
       where: { id: viewer.id },
       include: { user: { select: { isActive: true } } },
@@ -659,7 +675,7 @@ export class WeeklyService {
   ) {
     return tx.auditLog.create({
       data: {
-        userId: viewer.userId,
+        ...auditActor(viewer),
         action,
         entityType: "ops-weekly",
         entityId: id,

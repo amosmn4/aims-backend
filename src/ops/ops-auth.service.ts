@@ -12,6 +12,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { type Viewer } from "./ops.schemas";
 import { EmailService } from "../notifications/email/email.service";
 import { escapeHtml } from "../reports/report-email.util";
+import { loadOpsSession } from "./ops-session";
 
 export const OPS_COOKIE = "amsol_ops_refresh";
 export const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -32,9 +33,9 @@ export class OpsAuthService {
       .digest("hex");
   }
 
-  private accessToken(staffId: string, sessionId: string) {
+  private accessToken(staffId: string, sessionId: string, version = 0) {
     return this.jwt.sign(
-      { sub: staffId, sid: sessionId },
+      { sub: staffId, sid: sessionId, iv: version },
       { secret: this.secret(), expiresIn: "15m", audience: "amsol-ops", issuer: "amsol-ops-api" },
     );
   }
@@ -70,26 +71,9 @@ export class OpsAuthService {
     return this.createSession(staff.id, remember);
   }
 
-  async viewer(sessionId: string, staffId?: string): Promise<Viewer> {
-    const session = await this.prisma.opsSession.findUnique({
-      where: { id: sessionId },
-      include: {
-        staff: {
-          include: { moduleGrants: true, user: { select: { email: true, isActive: true } } },
-        },
-      },
-    });
+  async viewer(sessionId: string, staffId?: string, version?: number): Promise<Viewer> {
+    const { session, viewer } = await loadOpsSession(this.prisma, sessionId, staffId, version);
     const now = Date.now();
-    if (
-      !session ||
-      session.expiresAt.getTime() <= now ||
-      session.idleExpiresAt.getTime() <= now ||
-      (staffId && session.staffId !== staffId)
-    )
-      throw new UnauthorizedException("Your session has expired. Please sign in again.");
-    const staff = session.staff;
-    if (!staff.active || !staff.user?.isActive)
-      throw new UnauthorizedException("Your Ops account is inactive.");
     if (session.idleExpiresAt.getTime() - now < IDLE_MS - 60_000) {
       const touched = await this.prisma.opsSession.updateMany({
         where: { id: session.id, idleExpiresAt: { gt: new Date() }, expiresAt: { gt: new Date() } },
@@ -97,33 +81,27 @@ export class OpsAuthService {
       });
       if (!touched.count) throw new UnauthorizedException();
     }
-    return {
-      id: staff.id,
-      userId: staff.userId,
-      name: staff.name,
-      title: staff.title,
-      dept: staff.dept as Viewer["dept"],
-      role: staff.role,
-      active: staff.active,
-      email: staff.user.email,
-      sessionId: session.id,
-      modules: Object.fromEntries(staff.moduleGrants.map((grant) => [grant.module, grant.access])),
-    };
+    return viewer;
   }
 
   async authenticate(bearer: string): Promise<Viewer> {
-    let payload: { sub: string; sid: string };
+    let payload: { sub: string; sid: string; iv?: number };
     try {
       payload = this.jwt.verify(bearer, {
         secret: this.secret(),
         audience: "amsol-ops",
         issuer: "amsol-ops-api",
       });
-      if (typeof payload.sid !== "string" || typeof payload.sub !== "string") throw new Error();
+      if (
+        typeof payload.sid !== "string" ||
+        typeof payload.sub !== "string" ||
+        (payload.iv !== undefined && !Number.isInteger(payload.iv))
+      )
+        throw new Error();
     } catch {
       throw new UnauthorizedException("Invalid or expired session.");
     }
-    return this.viewer(payload.sid, payload.sub);
+    return this.viewer(payload.sid, payload.sub, payload.iv ?? 0);
   }
 
   async refresh(token: string) {
@@ -132,7 +110,90 @@ export class OpsAuthService {
     });
     if (!session) throw new UnauthorizedException("Please sign in again.");
     const viewer = await this.viewer(session.id);
-    return { accessToken: this.accessToken(viewer.id, session.id) };
+    return { accessToken: this.accessToken(session.staffId, session.id, viewer.sessionVersion) };
+  }
+
+  async startImpersonation(viewer: Viewer, staffId: string) {
+    if (viewer.role !== "system_admin" || viewer.impersonation)
+      throw new ForbiddenException("System administrator access is required.");
+    const version = await this.prisma.$transaction(async (db) => {
+      await db.opsState.update({
+        where: { id: "workspace" },
+        data: { revision: { increment: 1 } },
+      });
+      const current = await loadOpsSession(
+        db,
+        viewer.sessionId,
+        viewer.id,
+        viewer.sessionVersion ?? 0,
+      );
+      if (current.viewer.role !== "system_admin" || current.viewer.impersonation)
+        throw new ForbiddenException("System administrator access is required.");
+      const target = await db.opsStaff.findUnique({
+        where: { id: staffId },
+        include: { user: true },
+      });
+      if (target?.role !== "ceo" || !target.active || !target.user?.isActive)
+        throw new BadRequestException("Select an active CEO account.");
+      const session = await db.opsSession.update({
+        where: { id: viewer.sessionId },
+        data: { impersonatedStaffId: target.id, impersonationVersion: { increment: 1 } },
+      });
+      await db.auditLog.create({
+        data: {
+          userId: viewer.userId,
+          action: "ops.impersonation.started",
+          entityType: "ops_staff",
+          entityId: target.id,
+          metadata: {
+            impersonatorStaffId: viewer.id,
+            actingStaffId: target.id,
+            sessionId: session.id,
+          },
+        },
+      });
+      return session.impersonationVersion;
+    });
+    return { accessToken: this.accessToken(viewer.id, viewer.sessionId, version) };
+  }
+
+  async stopImpersonation(viewer: Viewer) {
+    if (!viewer.impersonation)
+      throw new BadRequestException("There is no active CEO impersonation.");
+    const actor = viewer.impersonation;
+    const version = await this.prisma.$transaction(async (db) => {
+      await db.opsState.update({
+        where: { id: "workspace" },
+        data: { revision: { increment: 1 } },
+      });
+      const current = await loadOpsSession(
+        db,
+        viewer.sessionId,
+        actor.staffId,
+        viewer.sessionVersion ?? 0,
+      );
+      if (current.viewer.id !== viewer.id || !current.viewer.impersonation)
+        throw new ForbiddenException("The impersonation session changed. Reload the workspace.");
+      const session = await db.opsSession.update({
+        where: { id: viewer.sessionId },
+        data: { impersonatedStaffId: null, impersonationVersion: { increment: 1 } },
+      });
+      await db.auditLog.create({
+        data: {
+          userId: actor.userId,
+          action: "ops.impersonation.stopped",
+          entityType: "ops_staff",
+          entityId: viewer.id,
+          metadata: {
+            impersonatorStaffId: actor.staffId,
+            actingStaffId: viewer.id,
+            sessionId: session.id,
+          },
+        },
+      });
+      return session.impersonationVersion;
+    });
+    return { accessToken: this.accessToken(actor.staffId, viewer.sessionId, version) };
   }
 
   async logout(viewer: Viewer) {
@@ -214,6 +275,8 @@ export class OpsAuthService {
   }
 
   async changePassword(viewer: Viewer, currentPassword: string, newPassword: string) {
+    if (viewer.impersonation)
+      throw new ForbiddenException("Return to System Admin to manage your own password.");
     const user = await this.prisma.user.findUnique({ where: { id: viewer.userId! } });
     if (!user?.passwordHash || !(await bcrypt.compare(currentPassword, user.passwordHash)))
       throw new BadRequestException("Your current password is incorrect.");

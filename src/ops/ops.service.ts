@@ -16,6 +16,7 @@ import { EmailService } from "../notifications/email/email.service";
 import { StorageService } from "../storage/storage.service";
 import { sanitizeRichText } from "../common/sanitize";
 import { hashToken } from "./ops-auth.service";
+import { auditActor, loadOpsSession } from "./ops-session";
 import { OpsRepository, type OpsTransaction } from "./ops.repository";
 import { weeklySubmissionSchema } from "./weekly/weekly.schemas";
 import {
@@ -835,22 +836,27 @@ export class OpsService {
   }
 
   private async assertCurrentAccess(db: OpsTransaction, viewer: Viewer, scheduledId?: string) {
-    const [staff, session] = await Promise.all([
-      db.opsStaff.findUnique({
-        where: { id: viewer.id },
-        include: { user: { select: { isActive: true } } },
-      }),
-      scheduledId ? undefined : db.opsSession.findUnique({ where: { id: viewer.sessionId } }),
-    ]);
-    if (
-      !staff?.active ||
-      !staff.user?.isActive ||
-      (!scheduledId &&
-        (!session ||
-          session.staffId !== viewer.id ||
-          session.expiresAt <= new Date() ||
-          session.idleExpiresAt <= new Date()))
-    )
+    if (!scheduledId) {
+      const { viewer: current } = await loadOpsSession(
+        db,
+        viewer.sessionId,
+        undefined,
+        viewer.sessionVersion ?? 0,
+      );
+      if (
+        current.id !== viewer.id ||
+        current.userId !== viewer.userId ||
+        current.role !== viewer.role ||
+        current.dept !== viewer.dept
+      )
+        throw new ConflictException("Your permissions changed. Reload the workspace.");
+      return;
+    }
+    const staff = await db.opsStaff.findUnique({
+      where: { id: viewer.id },
+      include: { user: { select: { isActive: true } } },
+    });
+    if (!staff?.active || !staff.user?.isActive)
       throw new UnauthorizedException("Your session has expired. Sign in again.");
     if (
       scheduledId &&
@@ -873,7 +879,7 @@ export class OpsService {
   ) {
     return db.auditLog.create({
       data: {
-        userId: viewer.userId,
+        ...auditActor(viewer),
         action,
         entityType: "ops",
         entityId: id,

@@ -49,9 +49,25 @@ async function start() {
     update: {},
   });
   await bootstrapOps(db, ceo.email);
+  const admin = await db.user.upsert({
+    where: { email: "admin@ops-verify.local" },
+    create: { email: "admin@ops-verify.local", fullName: "Browser System Admin", passwordHash },
+    update: {},
+  });
+  await db.opsStaff.upsert({
+    where: { userId: admin.id },
+    create: {
+      userId: admin.id,
+      name: "Browser System Admin",
+      title: "System Administrator",
+      role: "system_admin",
+    },
+    update: { active: true, role: "system_admin" },
+  });
   for (const fixture of [
     { email: "staff@ops-verify.local", name: "Browser Staff", dept: "hr" },
     { email: "it@ops-verify.local", name: "Browser IT", dept: "it" },
+    { email: "invite-ui@ops-verify.local", name: "Invitation Test Staff", dept: "hr" },
   ]) {
     const user = await db.user.upsert({
       where: { email: fixture.email },

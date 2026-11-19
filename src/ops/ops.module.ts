@@ -14,6 +14,8 @@ import { OpsTendersService } from "./modules/ops-tenders.service";
 import { opsFeatureProviders } from "./modules/ops-feature.providers";
 import { OpsModuleGuard } from "./ops-module.guard";
 import { Module } from "@nestjs/common";
+import { APP_INTERCEPTOR } from "@nestjs/core";
+import { OpsImpersonationInterceptor } from "./ops-impersonation.interceptor";
 import { WeeklyController } from "./weekly/weekly.controller";
 import { OpsHealthController } from "./ops-health.controller";
 import { WeeklyService } from "./weekly/weekly.service";
@@ -60,6 +62,7 @@ import { OpsWorkflowsService } from "./ops-workflows.service";
     OpsTendersController,
   ],
   providers: [
+    { provide: APP_INTERCEPTOR, useClass: OpsImpersonationInterceptor },
     InventoryService,
     OpsWorkflowsService,
     WeeklyService,

@@ -71,6 +71,7 @@ export class OpsAuthController {
       active: true,
       hasPassword: true,
       modules: viewer.modules ?? {},
+      ...(viewer.impersonation ? { impersonation: viewer.impersonation } : {}),
     };
   }
 
@@ -81,6 +82,21 @@ export class OpsAuthController {
     await this.auth.logout(viewer);
     res.clearCookie(OPS_COOKIE, { path: "/api/v1/ops/auth" });
     return { success: true };
+  }
+
+  @Post("impersonation")
+  @HttpCode(200)
+  @UseGuards(OpsAuthGuard)
+  startImpersonation(@OpsViewer() viewer: Viewer, @Body() body: unknown) {
+    const dto = parse(z.object({ staffId: z.string().uuid() }).strict(), body);
+    return this.auth.startImpersonation(viewer, dto.staffId);
+  }
+
+  @Post("impersonation/stop")
+  @HttpCode(200)
+  @UseGuards(OpsAuthGuard)
+  stopImpersonation(@OpsViewer() viewer: Viewer) {
+    return this.auth.stopImpersonation(viewer);
   }
 
   @Get("invitation")

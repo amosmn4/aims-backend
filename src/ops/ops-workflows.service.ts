@@ -18,6 +18,7 @@ import { weeklyDate, weekSchema } from "./weekly/weekly.schemas";
 import { WeeklyClock } from "./weekly/weekly-clock";
 import { escapeHtml } from "../reports/report-email.util";
 import { randomUUID } from "node:crypto";
+import { auditActor } from "./ops-session";
 
 @Injectable()
 export class OpsWorkflowsService {
@@ -60,7 +61,7 @@ export class OpsWorkflowsService {
       const leave = await db.opsLeave.create({ data: { ...dto, staffId: viewer.id } });
       await db.auditLog.create({
         data: {
-          userId: viewer.userId,
+          ...auditActor(viewer),
           action: "ops.leave.recorded",
           entityType: "ops_leave",
           entityId: leave.id,
@@ -78,7 +79,7 @@ export class OpsWorkflowsService {
       await db.opsLeave.delete({ where: { id } });
       await db.auditLog.create({
         data: {
-          userId: viewer.userId,
+          ...auditActor(viewer),
           action: "ops.leave.removed",
           entityType: "ops_leave",
           entityId: id,
@@ -145,7 +146,7 @@ export class OpsWorkflowsService {
       });
       await db.auditLog.create({
         data: {
-          userId: viewer.userId,
+          ...auditActor(viewer),
           action: "ops.submission.scheduled",
           entityType: "ops_schedule",
           entityId: row.id,
@@ -241,7 +242,7 @@ export class OpsWorkflowsService {
         });
         await db.auditLog.create({
           data: {
-            userId: viewer.userId,
+            ...auditActor(viewer),
             action: "ops.document.version_uploaded",
             entityType: "ops_document",
             entityId: id,

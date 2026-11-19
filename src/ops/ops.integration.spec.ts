@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import { afterAll, beforeAll, describe, expect, it, jest } from "@jest/globals";
 import { Controller, Get, Module, ValidationPipe, type INestApplication } from "@nestjs/common";
-import { APP_GUARD, NestFactory, Reflector } from "@nestjs/core";
+import { APP_GUARD, APP_INTERCEPTOR, NestFactory, Reflector } from "@nestjs/core";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import { PrismaClient } from "@prisma/client";
@@ -28,6 +28,7 @@ import { WeeklyController } from "./weekly/weekly.controller";
 import { WeeklyService } from "./weekly/weekly.service";
 import { WeeklyClock } from "./weekly/weekly-clock";
 import { WeeklyDeliveryService } from "./weekly/weekly-delivery.service";
+import { OpsImpersonationInterceptor } from "./ops-impersonation.interceptor";
 
 jest.mock("sanitize-html", () => {
   const { createRequire } = process.getBuiltinModule("module");
@@ -170,6 +171,7 @@ suite("Ops HTTP API with isolated MySQL", () => {
         { provide: APP_GUARD, useClass: RolesGuard },
         { provide: APP_GUARD, useClass: ViewAsGuard },
         { provide: APP_GUARD, useClass: CapabilityGuard },
+        { provide: APP_INTERCEPTOR, useClass: OpsImpersonationInterceptor },
       ],
     })
     class TestModule {}
@@ -223,6 +225,179 @@ suite("Ops HTTP API with isolated MySQL", () => {
     }
     await app?.close();
     await prisma?.$disconnect();
+  });
+
+  it("allows only System Admin to enter and leave CEO impersonation with attributed staff changes", async () => {
+    const admin = await prisma.opsStaff.create({
+      data: {
+        name: "Impersonation Admin",
+        title: "System Administrator",
+        role: "system_admin",
+        user: {
+          create: {
+            email: `impersonator-${randomUUID()}@ops.test`,
+            passwordHash: await bcrypt.hash(password, 4),
+          },
+        },
+      },
+      include: { user: true },
+    });
+    const login = await call("ops/auth/login", undefined, {
+      method: "POST",
+      body: JSON.stringify({ email: admin.user!.email, password }),
+    });
+    const adminToken = (await login.json()).accessToken;
+    const adminCookie = login.headers.get("set-cookie")!.split(";")[0];
+    const separateSession = await app.get(OpsAuthService).createSession(admin.id, false);
+    const start = (token: string, id = ceoId) =>
+      call("ops/auth/impersonation", token, {
+        method: "POST",
+        body: JSON.stringify({ staffId: id }),
+      });
+    expect((await start(staffToken)).status).toBe(403);
+    expect((await start(ceoToken)).status).toBe(403);
+    expect((await start(adminToken, staffId)).status).toBe(400);
+    const inactive = await prisma.opsStaff.create({
+      data: {
+        name: "Inactive CEO",
+        title: "CEO",
+        role: "ceo",
+        active: false,
+        user: { create: { email: `inactive-${randomUUID()}@ops.test` } },
+      },
+    });
+    expect((await start(adminToken, inactive.id)).status).toBe(400);
+    await change(
+      `staff/${staffId}`,
+      { name: "Ops Test Staff", title: "Consultant", dept: "hr" },
+      adminToken,
+      "PATCH",
+      403,
+    );
+    const started = await start(adminToken);
+    expect(started.status).toBe(200);
+    const token = (await started.json()).accessToken;
+    expect((await call("ops/auth/me", adminToken)).status).toBe(401);
+    const profile = await (await call("ops/auth/me", token)).json();
+    expect(profile).toMatchObject({
+      id: ceoId,
+      role: "ceo",
+      impersonation: { staffId: admin.id, userId: admin.userId },
+    });
+    expect((await start(token)).status).toBe(403);
+    expect((await (await call("ops/auth/me", separateSession.accessToken)).json()).role).toBe(
+      "system_admin",
+    );
+    const weeklySettings = await (await call("ops/weekly/settings", token)).json();
+    expect(
+      (
+        await call("ops/weekly/settings", token, {
+          method: "PUT",
+          body: JSON.stringify({
+            version: weeklySettings.version,
+            settings: weeklySettings.settings,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+    const weeklyAudit = await prisma.auditLog.findFirstOrThrow({
+      where: { action: "ops.weekly.schedule_updated", userId: admin.userId },
+    });
+    expect(weeklyAudit.metadata).toMatchObject({ actingStaffId: ceoId });
+    const target = await prisma.opsStaff.create({
+      data: {
+        name: "Email Correction",
+        title: "Consultant",
+        department: { connect: { id: "hr" } },
+        user: { create: { email: `wrong-${randomUUID()}@ops.test` } },
+      },
+    });
+    const corrected = `correct-${randomUUID()}@ops.test`;
+    await change(
+      `staff/${target.id}`,
+      { name: target.name, title: target.title, dept: target.dept, email: corrected },
+      token,
+      "PATCH",
+    );
+    const invitation = await change(
+      `accounts/${target.id}/invitation`,
+      undefined,
+      token,
+      "POST",
+      201,
+    );
+    const linkToken = new URL(invitation.invitationUrl).searchParams.get("token");
+    expect(await (await call(`ops/auth/invitation?token=${linkToken}`)).json()).toEqual({
+      email: corrected,
+    });
+    const audit = await prisma.auditLog.findFirstOrThrow({
+      where: { action: "ops.staff.updated", entityId: target.id },
+    });
+    expect(audit.userId).toBe(admin.userId);
+    expect(audit.metadata).toMatchObject({ impersonatorStaffId: admin.id, actingStaffId: ceoId });
+    expect(
+      await prisma.auditLog.count({
+        where: { action: "ops.impersonation.action", userId: admin.userId },
+      }),
+    ).toBeGreaterThan(0);
+    const refresh = await call("ops/auth/refresh", undefined, {
+      method: "POST",
+      headers: { Cookie: adminCookie },
+    });
+    expect(refresh.status).toBe(200);
+    const renewed = (await refresh.json()).accessToken;
+    expect((await (await call("ops/auth/me", renewed)).json()).impersonation.staffId).toBe(
+      admin.id,
+    );
+    expect(
+      (
+        await call("ops/auth/change-password", renewed, {
+          method: "POST",
+          body: JSON.stringify({
+            currentPassword: password,
+            newPassword: "ChangedVerification2026!",
+          }),
+        })
+      ).status,
+    ).toBe(403);
+    const ended = await call("ops/auth/impersonation/stop", renewed, { method: "POST" });
+    expect(ended.status).toBe(200);
+    const restored = (await ended.json()).accessToken;
+    expect(await (await call("ops/auth/me", restored)).json()).toMatchObject({
+      id: admin.id,
+      role: "system_admin",
+    });
+    expect((await call("ops/workspace", token)).status).toBe(401);
+    await change(
+      `staff/${target.id}`,
+      { name: target.name, title: target.title, dept: target.dept },
+      restored,
+      "PATCH",
+      403,
+    );
+    expect(
+      await prisma.auditLog.count({
+        where: { action: "ops.impersonation.stopped", userId: admin.userId },
+      }),
+    ).toBe(1);
+    expect((await (await call("ops/auth/me", ceoToken)).json()).role).toBe("ceo");
+    const second = (await (await start(restored)).json()).accessToken;
+    try {
+      await prisma.opsStaff.update({ where: { id: ceoId }, data: { active: false } });
+      expect((await call("ops/workspace", second)).status).toBe(401);
+    } finally {
+      await prisma.opsStaff.update({ where: { id: ceoId }, data: { active: true } });
+    }
+    await prisma.opsStaff.update({ where: { id: admin.id }, data: { active: false } });
+    expect((await call("ops/workspace", second)).status).toBe(401);
+    expect(
+      (
+        await call("ops/auth/refresh", undefined, {
+          method: "POST",
+          headers: { Cookie: adminCookie },
+        })
+      ).status,
+    ).toBe(401);
   });
 
   it("requires Ops sessions, rejects Ops tokens on legacy routes and refreshes a scoped cookie", async () => {

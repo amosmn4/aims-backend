@@ -18,6 +18,7 @@ import { addDays, nairobiDate, scheduleFor, weekOf } from "./weekly-calendar";
 import { renderWeeklyEmail } from "./weekly-email";
 import { phaseSchema, weekSchema, type WeeklyPhase } from "./weekly.schemas";
 import { WeeklyService } from "./weekly.service";
+import { auditActor } from "../ops-session";
 
 @Injectable()
 export class WeeklyDeliveryService {
@@ -101,11 +102,11 @@ export class WeeklyDeliveryService {
       throw new ConflictException("The delivery changed. Refresh before retrying.");
     await this.db.auditLog.create({
       data: {
-        userId: viewer.userId,
+        ...auditActor(viewer),
         action: "ops.weekly.email_retry_requested",
         entityType: "ops-weekly-delivery",
         entityId: id,
-        metadata: { acknowledgePossibleDuplicate: acknowledge },
+        metadata: { ...auditActor(viewer).metadata, acknowledgePossibleDuplicate: acknowledge },
       },
     });
     return this.deliver(id);
@@ -203,11 +204,11 @@ export class WeeklyDeliveryService {
     }
     await this.db.auditLog.create({
       data: {
-        userId: viewer.userId,
+        ...auditActor(viewer),
         action: scheduled ? "ops.weekly.email_scheduled" : "ops.weekly.email_requested",
         entityType: "ops-weekly-delivery",
         entityId: id,
-        metadata: { week, phase },
+        metadata: { ...auditActor(viewer).metadata, week, phase },
       },
     });
     return this.deliver(id);

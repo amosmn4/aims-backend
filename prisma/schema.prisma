@@ -435,6 +435,7 @@ model OpsStaff {
   records           OpsModuleRecord[]
   invitations       OpsInvitation[]
   sessions          OpsSession[]
+  ceoSessions       OpsSession[]        @relation("OpsImpersonatedStaff")
   weeklyReports     OpsWeeklyReport[]   @relation("OpsWeeklyAuthor")
   weeklyReviews     OpsWeeklyReport[]   @relation("OpsWeeklyReviewer")
   weeklyDeliveries  OpsWeeklyDelivery[]
@@ -785,14 +786,18 @@ model OpsInvitation {
 }
 
 model OpsSession {
-  id            String   @id @default(uuid()) @db.Char(36)
-  staffId       String   @map("staff_id") @db.Char(36)
-  refreshHash   String   @unique @map("refresh_hash") @db.Char(64)
-  idleExpiresAt DateTime @map("idle_expires_at")
-  expiresAt     DateTime @map("expires_at")
-  staff         OpsStaff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  id                   String    @id @default(uuid()) @db.Char(36)
+  staffId              String    @map("staff_id") @db.Char(36)
+  refreshHash          String    @unique @map("refresh_hash") @db.Char(64)
+  idleExpiresAt        DateTime  @map("idle_expires_at")
+  expiresAt            DateTime  @map("expires_at")
+  staff                OpsStaff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  impersonatedStaffId  String?   @map("impersonated_staff_id") @db.Char(36)
+  impersonationVersion Int       @default(0) @map("impersonation_version")
+  impersonatedStaff    OpsStaff? @relation("OpsImpersonatedStaff", fields: [impersonatedStaffId], references: [id], onDelete: SetNull)
 
   @@index([staffId])
+  @@index([impersonatedStaffId])
   @@map("ops_sessions")
 }
 

@@ -237,7 +237,13 @@ export type OpsPerson = Records["people"] & {
 export type ModulePermissions = Partial<
   Record<"water" | "blog" | "ledger" | "inventory" | "tender", "view" | "manage">
 >;
-export type Viewer = OpsPerson & { sessionId: string; email: string; modules?: ModulePermissions };
+export type Viewer = OpsPerson & {
+  sessionId: string;
+  sessionVersion?: number;
+  email: string;
+  modules?: ModulePermissions;
+  impersonation?: { staffId: string; userId: string; name: string; email: string };
+};
 export type Workspace = { [K in Collection]: Records[K][] } & {
   version: 1;
   accounts: {
