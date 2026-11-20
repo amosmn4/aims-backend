@@ -466,6 +466,7 @@ model OpsWeeklyReport {
   version       Int            @default(1)
   submission    Json
   submittedAt   DateTime?      @map("submitted_at")
+  recalledAt    DateTime?      @map("recalled_at")
   reviewedAt    DateTime?      @map("reviewed_at")
   reviewerId    String?        @map("reviewer_id") @db.Char(36)
   reviewComment String?        @map("review_comment") @db.Text

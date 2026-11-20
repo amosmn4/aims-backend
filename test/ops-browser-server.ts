@@ -149,6 +149,12 @@ async function start() {
   );
   await app.listen(4001, "127.0.0.1");
   weeklyEmailFixture?.setReset(async () => {
+    await db.notification.deleteMany({
+      where: {
+        resourceType: "ops-weekly",
+        user: { email: { in: ["staff@ops-verify.local", "it@ops-verify.local"] } },
+      },
+    });
     await db.opsTask.deleteMany({
       where: {
         weekStart: { not: null },

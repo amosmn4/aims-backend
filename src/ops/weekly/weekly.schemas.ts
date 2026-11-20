@@ -58,6 +58,7 @@ export const weeklyItemSchema = z
   .strict();
 export const weeklySubmissionSchema = z
   .object({
+    title: z.string().trim().max(200).optional(),
     summary: z.string().trim().max(5000).default(""),
     note: z.string().trim().max(5000).optional(),
     attachments: z
@@ -96,6 +97,7 @@ export type WeeklyPhase = z.infer<typeof phaseSchema>;
 export function sanitizeWeeklySubmission(submission: WeeklySubmission): WeeklySubmission {
   return {
     ...submission,
+    ...(submission.title !== undefined ? { title: stripHtml(submission.title) } : {}),
     summary: sanitizeRichText(submission.summary),
     ...(submission.note !== undefined ? { note: sanitizeRichText(submission.note) } : {}),
     blockers: sanitizeRichText(submission.blockers),

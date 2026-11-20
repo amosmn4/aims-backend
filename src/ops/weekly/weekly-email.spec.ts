@@ -41,6 +41,7 @@ function overview(
     version: 1,
     submission: body,
     submittedAt: submitted ? timestamp : null,
+    recalledAt: null,
     reviewedAt: null,
     reviewerId: null,
     reviewComment: null,
@@ -96,9 +97,9 @@ describe("CEO weekly email content", () => {
         `https://ops.example.com/weekly-reports?week=2026-11-16&amp;phase=${phase}&amp;staff=${staffId}`,
       );
       for (const output of [result.html, result.text]) {
-        expect(output).not.toContain("Legacy summary");
-        expect(output).not.toContain("Urgent");
-        expect(output).not.toContain("2026-12-15");
+        expect(output).toContain("Legacy summary");
+        expect(output).toContain("Urgent");
+        expect(output).toContain("2026-12-15");
         expect(output).not.toContain("No additional notes");
         expect(output).toContain("Waiting for approval");
       }
@@ -124,7 +125,7 @@ describe("CEO weekly email content", () => {
     expect(result.html).toMatch(/<th[^>]*>Notes<\/th>/);
     expect(result.html).toContain("Reviewed <em>with finance</em>.");
     expect(result.text).toContain("Reviewed with finance.");
-    expect(result.text).toContain("- Follow up (Completed)\n");
+    expect(result.text).toContain("- Follow up (Completed) | Due 2026-12-15 | Priority Urgent");
     expect(result.html).not.toContain("No additional notes");
   });
 

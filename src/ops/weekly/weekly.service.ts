@@ -15,6 +15,7 @@ import { parse, type Viewer } from "../ops.schemas";
 import { auditActor, loadOpsSession } from "../ops-session";
 import { WeeklyClock } from "./weekly-clock";
 import { syncWeeklyTasks } from "./weekly-tasks";
+import { reportingWorkspace } from "./reporting-workspace";
 import {
   addDays,
   defaultWeeklySettings,
@@ -51,6 +52,95 @@ export class WeeklyService {
         ? parse(weeklySettingsSchema, row.settings)
         : { ...defaultWeeklySettings(), startWeek: weekOf(nairobiDate(this.clock.now())) },
     };
+  }
+
+  workspace(viewer: Viewer, query: Record<string, string>) {
+    return reportingWorkspace(this.db, this, viewer, query, this.clock.now());
+  }
+
+  async notifications(viewer: Viewer) {
+    if (!viewer.userId) throw new ForbiddenException("A signed-in account is required.");
+    return this.db.notification.findMany({
+      where: { userId: viewer.userId, resourceType: "ops-weekly" },
+      select: {
+        id: true,
+        title: true,
+        body: true,
+        isRead: true,
+        resourceId: true,
+        createdAt: true,
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 50,
+    });
+  }
+
+  async readNotification(viewer: Viewer, id: string) {
+    if (!viewer.userId) throw new ForbiddenException("A signed-in account is required.");
+    const result = await this.db.notification.updateMany({
+      where: { id, userId: viewer.userId, resourceType: "ops-weekly" },
+      data: { isRead: true, readAt: this.clock.now() },
+    });
+    if (!result.count) throw new NotFoundException("Notification not found.");
+    return { success: true };
+  }
+
+  async recall(viewer: Viewer, id: string, value: unknown) {
+    const dto = parse(z.object({ version: z.number().int().min(1) }).strict(), value);
+    return this.db.$transaction(async (tx) => {
+      await tx.opsState.update({
+        where: { id: "workspace" },
+        data: { revision: { increment: 1 } },
+      });
+      await this.actor(tx, viewer);
+      const row = await tx.opsWeeklyReport.findUnique({ where: { id } });
+      if (!row || row.staffId !== viewer.id) throw new NotFoundException("Submission not found.");
+      const schedule = await this.settings();
+      if (!row.submittedAt || !this.serialize(row, schedule.settings)?.editable)
+        throw new ConflictException(
+          "Only a submitted record within its editing window can be recalled.",
+        );
+      const pending = await tx.opsSubmissionSchedule.findUnique({
+        where: {
+          staffId_kind_target: { staffId: viewer.id, kind: row.phase, target: row.weekStart },
+        },
+      });
+      if (pending?.status === "processing")
+        throw new ConflictException(
+          "This submission is being processed. Reload before recalling it.",
+        );
+      await tx.opsSubmissionSchedule.updateMany({
+        where: {
+          staffId: viewer.id,
+          kind: row.phase,
+          target: row.weekStart,
+          status: { in: ["pending", "failed"] },
+        },
+        data: { status: "cancelled", leaseUntil: null },
+      });
+      const changed = await tx.opsWeeklyReport.updateMany({
+        where: { id, staffId: viewer.id, version: dto.version, submittedAt: { not: null } },
+        data: {
+          submittedAt: null,
+          recalledAt: this.clock.now(),
+          reviewedAt: null,
+          reviewerId: null,
+          reviewComment: null,
+          returnedAt: null,
+          returnComment: null,
+          version: { increment: 1 },
+        },
+      });
+      if (!changed.count)
+        throw new ConflictException("This submission changed. Reload before recalling it.");
+      await this.audit(tx, viewer, "ops.weekly.recalled", id, {
+        previousSubmission: row.submission,
+        weekStart: row.weekStart,
+        phase: row.phase,
+        version: dto.version + 1,
+      });
+      return { success: true };
+    });
   }
 
   async saveSettings(viewer: Viewer, value: unknown) {
@@ -422,11 +512,11 @@ export class WeeklyService {
           throw new ConflictException(
             "This submission changed. Reload it before saving; keep a copy of your draft.",
           );
-        if (existing?.submittedAt) {
+        if (existing?.submittedAt || existing?.recalledAt) {
           const end = new Date(`${addDays(week, 6)}T23:59:59.999+03:00`);
           const deadline = scheduleFor(week, phase, schedule.settings).deadline;
           const editableUntil = phase === "report" && deadline > end ? deadline : end;
-          if (!dto.submit || this.clock.now() > editableUntil)
+          if ((existing.submittedAt && !dto.submit) || this.clock.now() > editableUntil)
             throw new ConflictException(
               "This submitted record can only be updated during its reporting period.",
             );
@@ -559,6 +649,7 @@ export class WeeklyService {
         const data = {
           submission: dto.submission as Prisma.InputJsonObject,
           submittedAt: dto.submit ? (existing?.submittedAt ?? this.clock.now()) : null,
+          recalledAt: dto.submit ? null : (existing?.recalledAt ?? null),
           reviewedAt: null,
           reviewerId: null,
           reviewComment: null,
@@ -595,6 +686,7 @@ export class WeeklyService {
           {
             weekStart: week,
             phase,
+            version: dto.version + 1,
             ...(dto.submit ? { submission: dto.submission } : {}),
             ...(existing?.submittedAt ? { previousSubmission: existing.submission } : {}),
           },
@@ -701,6 +793,26 @@ export class WeeklyService {
         comment: dto.comment,
         ...(returning ? { previousSubmission: old.submission } : {}),
       });
+      const recipient = await tx.opsStaff.findUnique({
+        where: { id: old.staffId },
+        select: { userId: true },
+      });
+      if (recipient?.userId)
+        await tx.notification.create({
+          data: {
+            userId: recipient.userId,
+            type: "report_reviewed",
+            severity: returning ? "warning" : "info",
+            title: returning
+              ? `Weekly ${old.phase} needs attention`
+              : `Weekly ${old.phase} reviewed`,
+            body: dto.comment || "The CEO has reviewed your submission.",
+            resourceType: "ops-weekly",
+            resourceId: id,
+            dedupeKey: `ops-weekly-review:${id}:${dto.version + 1}`,
+            createdBy: viewer.userId,
+          },
+        });
       return { success: true };
     });
   }

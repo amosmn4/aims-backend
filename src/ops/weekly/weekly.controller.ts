@@ -56,6 +56,28 @@ export class WeeklyController {
   settings() {
     return this.weekly.settings();
   }
+  @Get("workspace")
+  workspace(@OpsViewer() viewer: Viewer, @Query() query: Record<string, string>) {
+    return this.weekly.workspace(viewer, query);
+  }
+  @Get("notifications")
+  notifications(@OpsViewer() viewer: Viewer) {
+    return this.weekly.notifications(viewer);
+  }
+  @Post("notifications/:id/read")
+  @HttpCode(200)
+  readNotification(@OpsViewer() viewer: Viewer, @Param("id", ParseUUIDPipe) id: string) {
+    return this.weekly.readNotification(viewer, id);
+  }
+  @Post("submissions/:id/recall")
+  @HttpCode(200)
+  recall(
+    @OpsViewer() viewer: Viewer,
+    @Param("id", ParseUUIDPipe) id: string,
+    @Body() body: unknown,
+  ) {
+    return this.weekly.recall(viewer, id, body);
+  }
   @Get("readiness")
   readiness(@OpsViewer() viewer: Viewer) {
     assertSystemAdmin(viewer);

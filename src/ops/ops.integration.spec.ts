@@ -964,9 +964,12 @@ suite("Ops HTTP API with isolated MySQL", () => {
       title: "Original task",
       detail: "Expected result",
       status: "planned",
+      due: "2026-11-20",
+      priority: "High",
     };
     const submission = {
-      summary: "",
+      title: "Weekly commitments",
+      summary: "Complete the approved priority work",
       items: [first],
       blockers: "",
       nextWeek: "",
@@ -1187,6 +1190,122 @@ suite("Ops HTTP API with isolated MySQL", () => {
       (await prisma.opsSubmissionSchedule.findUniqueOrThrow({ where: { id: scheduled.id } }))
         .status,
     ).toBe("cancelled");
+    const listing = await (
+      await call(
+        `ops/weekly/workspace?view=plans&from=2026-11-16&to=2026-11-22&staff=${staff.id}`,
+        ceoToken,
+      )
+    ).json();
+    expect(listing.rows[0].entry.submission).toMatchObject({
+      title: submission.title,
+      summary: submission.summary,
+    });
+    expect(listing.metrics.plans).toBe(1);
+    expect(listing.metrics.expectedPlans).toBe(1);
+    const awaiting = await (
+      await call(
+        `ops/weekly/workspace?view=submissions&from=2026-11-16&to=2026-11-22&staff=${staff.id}&type=plan&status=new`,
+        ceoToken,
+      )
+    ).json();
+    expect(awaiting.total).toBe(1);
+    expect(awaiting.rows[0].historical).toBe(false);
+    expect((await call("ops/weekly/workspace?view=performance", token)).status).toBe(403);
+    const outsiderListing = await (
+      await call(
+        `ops/weekly/workspace?view=submissions&from=2026-11-16&to=2026-11-22&staff=${staff.id}`,
+        outsiderToken,
+      )
+    ).json();
+    expect(outsiderListing.total).toBe(0);
+    const recallBody = { version: revised.version };
+    expect(
+      (await weeklyCall(`submissions/${plan.id}/recall`, recallBody, outsiderToken)).status,
+    ).toBe(404);
+    expect(
+      (await weeklyCall(`submissions/${plan.id}/recall`, { version: revised.version - 1 })).status,
+    ).toBe(409);
+    expect((await weeklyCall(`submissions/${plan.id}/recall`, recallBody)).status).toBe(200);
+    const recalled = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: plan.id } });
+    expect(recalled.submittedAt).toBeNull();
+    expect(recalled.recalledAt).not.toBeNull();
+    const secret = "Private recalled draft changes";
+    const draftSave = await call("ops/weekly/reports/2026-11-16/plan", token, {
+      method: "PUT",
+      body: JSON.stringify({
+        version: recalled.version,
+        submit: false,
+        submission: { ...(recalled.submission as object), title: secret },
+      }),
+    });
+    expect(draftSave.status).toBe(200);
+    const privateVersion = (await draftSave.json()).version;
+    const ceoAfterRecall = await (
+      await call(
+        `ops/weekly/workspace?view=submissions&from=2026-11-16&to=2026-11-22&staff=${staff.id}`,
+        ceoToken,
+      )
+    ).json();
+    expect(JSON.stringify(ceoAfterRecall)).not.toContain(secret);
+    expect(ceoAfterRecall.rows.some((row: { status: string }) => row.status === "recalled")).toBe(
+      true,
+    );
+    expect(
+      (
+        await call(`ops/weekly/submissions/${plan.id}`, token, {
+          method: "DELETE",
+          body: JSON.stringify({ version: privateVersion }),
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await call("ops/weekly/reports/2026-11-16/plan", token, {
+          method: "PUT",
+          body: JSON.stringify({
+            version: privateVersion,
+            submit: true,
+            submission: recalled.submission,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+    const notifications = await (await call("ops/weekly/notifications", token)).json();
+    expect(
+      notifications.some((row: { title: string }) => row.title === "Weekly plan reviewed"),
+    ).toBe(true);
+    expect(
+      (await weeklyCall(`notifications/${notifications[0].id}/read`, {}, outsiderToken)).status,
+    ).toBe(404);
+    expect((await weeklyCall(`notifications/${notifications[0].id}/read`, {})).status).toBe(200);
+    const prefix = `Pagination ${randomUUID()}`;
+    await prisma.opsReport.createMany({
+      data: Array.from({ length: 13 }, (_, index) => ({
+        title: `${prefix} ${index}`,
+        type: "Monthly",
+        dept: "hr",
+        author: staff.id,
+        date: "2026-11-20",
+        month: "2026-11",
+        status: "draft",
+      })),
+    });
+    const paged = await (
+      await call(
+        `ops/weekly/workspace?view=submissions&from=2026-11-16&to=2026-11-22&type=monthly&search=${encodeURIComponent(prefix)}&page=2`,
+        token,
+      )
+    ).json();
+    expect(paged.total).toBe(13);
+    expect(paged.rows).toHaveLength(3);
+    expect(paged.page).toBe(2);
+    const ceoDrafts = await (
+      await call(
+        `ops/weekly/workspace?view=submissions&from=2026-11-16&to=2026-11-22&type=monthly&search=${encodeURIComponent(prefix)}`,
+        ceoToken,
+      )
+    ).json();
+    expect(ceoDrafts.total).toBe(0);
   });
 
   it("changes passwords, revokes other Ops sessions and logs out the current session", async () => {
