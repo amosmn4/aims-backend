@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   Param,
@@ -106,6 +107,14 @@ export class WeeklyController {
     @Body() body: WeeklyAppendBody,
   ) {
     return this.weekly.appendTasks(viewer, id, body);
+  }
+  @Delete("submissions/:id")
+  deleteDraft(
+    @OpsViewer() viewer: Viewer,
+    @Param("id", ParseUUIDPipe) id: string,
+    @Body() body: unknown,
+  ) {
+    return this.weekly.deleteDraft(viewer, id, body);
   }
   @Post("submissions/:id/return")
   @HttpCode(200)

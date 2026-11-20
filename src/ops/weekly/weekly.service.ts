@@ -9,6 +9,7 @@ import { Prisma, type OpsWeeklyReport } from "@prisma/client";
 import { z } from "zod";
 import { PrismaService } from "../../prisma/prisma.service";
 import { StorageService } from "../../storage/storage.service";
+import { stripHtml } from "../../common/sanitize";
 import { assertCeo } from "../ops.policy";
 import { parse, type Viewer } from "../ops.schemas";
 import { auditActor, loadOpsSession } from "../ops-session";
@@ -275,19 +276,8 @@ export class WeeklyService {
           throw new NotFoundException("Weekly plan not found.");
         if (!plan.submittedAt || plan.version !== dto.version)
           throw new ConflictException("This plan changed. Reload it before adding tasks.");
-        const report = await tx.opsWeeklyReport.findUnique({
-          where: {
-            staffId_weekStart_phase: {
-              staffId: viewer.id,
-              weekStart: plan.weekStart,
-              phase: "report",
-            },
-          },
-        });
-        if (report?.submittedAt)
-          throw new ConflictException(
-            "This week's report is already submitted. Ask the CEO to return the report before adding tasks to its plan.",
-          );
+        if (this.clock.now() > new Date(`${addDays(plan.weekStart, 6)}T23:59:59.999+03:00`))
+          throw new ConflictException("Tasks can only be added during the plan's reporting week.");
         const previous = parse(weeklySubmissionSchema, plan.submission);
         const submission = parse(weeklySubmissionSchema, {
           ...previous,
@@ -370,10 +360,6 @@ export class WeeklyService {
     if (phase === "report" && dto.submission.items.some((item) => item.status === "planned"))
       throw new BadRequestException("Set the outcome of every task.");
     if (dto.submit) {
-      if (dto.submission.summary.length < 5)
-        throw new BadRequestException("Provide a brief summary of at least five characters.");
-      if (!dto.submission.items.length && dto.submission.noWorkReason.length < 5)
-        throw new BadRequestException("Add tasks or explain why no work is reported.");
       if (phase === "report" && this.clock.now() < this.reportOpens(week, schedule.settings))
         throw new BadRequestException(
           "It is too early to submit this week's results. Save a draft until the reporting window opens.",
@@ -436,10 +422,15 @@ export class WeeklyService {
           throw new ConflictException(
             "This submission changed. Reload it before saving; keep a copy of your draft.",
           );
-        if (existing?.submittedAt || existing?.reviewedAt)
-          throw new ConflictException(
-            "Submitted records are locked. Ask the CEO to return it for correction.",
-          );
+        if (existing?.submittedAt) {
+          const end = new Date(`${addDays(week, 6)}T23:59:59.999+03:00`);
+          const deadline = scheduleFor(week, phase, schedule.settings).deadline;
+          const editableUntil = phase === "report" && deadline > end ? deadline : end;
+          if (!dto.submit || this.clock.now() > editableUntil)
+            throw new ConflictException(
+              "This submitted record can only be updated during its reporting period.",
+            );
+        }
         const expectedRef = `weekly:${viewer.id}:${week}:${phase}`;
         const staleAttachments = await tx.opsDocument.findMany({
           where: { owner: viewer.id, weeklyRef: expectedRef },
@@ -488,6 +479,55 @@ export class WeeklyService {
             );
         }
         if (phase === "report" && dto.submit) {
+          const weeklyTasks = await tx.opsTask.findMany({
+            where: {
+              assignee: viewer.id,
+              OR: [
+                { weekStart: week },
+                { weekStart: null, due: { gte: week, lte: addDays(week, 6) } },
+              ],
+            },
+          });
+          const planned = plan?.submittedAt
+            ? parse(weeklySubmissionSchema, plan.submission).items
+            : [];
+          const required = [
+            ...planned.map((item) => {
+              const task = weeklyTasks.find((row) => row.id === (item.taskId ?? item.id));
+              return {
+                ...item,
+                status:
+                  task?.status === "Done"
+                    ? ("completed" as const)
+                    : task?.status === "In progress"
+                      ? ("in_progress" as const)
+                      : ("pending" as const),
+              };
+            }),
+            ...weeklyTasks.map((task) => ({
+              id: task.id,
+              taskId: task.id,
+              title: task.title,
+              detail: "",
+              business: task.business,
+              status:
+                task.status === "Done"
+                  ? ("completed" as const)
+                  : task.status === "In progress"
+                    ? ("in_progress" as const)
+                    : ("pending" as const),
+            })),
+          ];
+          for (const item of required) {
+            if (
+              !dto.submission.items.some(
+                (row) => (row.taskId ?? row.id) === (item.taskId ?? item.id),
+              )
+            )
+              dto.submission.items.push(item);
+          }
+          if (dto.submission.items.length > 100)
+            throw new BadRequestException("A weekly report can include up to 100 tasks.");
           const current = await tx.opsTask.findMany({
             where: {
               assignee: viewer.id,
@@ -499,30 +539,29 @@ export class WeeklyService {
             return task
               ? {
                   ...item,
+                  title: task.title,
                   subtasks: parse(weeklyItemSchema.shape.subtasks, task.subtasks ?? []),
                   priority:
                     item.priority ?? (task.priority as "Urgent" | "High" | "Medium" | "Low"),
                 }
               : item;
           });
-          if (plan?.submittedAt) {
-            const items = parse(weeklySubmissionSchema, plan.submission).items;
-            if (
-              items.some(
-                (item) =>
-                  !dto.submission.items.some(
-                    (result) => (result.taskId ?? result.id) === (item.taskId ?? item.id),
-                  ),
-              )
-            )
-              throw new BadRequestException(
-                "Include an outcome for every task in your submitted plan.",
-              );
-          }
         }
+        if (
+          dto.submit &&
+          !dto.submission.items.length &&
+          ![dto.submission.note, dto.submission.noWorkReason].some(
+            (value) => value && stripHtml(value).trim().length >= 5,
+          ) &&
+          !dto.submission.leave?.length
+        )
+          throw new BadRequestException("Add a task or a note explaining this week.");
         const data = {
           submission: dto.submission as Prisma.InputJsonObject,
-          submittedAt: dto.submit ? this.clock.now() : null,
+          submittedAt: dto.submit ? (existing?.submittedAt ?? this.clock.now()) : null,
+          reviewedAt: null,
+          reviewerId: null,
+          reviewComment: null,
           returnedAt: null,
           returnComment: null,
         };
@@ -532,7 +571,7 @@ export class WeeklyService {
         let id: string;
         if (existing) {
           const changed = await tx.opsWeeklyReport.updateMany({
-            where: { id: existing.id, version: dto.version, submittedAt: null, reviewedAt: null },
+            where: { id: existing.id, version: dto.version },
             data: { ...data, version: { increment: 1 } },
           });
           if (!changed.count)
@@ -547,9 +586,18 @@ export class WeeklyService {
         await this.audit(
           tx,
           viewer,
-          dto.submit ? "ops.weekly.submitted" : "ops.weekly.draft_saved",
+          existing?.submittedAt
+            ? "ops.weekly.revised"
+            : dto.submit
+              ? "ops.weekly.submitted"
+              : "ops.weekly.draft_saved",
           id,
-          { weekStart: week, phase, ...(dto.submit ? { submission: dto.submission } : {}) },
+          {
+            weekStart: week,
+            phase,
+            ...(dto.submit ? { submission: dto.submission } : {}),
+            ...(existing?.submittedAt ? { previousSubmission: existing.submission } : {}),
+          },
         );
         return { id, version: dto.version + 1, success: true };
       });
@@ -558,6 +606,59 @@ export class WeeklyService {
     } catch (error) {
       this.conflict(error);
     }
+  }
+
+  async deleteDraft(viewer: Viewer, id: string, value: unknown) {
+    const dto = parse(z.object({ version: z.number().int().min(1) }).strict(), value);
+    const storageKeys: string[] = [];
+    await this.db.$transaction(async (tx) => {
+      await tx.opsState.update({
+        where: { id: "workspace" },
+        data: { revision: { increment: 1 } },
+      });
+      await this.actor(tx, viewer);
+      const row = await tx.opsWeeklyReport.findUnique({ where: { id } });
+      if (!row || row.staffId !== viewer.id) throw new NotFoundException("Draft not found.");
+      if (row.version !== dto.version || row.submittedAt || row.reviewedAt || row.returnedAt)
+        throw new ConflictException("Only an unchanged, unsubmitted draft can be deleted.");
+      const previous = await tx.auditLog.findFirst({
+        where: { entityType: "ops-weekly", entityId: id, action: "ops.weekly.submitted" },
+      });
+      if (previous) throw new ConflictException("A previously submitted record cannot be deleted.");
+      const scheduled = await tx.opsSubmissionSchedule.findUnique({
+        where: {
+          staffId_kind_target: { staffId: viewer.id, kind: row.phase, target: row.weekStart },
+        },
+      });
+      if (scheduled?.status === "processing")
+        throw new ConflictException("This draft is being submitted. Reload before making changes.");
+      const cancelled = await tx.opsSubmissionSchedule.updateMany({
+        where: {
+          staffId: viewer.id,
+          kind: row.phase,
+          target: row.weekStart,
+          status: { in: ["pending", "failed"] },
+        },
+        data: { status: "cancelled", leaseUntil: null },
+      });
+      if (scheduled && ["pending", "failed"].includes(scheduled.status) && !cancelled.count)
+        throw new ConflictException("The schedule changed. Reload before deleting this draft.");
+      const documents = await tx.opsDocument.findMany({
+        where: { owner: viewer.id, weeklyRef: `weekly:${viewer.id}:${row.weekStart}:${row.phase}` },
+        select: { id: true, storageKey: true },
+      });
+      await tx.opsDocument.deleteMany({
+        where: { id: { in: documents.map((document) => document.id) } },
+      });
+      await tx.opsWeeklyReport.delete({ where: { id } });
+      storageKeys.push(...documents.map((document) => document.storageKey));
+      await this.audit(tx, viewer, "ops.weekly.draft_deleted", id, {
+        weekStart: row.weekStart,
+        phase: row.phase,
+      });
+    });
+    await Promise.all(storageKeys.map((key) => this.storage.delete(key)));
+    return { success: true };
   }
 
   async review(viewer: Viewer, id: string, value: unknown, returning = false) {
@@ -621,8 +722,13 @@ export class WeeklyService {
       privateDraft && !row.submittedAt
         ? { summary: "", items: [], blockers: "", nextWeek: "", noWorkReason: "" }
         : parse(weeklySubmissionSchema, row.submission);
+    const end = new Date(`${addDays(row.weekStart, 6)}T23:59:59.999+03:00`);
+    const deadline = scheduleFor(row.weekStart, parse(phaseSchema, row.phase), settings).deadline;
     return {
       ...row,
+      editable:
+        !!row.submittedAt &&
+        this.clock.now() <= (row.phase === "report" && deadline > end ? deadline : end),
       submission,
       counts: phaseCounts(submission.items),
       late:

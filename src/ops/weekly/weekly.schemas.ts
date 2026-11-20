@@ -58,7 +58,8 @@ export const weeklyItemSchema = z
   .strict();
 export const weeklySubmissionSchema = z
   .object({
-    summary: z.string().trim().max(5000),
+    summary: z.string().trim().max(5000).default(""),
+    note: z.string().trim().max(5000).optional(),
     attachments: z
       .array(z.string().uuid())
       .max(10)
@@ -71,9 +72,9 @@ export const weeklySubmissionSchema = z
         (items) => new Set(items.map((item) => item.id)).size === items.length,
         "Each task must have a unique identifier",
       ),
-    blockers: z.string().trim().max(5000),
-    nextWeek: z.string().trim().max(5000),
-    noWorkReason: z.string().trim().max(2000),
+    blockers: z.string().trim().max(5000).default(""),
+    nextWeek: z.string().trim().max(5000).default(""),
+    noWorkReason: z.string().trim().max(2000).default(""),
     leave: z
       .array(
         z.object({ start: weeklyDate, end: weeklyDate, note: z.string().nullable().optional() }),
@@ -96,6 +97,7 @@ export function sanitizeWeeklySubmission(submission: WeeklySubmission): WeeklySu
   return {
     ...submission,
     summary: sanitizeRichText(submission.summary),
+    ...(submission.note !== undefined ? { note: sanitizeRichText(submission.note) } : {}),
     blockers: sanitizeRichText(submission.blockers),
     nextWeek: sanitizeRichText(submission.nextWeek),
     noWorkReason: sanitizeRichText(submission.noWorkReason),
