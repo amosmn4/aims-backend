@@ -9,8 +9,14 @@ jest.mock("sanitize-html", () => {
 
 import { SanitizeInputPipe, stripHtml } from "../common/sanitize";
 import { OpsRecordBody } from "./ops-record.dto";
-import { deliverablesSchema, taskOutcome, taskStatus } from "./task-content";
-import { sanitizeDeliverables } from "./task-sanitization";
+import {
+  deliverablesSchema,
+  taskOutcome,
+  taskStatus,
+  checklistProgress,
+  checklistStatus,
+} from "./task-content";
+import { sanitizeDeliverables, sanitizeTaskDescription } from "./task-sanitization";
 
 describe("Task content boundaries", () => {
   const id = "10000000-0000-4000-8000-000000000001";
@@ -66,4 +72,24 @@ describe("Task content boundaries", () => {
       expect(taskStatus(taskOutcome(status))).toBe(status);
     },
   );
+  it("preserves nested checkbox state, removes unsafe content and derives progress", () => {
+    const html = sanitizeTaskDescription(
+      '<ul data-type="taskList"><li data-type="taskItem" data-checked="true" onclick="alert(1)"><label><input type="checkbox" checked onchange="evil()"></label><div><p>Campaign</p><ul data-type="taskList"><li data-type="taskItem" data-checked="false"><label><input type="checkbox"></label><div><p>References</p></div></li></ul></div></li></ul><script>evil()</script>',
+    );
+    expect(html).not.toMatch(/onclick|onchange|script|evil/);
+    expect(html).toContain('data-checked="true"');
+    expect(html).toContain('disabled="disabled"');
+    expect(checklistProgress(html)).toEqual({ total: 2, done: 1 });
+    expect(checklistStatus(html, "To do")).toBe("In progress");
+    expect(
+      checklistStatus(html.replace('data-checked="false"', 'data-checked="true"'), "To do"),
+    ).toBe("Done");
+    expect(checklistStatus("", "Done")).toBe("Done");
+  });
+  it("folds legacy deliverables into the description without duplication", () => {
+    const items = [{ id, title: "Shortlist", done: true, detail: "<p>References</p>" }];
+    const html = sanitizeTaskDescription("<p>Recruitment</p>", items);
+    expect(checklistProgress(html)).toEqual({ total: 1, done: 1 });
+    expect(sanitizeTaskDescription(html, items)).toBe(html);
+  });
 });

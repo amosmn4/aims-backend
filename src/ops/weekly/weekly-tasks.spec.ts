@@ -102,9 +102,9 @@ describe("Weekly task materialization", () => {
     expect(update).toHaveBeenCalledWith({
       where: { id: item.id },
       data: expect.objectContaining({
-        description: "<p>Original instructions</p>",
-        status: "Blocked",
-        subtasks,
+        description: expect.stringContaining('data-type="taskList"'),
+        status: "To do",
+        subtasks: [],
       }),
     });
     expect(JSON.stringify(update.mock.calls)).not.toContain("Campaign launched");

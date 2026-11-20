@@ -1,7 +1,13 @@
 import { z } from "zod";
-import { sanitizeRichText, stripHtml } from "../../common/sanitize";
-import { deliverablesSchema } from "../task-content";
-import { sanitizeDeliverables } from "../task-sanitization";
+import { stripHtml } from "../../common/sanitize";
+import {
+  checklistProgress,
+  checklistStatus,
+  taskOutcome,
+  taskStatus,
+  deliverablesSchema,
+} from "../task-content";
+import { sanitizeTaskDescription } from "../task-sanitization";
 
 export const weeklyDate = z
   .string()
@@ -90,17 +96,23 @@ export function sanitizeWeeklySubmission(submission: WeeklySubmission): WeeklySu
   return {
     ...submission,
     ...(submission.title !== undefined ? { title: stripHtml(submission.title) } : {}),
-    summary: sanitizeRichText(submission.summary),
-    ...(submission.note !== undefined ? { note: sanitizeRichText(submission.note) } : {}),
-    blockers: sanitizeRichText(submission.blockers),
-    nextWeek: sanitizeRichText(submission.nextWeek),
-    noWorkReason: sanitizeRichText(submission.noWorkReason),
-    items: submission.items.map((item) => ({
-      ...item,
-      title: stripHtml(item.title),
-      detail: sanitizeRichText(item.detail),
-      ...(item.outcome !== undefined ? { outcome: sanitizeRichText(item.outcome) } : {}),
-      ...(item.subtasks ? { subtasks: sanitizeDeliverables(item.subtasks) } : {}),
-    })),
+    summary: stripHtml(submission.summary),
+    ...(submission.note !== undefined ? { note: stripHtml(submission.note) } : {}),
+    blockers: stripHtml(submission.blockers),
+    nextWeek: stripHtml(submission.nextWeek),
+    noWorkReason: stripHtml(submission.noWorkReason),
+    items: submission.items.map((item) => {
+      const detail = sanitizeTaskDescription(item.detail, item.subtasks);
+      return {
+        ...item,
+        title: stripHtml(item.title),
+        detail,
+        status: checklistProgress(detail).total
+          ? taskOutcome(checklistStatus(detail, taskStatus(item.status)))
+          : item.status,
+        subtasks: [],
+        ...(item.outcome !== undefined ? { outcome: stripHtml(item.outcome) } : {}),
+      };
+    }),
   };
 }

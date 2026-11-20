@@ -125,6 +125,7 @@ export const schemas = {
           z.object({
             id,
             title: text,
+            description: z.string().max(10000).optional(),
             status: z.string(),
             due: date,
             source: z.string(),

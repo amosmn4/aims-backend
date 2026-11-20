@@ -12,7 +12,7 @@ import { weeklySubmissionSchema, type WeeklyPhase } from "./weekly.schemas";
 const staffId = "10000000-0000-4000-8000-000000000001";
 const submission = weeklySubmissionSchema.parse({
   summary: "Legacy summary kept in storage",
-  note: "<p>Keep <strong>payroll</strong> ready.</p>",
+  note: "<p>Keep payroll ready.</p>",
   items: [
     {
       id: "10000000-0000-4000-8000-000000000002",
@@ -90,7 +90,7 @@ describe("CEO weekly email content", () => {
       expect(result.html).toMatch(/<th[^>]*>Task<\/th><th[^>]*>Status<\/th>/);
       expect(result.html).not.toMatch(/<th[^>]*>Notes<\/th>/);
       expect(result.html).toContain(phase === "plan" ? "Planned" : "Completed");
-      expect(result.html).toContain("Keep <strong>payroll</strong> ready.");
+      expect(result.html).toContain("Keep payroll ready.");
       expect(result.html).toContain("Waiting for approval");
       expect(result.html).toContain("Annual leave");
       expect(result.html).toContain(
@@ -122,7 +122,7 @@ describe("CEO weekly email content", () => {
       ],
     };
     const result = renderWeeklyEmail(overview("report", body), "report", "https://ops.example.com");
-    expect(result.html).toMatch(/<th[^>]*>Notes<\/th>/);
+    expect(result.html).not.toMatch(/<th[^>]*>Notes<\/th>/);
     expect(result.html).toContain("Reviewed <em>with finance</em>.");
     expect(result.text).toContain("Reviewed with finance.");
     expect(result.text).toContain("- Follow up (Completed) | Due 2026-12-15 | Priority Urgent");
@@ -169,7 +169,7 @@ describe("CEO weekly email content", () => {
     );
     for (const output of [result.html, result.text]) {
       expect(output).toContain("Shortlist");
-      expect(output).toContain("In progress");
+      expect(output).toContain("[ ]");
       expect(output).toContain("Check references");
       expect(output).toContain("Campaign launched");
     }

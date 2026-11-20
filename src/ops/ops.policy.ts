@@ -244,7 +244,7 @@ export function authorizeWrite<K extends Collection>(
         old?.assignee === viewer.id &&
         Object.entries(task).every(
           ([key, value]) =>
-            ["status", "subtasks"].includes(key) ||
+            ["status", "subtasks", "description"].includes(key) ||
             JSON.stringify(value) === JSON.stringify(old[key as keyof typeof old]),
         );
       allowed = manages || (!deleting && !!ownStatus) || (!old && task.assignee === viewer.id);

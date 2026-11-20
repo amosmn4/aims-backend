@@ -114,10 +114,48 @@ export const RICH_TEXT_OPTIONS: sanitizeHtml.IOptions = {
   },
 };
 
-export function sanitizeRichText(html: string): string;
-export function sanitizeRichText(html: string | null | undefined): string | null | undefined;
-export function sanitizeRichText(html: string | null | undefined) {
-  return html == null ? html : sanitizeHtml(html, RICH_TEXT_OPTIONS);
+const TASK_TEXT_OPTIONS: sanitizeHtml.IOptions = {
+  ...RICH_TEXT_OPTIONS,
+  allowedTags: [...(RICH_TEXT_OPTIONS.allowedTags as string[]), "input", "label", "div"],
+  allowedAttributes: {
+    ...RICH_TEXT_OPTIONS.allowedAttributes,
+    ul: ["data-type"],
+    li: ["data-type", "data-checked"],
+    input: ["type", "checked", "disabled"],
+  },
+  transformTags: {
+    ...RICH_TEXT_OPTIONS.transformTags,
+    ul: (tagName, attrs): sanitizeHtml.Tag => ({
+      tagName,
+      attribs: attrs["data-type"] === "taskList" ? { "data-type": "taskList" } : {},
+    }),
+    li: (tagName, attrs): sanitizeHtml.Tag => ({
+      tagName,
+      attribs:
+        attrs["data-type"] === "taskItem"
+          ? { "data-type": "taskItem", "data-checked": String(attrs["data-checked"] === "true") }
+          : {},
+    }),
+    input: (_tagName, attrs) => ({
+      tagName: "input",
+      attribs: {
+        type: "checkbox",
+        disabled: "disabled",
+        ...(attrs.checked !== undefined ? { checked: "checked" } : {}),
+      },
+    }),
+  },
+};
+
+export function sanitizeRichText(html: string, taskContent?: boolean): string;
+export function sanitizeRichText(
+  html: string | null | undefined,
+  taskContent?: boolean,
+): string | null | undefined;
+export function sanitizeRichText(html: string | null | undefined, taskContent = false) {
+  return html == null
+    ? html
+    : sanitizeHtml(html, taskContent ? TASK_TEXT_OPTIONS : RICH_TEXT_OPTIONS);
 }
 
 /* ---------- Plain text (every other input) ---------- */

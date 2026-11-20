@@ -288,6 +288,23 @@ describe("Ops permission and workflow boundaries", () => {
       authorizeWrite(assignee, "tasks", { ...task, status: "Done" }, task, data),
     ).not.toThrow();
     expect(() =>
+      authorizeWrite(
+        assignee,
+        "tasks",
+        {
+          ...task,
+          description:
+            '<ul data-type="taskList"><li data-type="taskItem" data-checked="true"><p>Shortlist</p></li></ul>',
+          status: "Done",
+        },
+        task,
+        data,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      authorizeWrite(assignee, "tasks", { ...task, title: "Changed assignment" }, task, data),
+    ).toThrow("permission");
+    expect(() =>
       authorizeWrite(assignee, "tasks", { ...task, assignee: "staff" }, task, data),
     ).toThrow("permission");
     expect(() =>

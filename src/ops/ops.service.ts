@@ -15,7 +15,8 @@ import { PrismaService } from "../prisma/prisma.service";
 import { EmailService } from "../notifications/email/email.service";
 import { StorageService } from "../storage/storage.service";
 import { sanitizeRichText, stripHtml } from "../common/sanitize";
-import { sanitizeDeliverables } from "./task-sanitization";
+import { sanitizeTaskDescription } from "./task-sanitization";
+import { checklistStatus } from "./task-content";
 import { hashToken } from "./ops-auth.service";
 import { auditActor, loadOpsSession } from "./ops-session";
 import { OpsRepository, type OpsTransaction } from "./ops.repository";
@@ -136,7 +137,7 @@ export class OpsService {
         : collection === "projects"
           ? ["summary"]
           : collection === "reports"
-            ? ["progress", "blockers", "next"]
+            ? []
             : [],
     );
     for (const field of ["summary", "description", "progress", "blockers", "next"]) {
@@ -166,14 +167,15 @@ export class OpsService {
     } else if (collection === "tasks") {
       const task = record as Records["tasks"];
       task.title = stripHtml(task.title);
-      task.description = sanitizeRichText(task.description) ?? undefined;
-      task.subtasks = sanitizeDeliverables(task.subtasks);
+      task.description = sanitizeTaskDescription(task.description, task.subtasks);
+      task.subtasks = [];
+      task.status = checklistStatus(task.description, task.status);
       if (task.weekStart) task.weekStart = weekOf(task.weekStart);
     } else if (collection === "reports") {
       const report = record as Records["reports"];
-      report.progress = sanitizeRichText(report.progress) ?? undefined;
-      report.blockers = sanitizeRichText(report.blockers) ?? undefined;
-      report.next = sanitizeRichText(report.next) ?? undefined;
+      report.progress = report.progress === undefined ? undefined : stripHtml(report.progress);
+      report.blockers = report.blockers === undefined ? undefined : stripHtml(report.blockers);
+      report.next = report.next === undefined ? undefined : stripHtml(report.next);
     }
     parse(schemas[collection] as unknown as z.ZodType<Records[K]>, record);
     return this.mutate(
@@ -246,6 +248,7 @@ export class OpsService {
           report.taskSnapshots = selected.map((task) => ({
             id: task.id,
             title: task.title,
+            description: sanitizeTaskDescription(task.description, task.subtasks),
             status: task.status,
             due: task.due,
             source: task.source ?? "project",

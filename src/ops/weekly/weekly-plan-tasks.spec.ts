@@ -173,4 +173,33 @@ describe("Task changes across weekly records", () => {
       rows.every((row) => weeklySubmissionSchema.parse(row.submission).items.length === 0),
     ).toBe(true);
   });
+  it("keeps checkbox edits on the same plan and report items as progress changes", async () => {
+    const { db, rows } = fixture();
+    const description =
+      '<ul data-type="taskList"><li data-type="taskItem" data-checked="true"><label><input type="checkbox" checked></label><div><p>Shortlist</p></div></li></ul>';
+    const completed = { ...task, description, subtasks: [], status: "Done" };
+    await linkTaskToPlan(db, viewer, completed, task, now);
+    for (const row of rows) {
+      const body = weeklySubmissionSchema.parse(row.submission);
+      expect(body.items).toHaveLength(1);
+      expect(body.items[0]).toMatchObject({
+        id: taskId,
+        detail: description,
+        status: "completed",
+        subtasks: [],
+      });
+    }
+    const reopened = {
+      ...completed,
+      description: description.replace('data-checked="true"', 'data-checked="false"'),
+      status: "To do",
+    };
+    await linkTaskToPlan(db, viewer, reopened, completed, now);
+    for (const row of rows) {
+      const body = weeklySubmissionSchema.parse(row.submission);
+      expect(body.items).toHaveLength(1);
+      expect(body.items[0]?.detail).toContain('data-checked="false"');
+      expect(body.items[0]?.status).toBe(row.phase === "plan" ? "planned" : "pending");
+    }
+  });
 });

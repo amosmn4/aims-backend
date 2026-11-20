@@ -40,3 +40,18 @@ export function taskStatus(status: string) {
           ? "Cancelled"
           : "To do";
 }
+
+export function checklistProgress(html = "") {
+  const items = html.match(/<li\b[^>]*data-type="taskItem"[^>]*>/gi) ?? [];
+  return {
+    total: items.length,
+    done: items.filter((item) => /data-checked="true"/i.test(item)).length,
+  };
+}
+export function checklistStatus<T extends string>(
+  html: string,
+  fallback: T,
+): T | "To do" | "In progress" | "Done" {
+  const { total, done } = checklistProgress(html);
+  return !total ? fallback : done === total ? "Done" : done ? "In progress" : "To do";
+}

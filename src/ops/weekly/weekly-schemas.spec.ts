@@ -1,16 +1,15 @@
 import { describe, expect, it, jest } from "@jest/globals";
 import { randomUUID } from "node:crypto";
 
-jest.mock("../../common/sanitize", () => ({
-  sanitizeRichText: (value: string) =>
-    value.replace(/<script>[\s\S]*?<\/script>/gi, "").replace(/<img[^>]*>/gi, ""),
-  stripHtml: (value: string) => value.replace(/<[^>]*>/g, ""),
-}));
+jest.mock("sanitize-html", () => {
+  const { createRequire } = process.getBuiltinModule("module");
+  return createRequire(__filename)("sanitize-html");
+});
 
 import { sanitizeWeeklySubmission, weeklySubmissionSchema } from "./weekly.schemas";
 
-describe("weekly submission rich text", () => {
-  it("preserves safe formatting and removes unsafe markup and plain-text title tags", () => {
+describe("weekly task description and plain reporting fields", () => {
+  it("formats only the task description and strips markup from other fields", () => {
     const attachmentId = "10c6a9c5-e69f-4d24-8b05-3a77f77dc521";
     const submission = weeklySubmissionSchema.parse({
       summary: "<p><strong>Progress</strong><script>alert(1)</script></p>",
@@ -29,7 +28,7 @@ describe("weekly submission rich text", () => {
     });
 
     const safe = sanitizeWeeklySubmission(submission);
-    expect(safe.summary).toContain("<strong>Progress</strong>");
+    expect(safe.summary).toBe("Progress");
     expect(safe.summary).not.toContain("<script>");
     expect(safe.items[0]?.title).toBe("Prepare report");
     expect(safe.items[0]?.detail).toContain("<em>Review</em>");
@@ -50,5 +49,31 @@ describe("weekly submission rich text", () => {
     expect(
       weeklySubmissionSchema.safeParse({ ...base, attachments: [ids[0], ids[0]] }).success,
     ).toBe(false);
+  });
+  it("uses checkbox progress for both phases while keeping manual completion without deliverables", () => {
+    const detail =
+      '<ul data-type="taskList"><li data-type="taskItem" data-checked="true"><label><input type="checkbox" checked></label><div><p>Campaign</p></div></li></ul>';
+    const body = weeklySubmissionSchema.parse({
+      summary: "<p>Weekly objective</p>",
+      note: "<strong>Notes</strong>",
+      items: [
+        {
+          id: randomUUID(),
+          title: "Recruitment",
+          detail,
+          status: "planned",
+          outcome: "<p>Ready</p>",
+        },
+        { id: randomUUID(), title: "No deliverables", detail: "", status: "completed" },
+      ],
+    });
+    const safe = sanitizeWeeklySubmission(body);
+    expect(safe.items[0]).toMatchObject({ status: "completed", outcome: "Ready", subtasks: [] });
+    expect(safe.items[0]?.detail).toContain('data-checked="true"');
+    expect(safe.items[1]?.status).toBe("completed");
+    expect(safe.note).toBe("Notes");
+    expect(safe.summary).toBe("Weekly objective");
+    body.items[0]!.detail = detail.replace('data-checked="true"', 'data-checked="false"');
+    expect(sanitizeWeeklySubmission(body).items[0]?.status).toBe("pending");
   });
 });
