@@ -1,5 +1,5 @@
 import { sanitizeRichText, stripHtml } from "../../common/sanitize";
-import type { WeeklyPhase } from "./weekly.schemas";
+import type { WeeklyPhase, WeeklySubmission } from "./weekly.schemas";
 import type { WeeklyService } from "./weekly.service";
 
 type Overview = Awaited<ReturnType<WeeklyService["overview"]>>;
@@ -11,6 +11,24 @@ export const escapeEmail = (value: string) =>
   );
 const taskStatus = (status: string) =>
   status.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase());
+
+const emailText = (value: string) =>
+  stripHtml(
+    value.replace(/<li\b[^>]*>/gi, "\n  - ").replace(/<\/(p|div|li)>|<br\s*\/?>/gi, "\n"),
+  ).trim();
+function renderDeliverables(item: WeeklySubmission["items"][number]) {
+  if (!item.subtasks?.length) return "";
+  return `<ul style="margin:8px 0;padding-left:20px">${item.subtasks.map((part) => `<li style="margin:6px 0"><strong>${escapeEmail(stripHtml(part.title))}</strong> <span>(${escapeEmail(taskStatus(part.status ?? (part.done ? "completed" : "pending")))})</span>${part.detail ? `<div>${sanitizeRichText(part.detail)}</div>` : ""}</li>`).join("")}</ul>`;
+}
+function deliverablesText(item: WeeklySubmission["items"][number]) {
+  return [
+    ...(item.subtasks ?? []).map((part) => {
+      const status = part.status ?? (part.done ? "completed" : "pending");
+      return `  - ${stripHtml(part.title)} (${taskStatus(status)})${part.detail ? `\n    ${emailText(part.detail)}` : ""}`;
+    }),
+    ...(item.outcome ? [`  Outcome: ${emailText(item.outcome)}`] : []),
+  ].join("\n");
+}
 
 export function renderWeeklyEmail(data: Overview, phase: WeeklyPhase, origin: string) {
   const label = phase === "plan" ? "plans" : "reports";
@@ -39,7 +57,11 @@ export function renderWeeklyEmail(data: Overview, phase: WeeklyPhase, origin: st
       status,
       brief,
       hasTaskNotes:
-        submitted && !!row?.submission.items.some((item) => stripHtml(item.detail).trim()),
+        submitted &&
+        !!row?.submission.items.some(
+          (item) =>
+            stripHtml(item.detail).trim() || (item.outcome && stripHtml(item.outcome).trim()),
+        ),
       counts,
       submission: submitted ? row?.submission : null,
     };
@@ -62,11 +84,13 @@ export function renderWeeklyEmail(data: Overview, phase: WeeklyPhase, origin: st
             ),
             ...row.submission.items.map(
               (item) =>
-                `- ${item.title} (${taskStatus(item.status)})${item.due ? ` | Due ${item.due}` : ""}${item.priority ? ` | Priority ${item.priority}` : ""}${stripHtml(item.detail).trim() ? `: ${stripHtml(item.detail)}` : ""}`,
+                `- ${stripHtml(item.title)} (${taskStatus(item.status)})${item.due ? ` | Due ${item.due}` : ""}${item.priority ? ` | Priority ${item.priority}` : ""}${stripHtml(item.detail).trim() ? `: ${emailText(item.detail)}` : ""}${deliverablesText(item) ? `\n${deliverablesText(item)}` : ""}`,
             ),
-            row.submission.noWorkReason && `No work / absence: ${row.submission.noWorkReason}`,
-            row.submission.blockers && `Blockers and support: ${row.submission.blockers}`,
-            row.submission.nextWeek && `Next week: ${row.submission.nextWeek}`,
+            row.submission.noWorkReason &&
+              `No work / absence: ${emailText(row.submission.noWorkReason)}`,
+            row.submission.blockers &&
+              `Blockers and support: ${emailText(row.submission.blockers)}`,
+            row.submission.nextWeek && `Next week: ${emailText(row.submission.nextWeek)}`,
           ]
             .filter(Boolean)
             .join("\n")
@@ -74,6 +98,6 @@ export function renderWeeklyEmail(data: Overview, phase: WeeklyPhase, origin: st
       return `${row.name}: ${row.status}\n${row.counts}\n${details}\n${row.url}`;
     }),
   ].join("\n\n");
-  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;background:#f3f4f6;color:#111827;font-family:Arial,sans-serif"><main style="max-width:760px;margin:24px auto;padding:24px;background:#fff;border:1px solid #d1d5db"><h1 style="font-size:24px">Weekly staff ${label}</h1><p>${escapeEmail(data.weekStart)} to ${escapeEmail(data.weekEnd)} | Africa/Nairobi</p><p><strong>${submitted} of ${rows.length} staff submitted</strong></p>${rows.map((row) => `<section style="margin:18px 0;padding:16px;border:1px solid #d1d5db;border-radius:8px"><h2 style="margin:0 0 8px;font-size:18px"><a href="${escapeEmail(row.url)}" style="color:#1d4ed8">${escapeEmail(row.name)}</a></h2><p style="margin:0 0 12px;color:#4b5563">${escapeEmail(row.status)}${row.counts ? ` | ${escapeEmail(row.counts)}` : ""}</p>${row.submission ? `${row.submission.title ? `<h3>${escapeEmail(row.submission.title)}</h3>` : ""}${row.submission.summary ? `<div style="white-space:pre-wrap"><strong>${phase === "plan" ? "Weekly objective" : "Executive summary"}:</strong> ${sanitizeRichText(row.submission.summary)}</div>` : ""}${row.brief ? `<div style="white-space:pre-wrap"><strong>Notes:</strong> ${sanitizeRichText(row.brief)}</div>` : ""}${(row.submission.leave ?? []).map((leave) => `<p><strong>Leave:</strong> ${escapeEmail(leave.start)} to ${escapeEmail(leave.end)}${leave.note ? ` | ${escapeEmail(leave.note)}` : ""}</p>`).join("")}${row.submission.items.length ? `<table style="width:100%;border-collapse:collapse;text-align:left"><thead><tr><th style="padding:8px;border-bottom:2px solid #d1d5db">Task</th><th style="padding:8px;border-bottom:2px solid #d1d5db">Status</th>${row.hasTaskNotes ? `<th style="padding:8px;border-bottom:2px solid #d1d5db">Notes</th>` : ""}</tr></thead><tbody>${row.submission.items.map((item) => `<tr><td style="padding:8px;border-bottom:1px solid #e5e7eb;vertical-align:top">${escapeEmail(item.title)}${item.due || item.priority ? `<br><small>${item.due ? `Due ${escapeEmail(item.due)}` : ""}${item.due && item.priority ? " | " : ""}${item.priority ? `Priority ${escapeEmail(item.priority)}` : ""}</small>` : ""}</td><td style="padding:8px;border-bottom:1px solid #e5e7eb;vertical-align:top">${escapeEmail(taskStatus(item.status))}</td>${row.hasTaskNotes ? `<td style="padding:8px;border-bottom:1px solid #e5e7eb;white-space:pre-wrap;vertical-align:top">${sanitizeRichText(item.detail)}</td>` : ""}</tr>`).join("")}</tbody></table>` : ""}${row.submission.noWorkReason ? `<p><strong>No work / absence:</strong> ${escapeEmail(row.submission.noWorkReason)}</p>` : ""}${row.submission.blockers ? `<p style="white-space:pre-wrap"><strong>Blockers and support:</strong> ${escapeEmail(row.submission.blockers)}</p>` : ""}${row.submission.nextWeek ? `<p style="white-space:pre-wrap"><strong>Next week:</strong> ${escapeEmail(row.submission.nextWeek)}</p>` : ""}` : `<p>No submitted details.</p>`}</section>`).join("") || "<p>No staff are expected for this week.</p>"}<p style="font-size:13px;color:#4b5563">This email is a snapshot. Select a staff name to view the full submission in Amsol Ops.</p></main></body></html>`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;background:#f3f4f6;color:#111827;font-family:Arial,sans-serif"><main style="max-width:760px;margin:24px auto;padding:24px;background:#fff;border:1px solid #d1d5db"><h1 style="font-size:24px">Weekly staff ${label}</h1><p>${escapeEmail(data.weekStart)} to ${escapeEmail(data.weekEnd)} | Africa/Nairobi</p><p><strong>${submitted} of ${rows.length} staff submitted</strong></p>${rows.map((row) => `<section style="margin:18px 0;padding:16px;border:1px solid #d1d5db;border-radius:8px"><h2 style="margin:0 0 8px;font-size:18px"><a href="${escapeEmail(row.url)}" style="color:#1d4ed8">${escapeEmail(row.name)}</a></h2><p style="margin:0 0 12px;color:#4b5563">${escapeEmail(row.status)}${row.counts ? ` | ${escapeEmail(row.counts)}` : ""}</p>${row.submission ? `${row.submission.title ? `<h3>${escapeEmail(row.submission.title)}</h3>` : ""}${row.submission.summary ? `<div style="white-space:pre-wrap"><strong>${phase === "plan" ? "Weekly objective" : "Executive summary"}:</strong> ${sanitizeRichText(row.submission.summary)}</div>` : ""}${row.brief ? `<div style="white-space:pre-wrap"><strong>Notes:</strong> ${sanitizeRichText(row.brief)}</div>` : ""}${(row.submission.leave ?? []).map((leave) => `<p><strong>Leave:</strong> ${escapeEmail(leave.start)} to ${escapeEmail(leave.end)}${leave.note ? ` | ${escapeEmail(leave.note)}` : ""}</p>`).join("")}${row.submission.items.length ? `<table style="width:100%;border-collapse:collapse;text-align:left"><thead><tr><th style="padding:8px;border-bottom:2px solid #d1d5db">Task</th><th style="padding:8px;border-bottom:2px solid #d1d5db">Status</th>${row.hasTaskNotes ? `<th style="padding:8px;border-bottom:2px solid #d1d5db">Notes</th>` : ""}</tr></thead><tbody>${row.submission.items.map((item) => `<tr><td style="padding:8px;border-bottom:1px solid #e5e7eb;vertical-align:top">${escapeEmail(stripHtml(item.title))}${renderDeliverables(item)}${item.due || item.priority ? `<br><small>${item.due ? `Due ${escapeEmail(item.due)}` : ""}${item.due && item.priority ? " | " : ""}${item.priority ? `Priority ${escapeEmail(item.priority)}` : ""}</small>` : ""}</td><td style="padding:8px;border-bottom:1px solid #e5e7eb;vertical-align:top">${escapeEmail(taskStatus(item.status))}</td>${row.hasTaskNotes ? `<td style="padding:8px;border-bottom:1px solid #e5e7eb;white-space:pre-wrap;vertical-align:top">${sanitizeRichText(item.detail)}${item.outcome ? `<div><strong>Outcome:</strong> ${sanitizeRichText(item.outcome)}</div>` : ""}</td>` : ""}</tr>`).join("")}</tbody></table>` : ""}${row.submission.noWorkReason ? `<p><strong>No work / absence:</strong> ${sanitizeRichText(row.submission.noWorkReason)}</p>` : ""}${row.submission.blockers ? `<p style="white-space:pre-wrap"><strong>Blockers and support:</strong> ${sanitizeRichText(row.submission.blockers)}</p>` : ""}${row.submission.nextWeek ? `<p style="white-space:pre-wrap"><strong>Next week:</strong> ${sanitizeRichText(row.submission.nextWeek)}</p>` : ""}` : `<p>No submitted details.</p>`}</section>`).join("") || "<p>No staff are expected for this week.</p>"}<p style="font-size:13px;color:#4b5563">This email is a snapshot. Select a staff name to view the full submission in Amsol Ops.</p></main></body></html>`;
   return { subject, html, text };
 }

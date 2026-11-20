@@ -9,6 +9,7 @@ import {
   Get,
   Param,
   Patch,
+  Query,
   Post,
   Res,
   UploadedFile,
@@ -22,6 +23,8 @@ import { CreateBlogPostDto } from "../../marketing/blog/dto/create-blog-post.dto
 import { UpdateBlogPostDto } from "../../marketing/blog/dto/update-blog-post.dto";
 import { CurrentUser } from "../../auth/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../auth/types/authenticated-user";
+import { z } from "zod";
+import { parse } from "../ops.schemas";
 @Public()
 @UseGuards(OpsAuthGuard, OpsModuleGuard)
 @OpsFeature("blog")
@@ -32,8 +35,18 @@ export class OpsBlogController {
     private readonly storage: StorageService,
   ) {}
   @Get()
-  findAll() {
-    return this.blogService.findAll();
+  findAll(@Query() query: Record<string, string>) {
+    if (!Object.keys(query).length) return this.blogService.findAll();
+    const pagination = parse(
+      z
+        .object({
+          page: z.coerce.number().int().min(1).max(100000).default(1),
+          limit: z.coerce.number().int().min(1).max(100).default(20),
+        })
+        .strict(),
+      query,
+    );
+    return this.blogService.findPage(pagination.page, pagination.limit);
   }
   @Get(":id")
   findOne(

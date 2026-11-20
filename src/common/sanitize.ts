@@ -140,17 +140,25 @@ const ENTITY_DECODE: Record<string, string> = {
   "&gt;": ">",
   "&quot;": '"',
   "&#39;": "'",
+  "&apos;": "'",
+  "&nbsp;": " ",
 };
 
 /** Removes HTML tags from plain text without otherwise altering it. */
 export function stripHtml(value: string): string {
   let out = value;
-  // Re-check after decoding, in case escaped markup re-forms a tag.
-  for (let i = 0; i < 3 && HTML_TAG.test(out); i++) {
-    out = sanitizeHtml(out, PLAIN_TEXT_OPTIONS).replace(
-      /&(amp|lt|gt|quot|#39);/g,
-      (m) => ENTITY_DECODE[m],
-    );
+  for (let i = 0; i < 4; i++) {
+    const decoded = out.replace(/&(?:amp|lt|gt|quot|apos|nbsp|#\d+|#x[0-9a-f]+);/gi, (entity) => {
+      const named = ENTITY_DECODE[entity.toLowerCase()];
+      if (named !== undefined) return named;
+      const numeric = entity.slice(2, -1);
+      const code =
+        numeric[0]?.toLowerCase() === "x" ? parseInt(numeric.slice(1), 16) : Number(numeric);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "";
+    });
+    const next = HTML_TAG.test(decoded) ? sanitizeHtml(decoded, PLAIN_TEXT_OPTIONS) : decoded;
+    if (next === out) break;
+    out = next;
   }
   return out;
 }

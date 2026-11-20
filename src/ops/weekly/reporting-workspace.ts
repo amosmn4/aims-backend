@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import type { PrismaService } from "../../prisma/prisma.service";
 import { parse, type Viewer } from "../ops.schemas";
-import { addDays, nairobiDate, phaseCounts, scheduleFor, weekOf } from "./weekly-calendar";
+import { addDays, nairobiDate, scheduleFor, weekOf } from "./weekly-calendar";
 import { weeklyDate, weeklySubmissionSchema } from "./weekly.schemas";
 import type { WeeklyService } from "./weekly.service";
 
@@ -156,40 +156,7 @@ export async function reportingWorkspace(
           ? `${record.phase === "plan" ? "Plan" : "Report"} update`
           : `Weekly ${record.phase}`,
     };
-    if (dto.view !== "submissions") return [row];
-    return [
-      row,
-      ...history.slice(1).flatMap((event) => {
-        const value = event.newValue as { submission?: unknown } | null;
-        const parsed = weeklySubmissionSchema.safeParse(value?.submission);
-        if (!parsed.success) return [];
-        return [
-          {
-            ...row,
-            id: event.id,
-            date: event.createdAt.toISOString(),
-            title: parsed.data.title || row.title,
-            summary: parsed.data.summary,
-            taskCount: parsed.data.items.length,
-            status: "submitted",
-            historical: true,
-            scheduledAt: null,
-            entry: {
-              ...entry,
-              submission: parsed.data,
-              counts: phaseCounts(parsed.data.items),
-              submittedAt: event.createdAt,
-              reviewedAt: null,
-              reviewComment: null,
-              returnedAt: null,
-              returnComment: null,
-            },
-            event:
-              event.action === "ops.weekly.submitted" ? "Initial submission" : "Submission update",
-          },
-        ];
-      }),
-    ];
+    return [row];
   });
   const monthlyRows = monthly.map((record) => {
     const person = profiles.find((profile) => profile.id === record.author)!;
@@ -224,7 +191,8 @@ export async function reportingWorkspace(
     };
   });
   const matchesPerson = (person: { id: string; name: string; dept: string | null }) =>
-    (!dto.department || person.dept === dto.department) && (!dto.staff || person.id === dto.staff);
+    (!ceo || !dto.department || person.dept === dto.department) &&
+    (!ceo || !dto.staff || person.id === dto.staff);
   const matches = (row: {
     staffId: string;
     name: string;
@@ -327,6 +295,10 @@ export async function reportingWorkspace(
     (row) => !row.historical || records.some((record) => record.id === row.id),
   );
   const metrics = {
+    tasks: tasks.filter((task) => people.some((person) => person.id === task.assignee)).length,
+    completed: tasks.filter(
+      (task) => task.status === "Done" && people.some((person) => person.id === task.assignee),
+    ).length,
     staff: people.filter(
       (person) => person.active && person.user?.isActive && person.user.passwordHash,
     ).length,

@@ -1,5 +1,6 @@
 import { BadRequestException } from "@nestjs/common";
 import { z } from "zod";
+import { deliverablesSchema } from "./task-content";
 
 const id = z.string().uuid();
 const text = z
@@ -89,15 +90,12 @@ export const schemas = {
       assignee: id,
       due: date,
       priority: z.enum(["Urgent", "High", "Medium", "Low"]),
-      status: z.enum(["To do", "In progress", "Done"]),
+      status: z.enum(["To do", "In progress", "Done", "Blocked", "Cancelled"]),
       ceoComment: z.string().max(10000).optional(),
       business: id.or(z.literal("b0")).optional(),
       weekStart: date.optional(),
       source: z.enum(["project", "planned", "ad_hoc", "contingency"]).optional(),
-      subtasks: z
-        .array(z.object({ id, title: text, done: z.boolean() }).strict())
-        .max(100)
-        .optional(),
+      subtasks: deliverablesSchema.optional(),
     })
     .strict(),
   reports: z
@@ -131,7 +129,7 @@ export const schemas = {
             due: date,
             source: z.string(),
             priority: z.enum(["Urgent", "High", "Medium", "Low"]).optional(),
-            subtasks: z.array(z.object({ id, title: text, done: z.boolean() })).optional(),
+            subtasks: deliverablesSchema.optional(),
           }),
         )
         .optional(),

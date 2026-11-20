@@ -2,6 +2,11 @@ import { describe, expect, it, jest } from "@jest/globals";
 import type { Prisma } from "@prisma/client";
 import { syncWeeklyTasks } from "./weekly-tasks";
 
+jest.mock("sanitize-html", () => {
+  const { createRequire } = process.getBuiltinModule("module");
+  return createRequire(__filename)("sanitize-html");
+});
+
 describe("Weekly task materialization", () => {
   const item = {
     id: "weekly-item",
@@ -66,5 +71,42 @@ describe("Weekly task materialization", () => {
     });
     expect(update).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
+  });
+  it("saves report deliverable changes and task instructions without storing outcomes as descriptions", async () => {
+    const update = jest.fn<(...args: unknown[]) => Promise<object>>().mockResolvedValue({});
+    const current = { id: item.id, assignee: "staff", source: "planned", subtasks: [] };
+    const db = {
+      opsTask: { findUnique: async () => current, update },
+    } as unknown as Prisma.TransactionClient;
+    const subtasks = [
+      {
+        id: "shortlist",
+        title: "Shortlist",
+        done: false,
+        status: "blocked" as const,
+        detail: "<ul><li>Check references</li></ul>",
+      },
+    ];
+    await syncWeeklyTasks(db, "staff", "2026-11-16", "report", {
+      ...submission,
+      items: [
+        {
+          ...item,
+          detail: "<p>Original instructions</p>",
+          outcome: "<p>Campaign launched</p>",
+          status: "blocked",
+          subtasks,
+        },
+      ],
+    });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: item.id },
+      data: expect.objectContaining({
+        description: "<p>Original instructions</p>",
+        status: "Blocked",
+        subtasks,
+      }),
+    });
+    expect(JSON.stringify(update.mock.calls)).not.toContain("Campaign launched");
   });
 });

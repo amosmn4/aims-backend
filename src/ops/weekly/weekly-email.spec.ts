@@ -143,4 +143,36 @@ describe("CEO weekly email content", () => {
       expect(output).not.toContain("Legacy summary");
     }
   });
+  it("includes nested deliverable notes, statuses and outcomes in both email formats", () => {
+    const body = {
+      ...submission,
+      items: [
+        {
+          ...submission.items[0]!,
+          detail: "<p>Recruitment</p>",
+          outcome: "<p>Campaign launched</p>",
+          subtasks: [
+            {
+              id: "10000000-0000-4000-8000-000000000005",
+              title: "Shortlist",
+              done: false,
+              status: "in_progress" as const,
+              detail: "<ul><li>Review candidates<ul><li>Check references</li></ul></li></ul>",
+            },
+          ],
+        },
+      ],
+    };
+    const result = renderWeeklyEmail(overview("report", body), "report", "https://ops.example.com");
+    expect(result.html).toContain(
+      "<ul><li>Review candidates<ul><li>Check references</li></ul></li></ul>",
+    );
+    for (const output of [result.html, result.text]) {
+      expect(output).toContain("Shortlist");
+      expect(output).toContain("In progress");
+      expect(output).toContain("Check references");
+      expect(output).toContain("Campaign launched");
+    }
+    expect(result.text).not.toMatch(/<\/?(?:p|ul|li)>/);
+  });
 });

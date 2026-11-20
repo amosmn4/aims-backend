@@ -15,7 +15,8 @@ import { parse, type Viewer } from "../ops.schemas";
 import { auditActor, loadOpsSession } from "../ops-session";
 import { WeeklyClock } from "./weekly-clock";
 import { syncWeeklyTasks } from "./weekly-tasks";
-import { periodPlanItems } from "./weekly-plan-tasks";
+import { linkTaskToPlan, periodPlanItems } from "./weekly-plan-tasks";
+import { taskOutcome } from "../task-content";
 import { reportingWorkspace } from "./reporting-workspace";
 import {
   addDays,
@@ -274,6 +275,7 @@ export class WeeklyService {
       tasks: tasks.map((task) => ({
         id: task.id,
         title: task.title,
+        description: task.description,
         project: task.parent?.name ?? "Weekly work",
         status: task.status,
         due: task.due,
@@ -420,6 +422,14 @@ export class WeeklyService {
           submission: submission as Prisma.InputJsonObject,
           addedTaskIds: additions.map((item) => item.taskId ?? item.id),
         });
+        const tasks = await tx.opsTask.findMany({
+          where: {
+            assignee: viewer.id,
+            id: { in: additions.map((item) => item.taskId ?? item.id) },
+          },
+        });
+        for (const task of tasks)
+          await linkTaskToPlan(tx, viewer, task, task, this.clock.now(), id);
         return { id, version: dto.version + 1, success: true };
       });
     } catch (error) {
@@ -446,8 +456,6 @@ export class WeeklyService {
     const current = weekOf(nairobiDate(this.clock.now()));
     if (week < schedule.settings.startWeek || week > addDays(current, 7))
       throw new BadRequestException("Choose an enabled reporting week, up to one week ahead.");
-    if (phase === "plan" && dto.submission.items.some((item) => item.status !== "planned"))
-      throw new BadRequestException("Plan tasks must use Planned status.");
     if (phase === "report" && dto.submission.items.some((item) => item.status === "planned"))
       throw new BadRequestException("Set the outcome of every task.");
     if (dto.submit) {
@@ -598,26 +606,23 @@ export class WeeklyService {
               const task = weeklyTasks.find((row) => row.id === (item.taskId ?? item.id));
               return {
                 ...item,
-                status:
-                  task?.status === "Done"
-                    ? ("completed" as const)
-                    : task?.status === "In progress"
-                      ? ("in_progress" as const)
-                      : ("pending" as const),
+                outcome: "",
+                status: task
+                  ? taskOutcome(task.status)
+                  : item.status === "planned"
+                    ? ("pending" as const)
+                    : item.status,
               };
             }),
             ...weeklyTasks.map((task) => ({
               id: task.id,
               taskId: task.id,
               title: task.title,
-              detail: "",
+              detail: task.description ?? "",
+              outcome: "",
+              subtasks: parse(weeklyItemSchema.shape.subtasks, task.subtasks ?? []),
               business: task.business,
-              status:
-                task.status === "Done"
-                  ? ("completed" as const)
-                  : task.status === "In progress"
-                    ? ("in_progress" as const)
-                    : ("pending" as const),
+              status: taskOutcome(task.status),
             })),
           ];
           for (const item of required) {
@@ -638,15 +643,24 @@ export class WeeklyService {
           });
           dto.submission.items = dto.submission.items.map((item) => {
             const task = current.find((row) => row.id === (item.taskId ?? item.id));
+            const plannedItem = planned.find(
+              (row) => (row.taskId ?? row.id) === (item.taskId ?? item.id),
+            );
+            const content =
+              item.outcome === undefined
+                ? {
+                    ...item,
+                    outcome: item.detail,
+                    detail: task?.description ?? plannedItem?.detail ?? "",
+                  }
+                : item;
             return task
               ? {
-                  ...item,
-                  title: task.title,
-                  subtasks: parse(weeklyItemSchema.shape.subtasks, task.subtasks ?? []),
+                  ...content,
                   priority:
                     item.priority ?? (task.priority as "Urgent" | "High" | "Medium" | "Low"),
                 }
-              : item;
+              : content;
           });
         }
         if (
@@ -719,6 +733,16 @@ export class WeeklyService {
             ...(existing?.submittedAt ? { previousSubmission: existing.submission } : {}),
           },
         );
+        if (dto.submit) {
+          const tasks = await tx.opsTask.findMany({
+            where: {
+              assignee: viewer.id,
+              id: { in: dto.submission.items.map((item) => item.taskId ?? item.id) },
+            },
+          });
+          for (const task of tasks)
+            await linkTaskToPlan(tx, viewer, task, task, this.clock.now(), id);
+        }
         return { id, version: dto.version + 1, success: true };
       });
       await Promise.all(storageKeys.map((key) => this.storage.delete(key)));

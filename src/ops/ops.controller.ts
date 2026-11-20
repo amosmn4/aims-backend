@@ -24,6 +24,7 @@ import { Public } from "../auth/decorators/public.decorator";
 import { StorageService } from "../storage/storage.service";
 import { OpsAuthGuard, OpsViewer } from "./ops-auth.guard";
 import { OpsService } from "./ops.service";
+import { OpsRecordBody } from "./ops-record.dto";
 import { parse, revisionSchema, schemas, type Collection, type Viewer } from "./ops.schemas";
 
 const revision = (req: Request) => parse(revisionSchema, Number(req.headers["if-match"] ?? NaN));
@@ -129,7 +130,7 @@ export class OpsController {
     @OpsViewer() viewer: Viewer,
     @Param("collection") name: string,
     @Param("id") id: string,
-    @Body() body: unknown,
+    @Body() body: OpsRecordBody,
     @Req() req: Request,
   ) {
     if (!body || typeof body !== "object" || !("id" in body) || body.id !== id)

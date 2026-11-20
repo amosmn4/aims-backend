@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { sanitizeRichText, stripHtml } from "../../common/sanitize";
+import { deliverablesSchema } from "../task-content";
+import { sanitizeDeliverables } from "../task-sanitization";
 
 export const weeklyDate = z
   .string()
@@ -36,24 +38,14 @@ export const weeklyItemSchema = z
     id: z.string().uuid(),
     taskId: z.string().uuid().optional(),
     title: z.string().trim().min(1).max(200),
-    detail: z.string().trim().max(2000),
+    detail: z.string().trim().max(10000),
+    outcome: z.string().trim().max(10000).optional(),
     status: z.enum(["planned", "completed", "in_progress", "pending", "blocked", "cancelled"]),
     due: weeklyDate.optional(),
     priority: z.enum(["Urgent", "High", "Medium", "Low"]).optional(),
     source: z.enum(["planned", "ad_hoc", "contingency", "project"]).optional(),
     business: z.string().max(36).optional(),
-    subtasks: z
-      .array(
-        z
-          .object({
-            id: z.string().uuid(),
-            title: z.string().trim().min(1).max(200),
-            done: z.boolean(),
-          })
-          .strict(),
-      )
-      .max(100)
-      .optional(),
+    subtasks: deliverablesSchema.optional(),
   })
   .strict();
 export const weeklySubmissionSchema = z
@@ -107,6 +99,8 @@ export function sanitizeWeeklySubmission(submission: WeeklySubmission): WeeklySu
       ...item,
       title: stripHtml(item.title),
       detail: sanitizeRichText(item.detail),
+      ...(item.outcome !== undefined ? { outcome: sanitizeRichText(item.outcome) } : {}),
+      ...(item.subtasks ? { subtasks: sanitizeDeliverables(item.subtasks) } : {}),
     })),
   };
 }

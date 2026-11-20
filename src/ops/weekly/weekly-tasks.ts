@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import type { WeeklyPhase, WeeklySubmission } from "./weekly.schemas";
 import { addDays } from "./weekly-calendar";
+import { taskStatus } from "../task-content";
 
 export async function syncWeeklyTasks(
   db: Prisma.TransactionClient,
@@ -14,12 +15,7 @@ export async function syncWeeklyTasks(
     const id = item.taskId ?? item.id;
     const existing = await db.opsTask.findUnique({ where: { id } });
     if (existing && (skipExisting || existing.assignee !== staffId)) continue;
-    const status =
-      item.status === "completed"
-        ? "Done"
-        : item.status === "in_progress"
-          ? "In progress"
-          : "To do";
+    const status = taskStatus(item.status);
     if (!existing && !item.taskId) {
       await db.opsTask.create({
         data: {
@@ -36,14 +32,14 @@ export async function syncWeeklyTasks(
           business: item.business ?? "b0",
         },
       });
-    } else if (existing && phase === "report") {
-      await db.opsTask.update({ where: { id }, data: { status } });
-    } else if (existing && existing.source !== "project") {
+    } else if (existing) {
       await db.opsTask.update({
         where: { id },
         data: {
           title: item.title,
-          ...(item.taskId ? {} : { description: item.detail }),
+          description: item.detail,
+          status,
+          subtasks: item.subtasks ?? existing.subtasks ?? [],
           ...(item.due ? { due: item.due } : {}),
           ...(item.priority ? { priority: item.priority } : {}),
         },

@@ -1,8 +1,9 @@
 import { ConflictException } from "@nestjs/common";
 import { Prisma, type OpsTask, type OpsWeeklyReport } from "@prisma/client";
 import { auditActor } from "../ops-session";
-import { parse, type Records, type Viewer } from "../ops.schemas";
-import { addDays } from "./weekly-calendar";
+import { parse, type Viewer } from "../ops.schemas";
+import { taskOutcome } from "../task-content";
+import { addDays, weekOf } from "./weekly-calendar";
 import { weeklyItemSchema, weeklySubmissionSchema, type WeeklySubmission } from "./weekly.schemas";
 
 export function periodPlanItems(
@@ -20,8 +21,8 @@ export function periodPlanItems(
           id: task.id,
           taskId: task.id,
           title: task.title,
-          detail: "",
-          status: "planned",
+          detail: task.description ?? "",
+          status: task.status === "To do" ? "planned" : taskOutcome(task.status),
           due: task.due,
           priority: task.priority,
           source: task.source,
@@ -32,16 +33,31 @@ export function periodPlanItems(
   ];
 }
 
+type LinkedTask = {
+  id: string;
+  title: string;
+  description?: string | null;
+  assignee: string;
+  weekStart?: string | null;
+  due: string;
+  priority: string;
+  source?: string;
+  business?: string;
+  status: string;
+  subtasks?: unknown;
+};
+
 export async function linkTaskToPlan(
   db: Prisma.TransactionClient,
   viewer: Viewer,
-  task: Records["tasks"],
-  previous?: Records["tasks"],
+  task: LinkedTask,
+  previous?: LinkedTask,
   now = new Date(),
+  excludeId?: string,
+  deleted = false,
 ) {
   const changedPeriod =
     previous?.weekStart !== task.weekStart || previous?.assignee !== task.assignee;
-  if (previous && !changedPeriod) return undefined;
   const write = async (plan: OpsWeeklyReport, submission: WeeklySubmission, added: boolean) => {
     const content = parse(weeklySubmissionSchema, submission);
     const result = await db.opsWeeklyReport.updateMany({
@@ -68,7 +84,7 @@ export async function linkTaskToPlan(
         entityId: plan.id,
         newValue: {
           weekStart: plan.weekStart,
-          phase: "plan",
+          phase: plan.phase,
           version: plan.version + 1,
           ...(plan.submittedAt
             ? { submission: content as Prisma.InputJsonObject, previousSubmission: plan.submission }
@@ -78,64 +94,91 @@ export async function linkTaskToPlan(
       },
     });
   };
-  if (previous?.weekStart && changedPeriod) {
-    const old = await db.opsWeeklyReport.findUnique({
-      where: {
-        staffId_weekStart_phase: {
-          staffId: previous.assignee,
-          weekStart: previous.weekStart,
-          phase: "plan",
-        },
-      },
-    });
-    if (
-      old &&
-      ((!old.submittedAt && !old.recalledAt) ||
-        now <= new Date(`${addDays(old.weekStart, 6)}T23:59:59.999+03:00`))
-    ) {
-      const submission = parse(weeklySubmissionSchema, old.submission);
-      if (submission.items.some((item) => (item.taskId ?? item.id) === task.id))
-        await write(
-          old,
-          {
-            ...submission,
-            items: submission.items.filter((item) => (item.taskId ?? item.id) !== task.id),
+  const oldReportWeek = previous ? (previous.weekStart ?? weekOf(previous.due)) : undefined;
+  const reportWeek = task.weekStart ?? weekOf(task.due);
+  if (previous) {
+    for (const phase of ["plan", "report"] as const) {
+      const previousWeek = phase === "plan" ? previous.weekStart : oldReportWeek;
+      const moved =
+        phase === "plan"
+          ? changedPeriod
+          : oldReportWeek !== reportWeek || previous.assignee !== task.assignee;
+      if (!previousWeek || (!deleted && !moved)) continue;
+      const old = await db.opsWeeklyReport.findUnique({
+        where: {
+          staffId_weekStart_phase: {
+            staffId: previous.assignee,
+            weekStart: previousWeek,
+            phase,
           },
-          false,
-        );
+        },
+      });
+      if (
+        old &&
+        old.id !== excludeId &&
+        ((!old.submittedAt && !old.recalledAt) ||
+          now <= new Date(`${addDays(old.weekStart, 6)}T23:59:59.999+03:00`))
+      ) {
+        const submission = parse(weeklySubmissionSchema, old.submission);
+        if (submission.items.some((item) => (item.taskId ?? item.id) === task.id))
+          await write(
+            old,
+            {
+              ...submission,
+              items: submission.items.filter((item) => (item.taskId ?? item.id) !== task.id),
+            },
+            false,
+          );
+      }
     }
   }
-  if (!task.weekStart) return undefined;
-  const plan = await db.opsWeeklyReport.findUnique({
-    where: {
-      staffId_weekStart_phase: { staffId: task.assignee, weekStart: task.weekStart, phase: "plan" },
-    },
-  });
-  if (!plan) return "waiting" as const;
-  const submission = parse(weeklySubmissionSchema, plan.submission);
-  if (submission.items.some((item) => (item.taskId ?? item.id) === task.id))
-    return "linked" as const;
-  if (
-    (plan.submittedAt || plan.recalledAt) &&
-    now > new Date(`${addDays(plan.weekStart, 6)}T23:59:59.999+03:00`)
-  )
-    throw new ConflictException(
-      "This plan's editing window has closed. Choose another period or save without a reporting period.",
-    );
-  if (submission.items.length >= 100)
-    throw new ConflictException("This weekly plan already has 100 tasks. Choose another period.");
-  const item = parse(weeklyItemSchema, {
-    id: task.id,
-    taskId: task.id,
-    title: task.title,
-    detail: "",
-    status: "planned",
-    due: task.due,
-    priority: task.priority,
-    source: task.source ?? "ad_hoc",
-    business: task.business ?? "b0",
-    subtasks: task.subtasks ?? [],
-  });
-  await write(plan, { ...submission, items: [...submission.items, item] }, true);
-  return "added" as const;
+  if (deleted) return undefined;
+  let result: "waiting" | "linked" | "added" | undefined = task.weekStart ? "waiting" : undefined;
+  for (const phase of ["plan", "report"] as const) {
+    const weekStart = phase === "plan" ? task.weekStart : reportWeek;
+    if (!weekStart) continue;
+    const plan = await db.opsWeeklyReport.findUnique({
+      where: {
+        staffId_weekStart_phase: { staffId: task.assignee, weekStart, phase },
+      },
+    });
+    if (!plan) continue;
+    if (phase === "plan") result = "linked";
+    if (plan.id === excludeId) continue;
+    const submission = parse(weeklySubmissionSchema, plan.submission);
+    const existing = submission.items.find((item) => (item.taskId ?? item.id) === task.id);
+    const closed = now > new Date(`${addDays(plan.weekStart, 6)}T23:59:59.999+03:00`);
+    if (closed && (plan.submittedAt || plan.recalledAt)) {
+      if (phase === "plan" && changedPeriod && !existing)
+        throw new ConflictException(
+          "This plan's editing window has closed. Choose another period or save without a reporting period.",
+        );
+      continue;
+    }
+    if (!existing && submission.items.length >= 100)
+      throw new ConflictException(
+        "This weekly submission already has 100 tasks. Choose another period.",
+      );
+    const item = parse(weeklyItemSchema, {
+      ...existing,
+      id: existing?.id ?? task.id,
+      taskId: task.id,
+      title: task.title,
+      detail: task.description ?? "",
+      ...(phase === "report" ? { outcome: existing?.outcome ?? existing?.detail ?? "" } : {}),
+      status: phase === "plan" && task.status === "To do" ? "planned" : taskOutcome(task.status),
+      due: task.due,
+      priority: task.priority,
+      source: task.source ?? "ad_hoc",
+      business: task.business ?? "b0",
+      subtasks: task.subtasks ?? [],
+    });
+    const items = existing
+      ? submission.items.map((old) => (old.id === existing.id ? item : old))
+      : [...submission.items, item];
+    if (JSON.stringify(items) !== JSON.stringify(submission.items))
+      await write(plan, { ...submission, items }, !existing);
+    if (phase === "plan" && !existing) result = "added";
+  }
+  return result;
 }

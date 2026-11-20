@@ -83,6 +83,19 @@ export class BlogService {
     return this.prisma.blogPost.findMany({ orderBy: { createdAt: "desc" } });
   }
 
+  async findPage(requestedPage: number, limit: number) {
+    return this.prisma.$transaction(async (db) => {
+      const total = await db.blogPost.count();
+      const page = Math.min(requestedPage, Math.max(1, Math.ceil(total / limit)));
+      const items = await db.blogPost.findMany({
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * limit,
+        take: limit,
+      });
+      return { items, total, page, limit };
+    });
+  }
+
   findOne(id: string) {
     return this.prisma.blogPost.findUniqueOrThrow({ where: { id } });
   }

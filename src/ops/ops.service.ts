@@ -14,7 +14,8 @@ import { z } from "zod";
 import { PrismaService } from "../prisma/prisma.service";
 import { EmailService } from "../notifications/email/email.service";
 import { StorageService } from "../storage/storage.service";
-import { sanitizeRichText } from "../common/sanitize";
+import { sanitizeRichText, stripHtml } from "../common/sanitize";
+import { sanitizeDeliverables } from "./task-sanitization";
 import { hashToken } from "./ops-auth.service";
 import { auditActor, loadOpsSession } from "./ops-session";
 import { OpsRepository, type OpsTransaction } from "./ops.repository";
@@ -129,6 +130,20 @@ export class OpsService {
     scheduledId?: string,
   ) {
     const record = parse(schemas[collection] as unknown as z.ZodType<Records[K]>, value);
+    const richFields = new Set(
+      collection === "tasks"
+        ? ["description"]
+        : collection === "projects"
+          ? ["summary"]
+          : collection === "reports"
+            ? ["progress", "blockers", "next"]
+            : [],
+    );
+    for (const field of ["summary", "description", "progress", "blockers", "next"]) {
+      const values = record as unknown as Record<string, unknown>;
+      if (!richFields.has(field) && typeof values[field] === "string")
+        values[field] = stripHtml(values[field]);
+    }
     if (
       scheduledId &&
       (collection !== "reports" ||
@@ -150,9 +165,17 @@ export class OpsService {
         throw new BadRequestException("Project summary must contain readable content.");
     } else if (collection === "tasks") {
       const task = record as Records["tasks"];
+      task.title = stripHtml(task.title);
       task.description = sanitizeRichText(task.description) ?? undefined;
+      task.subtasks = sanitizeDeliverables(task.subtasks);
       if (task.weekStart) task.weekStart = weekOf(task.weekStart);
+    } else if (collection === "reports") {
+      const report = record as Records["reports"];
+      report.progress = sanitizeRichText(report.progress) ?? undefined;
+      report.blockers = sanitizeRichText(report.blockers) ?? undefined;
+      report.next = sanitizeRichText(report.next) ?? undefined;
     }
+    parse(schemas[collection] as unknown as z.ZodType<Records[K]>, record);
     return this.mutate(
       viewer,
       revision,
@@ -360,6 +383,16 @@ export class OpsService {
           ...new Set([file.storageKey, ...file.versions.map((version) => version.storageKey)]),
         );
       } else if (collection === "tasks") {
+        const task = previous as Records["tasks"];
+        await linkTaskToPlan(
+          db,
+          viewer,
+          { ...task, weekStart: undefined },
+          task,
+          new WeeklyClock(this.config).now(),
+          undefined,
+          true,
+        );
         const attachments = await db.opsDocument.findMany({
           where: { task: id },
           select: { id: true, storageKey: true },
