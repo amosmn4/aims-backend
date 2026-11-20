@@ -19,6 +19,9 @@ import { hashToken } from "./ops-auth.service";
 import { auditActor, loadOpsSession } from "./ops-session";
 import { OpsRepository, type OpsTransaction } from "./ops.repository";
 import { weeklySubmissionSchema } from "./weekly/weekly.schemas";
+import { linkTaskToPlan } from "./weekly/weekly-plan-tasks";
+import { weekOf } from "./weekly/weekly-calendar";
+import { WeeklyClock } from "./weekly/weekly-clock";
 import {
   assertCeo,
   assertSystemAdmin,
@@ -148,6 +151,7 @@ export class OpsService {
     } else if (collection === "tasks") {
       const task = record as Records["tasks"];
       task.description = sanitizeRichText(task.description) ?? undefined;
+      if (task.weekStart) task.weekStart = weekOf(task.weekStart);
     }
     return this.mutate(
       viewer,
@@ -249,6 +253,16 @@ export class OpsService {
         };
         validateWorkspace(next);
         await this.repository.save(db, collection, record);
+        const planLink =
+          collection === "tasks"
+            ? await linkTaskToPlan(
+                db,
+                viewer,
+                record as Records["tasks"],
+                previous as Records["tasks"] | undefined,
+                new WeeklyClock(this.config).now(),
+              )
+            : undefined;
         await this.audit(
           db,
           viewer,
@@ -257,7 +271,7 @@ export class OpsService {
           previous,
           record,
         );
-        return { id: record.id };
+        return { id: record.id, ...(planLink ? { planLink } : {}) };
       },
       scheduledId,
     );

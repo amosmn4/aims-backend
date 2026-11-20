@@ -15,6 +15,7 @@ import { parse, type Viewer } from "../ops.schemas";
 import { auditActor, loadOpsSession } from "../ops-session";
 import { WeeklyClock } from "./weekly-clock";
 import { syncWeeklyTasks } from "./weekly-tasks";
+import { periodPlanItems } from "./weekly-plan-tasks";
 import { reportingWorkspace } from "./reporting-workspace";
 import {
   addDays,
@@ -473,6 +474,20 @@ export class WeeklyService {
           start: row.start < week ? week : row.start,
           end: row.end > addDays(week, 6) ? addDays(week, 6) : row.end,
         }));
+        const existing = await tx.opsWeeklyReport.findUnique({
+          where: { staffId_weekStart_phase: { staffId: viewer.id, weekStart: week, phase } },
+        });
+        if (phase === "plan") {
+          const tasks = await tx.opsTask.findMany({
+            where: { assignee: viewer.id, weekStart: week },
+            orderBy: [{ due: "asc" }, { id: "asc" }],
+          });
+          const previous = existing ? parse(weeklySubmissionSchema, existing.submission).items : [];
+          dto.submission = parse(weeklySubmissionSchema, {
+            ...dto.submission,
+            items: periodPlanItems(tasks, dto.submission.items, previous),
+          });
+        }
         const businessIds = [...new Set(dto.submission.items.map((item) => item.business ?? "b0"))];
         for (const business of businessIds) {
           if (
@@ -485,9 +500,6 @@ export class WeeklyService {
           )
             throw new ForbiddenException("Choose an assigned business for weekly tasks.");
         }
-        const existing = await tx.opsWeeklyReport.findUnique({
-          where: { staffId_weekStart_phase: { staffId: viewer.id, weekStart: week, phase } },
-        });
         const attachmentIds = dto.submission.attachments ?? [];
         if (attachmentIds.length) {
           const documents = await tx.opsDocument.findMany({
@@ -656,6 +668,22 @@ export class WeeklyService {
           returnedAt: null,
           returnComment: null,
         };
+        if (phase === "plan" && existing) {
+          const removed = parse(weeklySubmissionSchema, existing.submission).items.filter(
+            (item) =>
+              !dto.submission.items.some(
+                (next) => (next.taskId ?? next.id) === (item.taskId ?? item.id),
+              ),
+          );
+          await tx.opsTask.updateMany({
+            where: {
+              id: { in: removed.map((item) => item.taskId ?? item.id) },
+              assignee: viewer.id,
+              weekStart: week,
+            },
+            data: { weekStart: null },
+          });
+        }
         if (dto.submit) {
           await syncWeeklyTasks(tx, viewer.id, week, phase, dto.submission);
         }

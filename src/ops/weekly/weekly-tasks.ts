@@ -43,7 +43,7 @@ export async function syncWeeklyTasks(
         where: { id },
         data: {
           title: item.title,
-          description: item.detail,
+          ...(item.taskId ? {} : { description: item.detail }),
           ...(item.due ? { due: item.due } : {}),
           ...(item.priority ? { priority: item.priority } : {}),
         },

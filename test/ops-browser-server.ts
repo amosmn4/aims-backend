@@ -157,7 +157,7 @@ async function start() {
     });
     await db.opsTask.deleteMany({
       where: {
-        weekStart: { not: null },
+        OR: [{ weekStart: { not: null } }, { due: { gte: "2026-11-16", lte: "2026-11-29" } }],
         source: { not: "project" },
         owner: { user: { email: { in: ["staff@ops-verify.local", "it@ops-verify.local"] } } },
       },

@@ -26,6 +26,7 @@ import { OpsService } from "./ops.service";
 import type { Workspace } from "./ops.schemas";
 import { WeeklyController } from "./weekly/weekly.controller";
 import { WeeklyService } from "./weekly/weekly.service";
+import { weeklySubmissionSchema } from "./weekly/weekly.schemas";
 import { WeeklyClock } from "./weekly/weekly-clock";
 import { WeeklyDeliveryService } from "./weekly/weekly-delivery.service";
 import { OpsImpersonationInterceptor } from "./ops-impersonation.interceptor";
@@ -38,6 +39,7 @@ jest.mock("sanitize-html", () => {
 const databaseUrl = process.env.OPS_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
 const password = "OpsVerification2026!";
+const parseWeekly = (value: unknown) => weeklySubmissionSchema.parse(value);
 jest.setTimeout(30000);
 
 @Controller("legacy-probe")
@@ -1306,6 +1308,133 @@ suite("Ops HTTP API with isolated MySQL", () => {
       )
     ).json();
     expect(ceoDrafts.total).toBe(0);
+  });
+
+  it("links optional task periods to current or future plans with ownership, history and version checks", async () => {
+    const user = await prisma.user.create({
+      data: {
+        email: `period-${randomUUID()}@ops.test`,
+        passwordHash: await bcrypt.hash(password, 4),
+      },
+    });
+    const staff = await prisma.opsStaff.create({
+      data: { userId: user.id, name: "Period linking", title: "Consultant", dept: "hr" },
+    });
+    const token = (
+      await (
+        await call("ops/auth/login", undefined, {
+          method: "POST",
+          body: JSON.stringify({ email: user.email, password }),
+        })
+      ).json()
+    ).accessToken;
+    const week = "2026-11-23";
+    const task = {
+      id: randomUUID(),
+      title: "Work before a plan exists",
+      description: "Keep these original task notes",
+      project: "",
+      assignee: staff.id,
+      due: "2026-11-27",
+      weekStart: "2026-11-25",
+      priority: "High",
+      status: "To do",
+      source: "ad_hoc",
+      business: "b0",
+    };
+    expect((await change(`records/tasks/${task.id}`, task, token)).planLink).toBe("waiting");
+    expect((await prisma.opsTask.findUniqueOrThrow({ where: { id: task.id } })).weekStart).toBe(
+      week,
+    );
+    const otherTask = await prisma.opsTask.create({
+      data: {
+        title: "Another person's task",
+        assignee: outsiderId,
+        weekStart: week,
+        due: "2026-11-27",
+        priority: "Low",
+        status: "To do",
+        source: "ad_hoc",
+      },
+    });
+    const savePlan = (version: number, submission: unknown, submit = false) =>
+      call(`ops/weekly/reports/${week}/plan`, token, {
+        method: "PUT",
+        body: JSON.stringify({ version, submit, submission }),
+      });
+    const draft = await savePlan(0, { title: "Period plan", summary: "Linked work", items: [] });
+    expect(draft.status).toBe(200);
+    const saved = await draft.json();
+    const first = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: saved.id } });
+    const firstBody = parseWeekly(first.submission);
+    expect(firstBody.items.map((item) => item.taskId)).toEqual([task.id]);
+    expect(firstBody.items.some((item) => item.taskId === otherTask.id)).toBe(false);
+    const second = {
+      ...task,
+      id: randomUUID(),
+      title: "Work added to an existing draft",
+      weekStart: week,
+    };
+    expect((await change(`records/tasks/${second.id}`, second, token)).planLink).toBe("added");
+    expect((await savePlan(first.version, first.submission)).status).toBe(409);
+    let current = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: first.id } });
+    expect(parseWeekly(current.submission).items).toHaveLength(2);
+    await change(`records/tasks/${task.id}`, { ...task, weekStart: week, status: "Done" }, token);
+    expect(
+      (await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: first.id } })).version,
+    ).toBe(current.version);
+    expect((await savePlan(current.version, current.submission, true)).status).toBe(200);
+    const canonical = await prisma.opsTask.findUniqueOrThrow({ where: { id: task.id } });
+    expect(canonical.description).toContain("Keep these original task notes");
+    expect(canonical.status).toBe("Done");
+    current = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: first.id } });
+    const submittedAt = current.submittedAt;
+    const third = { ...task, id: randomUUID(), weekStart: week, title: "Added after submission" };
+    expect((await change(`records/tasks/${third.id}`, third, token)).planLink).toBe("added");
+    current = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: first.id } });
+    expect(current.submittedAt).toEqual(submittedAt);
+    const audit = await prisma.auditLog.findFirstOrThrow({
+      where: { entityType: "ops-weekly", entityId: current.id, action: "ops.weekly.tasks_added" },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(
+      (audit.newValue as { previousSubmission: { items: unknown[] } }).previousSubmission.items,
+    ).toHaveLength(2);
+    const removed = {
+      ...parseWeekly(current.submission),
+      items: parseWeekly(current.submission).items.filter((item) => item.taskId !== task.id),
+    };
+    expect((await savePlan(current.version, removed, true)).status).toBe(200);
+    expect(
+      (await prisma.opsTask.findUniqueOrThrow({ where: { id: task.id } })).weekStart,
+    ).toBeNull();
+    current = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: first.id } });
+    expect(parseWeekly(current.submission).items.some((item) => item.taskId === task.id)).toBe(
+      false,
+    );
+    await change(`records/tasks/${second.id}`, { ...second, weekStart: undefined }, token);
+    current = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: first.id } });
+    expect(parseWeekly(current.submission).items.some((item) => item.taskId === second.id)).toBe(
+      false,
+    );
+    const standalone = { ...third, id: randomUUID(), weekStart: undefined };
+    expect(
+      (await change(`records/tasks/${standalone.id}`, standalone, token)).planLink,
+    ).toBeUndefined();
+    const foreign = { ...third, id: randomUUID(), assignee: outsiderId };
+    await change(`records/tasks/${foreign.id}`, foreign, token, "PUT", 403);
+    await prisma.opsWeeklyReport.create({
+      data: {
+        staffId: staff.id,
+        weekStart: "2026-11-09",
+        phase: "plan",
+        submittedAt: new Date("2026-11-09T08:00:00Z"),
+        submission: { summary: "Closed plan", items: [] },
+      },
+    });
+    const closed = { ...third, id: randomUUID(), weekStart: "2026-11-09" };
+    await change(`records/tasks/${closed.id}`, closed, token, "PUT", 409);
+    expect(await prisma.opsTask.findUnique({ where: { id: closed.id } })).toBeNull();
   });
 
   it("changes passwords, revokes other Ops sessions and logs out the current session", async () => {
