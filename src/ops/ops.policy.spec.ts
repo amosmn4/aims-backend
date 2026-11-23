@@ -135,6 +135,27 @@ describe("Ops permission and workflow boundaries", () => {
     expect(visibleWorkspace(viewer, data).clientRequests).toHaveLength(1);
   });
 
+  it("includes a request's client without granting client write access or unrelated clients", () => {
+    const data = workspace();
+    const client: Records["clients"] = {
+      id: "client",
+      name: "Assigned request client",
+      contact: "Contact",
+      services: ["HR"],
+      assignees: ["other"],
+    };
+    data.clients = [client, { ...client, id: "unrelated" }];
+    data.clientRequests = [
+      { ...data.clientRequests[0]!, client: client.id, prospectClientName: undefined },
+    ];
+    expect(visibleWorkspace(viewer, data).clients.map((row) => row.id)).toEqual(["client"]);
+    expect(() => authorizeWrite(viewer, "clients", client, client, data)).toThrow("permission");
+    data.clientRequests[0]!.handler = "other";
+    expect(visibleWorkspace(viewer, data).clients).toEqual([]);
+    data.clientRequests[0]!.assignedDept = viewer.dept!;
+    expect(visibleWorkspace(viewer, data).clients.map((row) => row.id)).toEqual(["client"]);
+  });
+
   it("allows own standalone urgent tasks and denies assigning someone else's work", () => {
     const data = workspace();
     const task = {

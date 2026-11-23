@@ -119,7 +119,8 @@ export function visibleWorkspace(viewer: Viewer, data: Workspace): Workspace {
         client.assignees?.includes(viewer.id) ||
         (!!viewer.dept && client.assignedDept === viewer.dept) ||
         businessGrant(viewer, data, client.business)?.manage ||
-        projects.some((project) => project.client === client.id),
+        projects.some((project) => project.client === client.id) ||
+        requests.some((request) => request.client === client.id),
     ),
     tasks: data.tasks.filter(
       (task) =>
