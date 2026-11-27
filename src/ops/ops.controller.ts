@@ -179,8 +179,17 @@ export class OpsController {
   }
 
   @Get("tasks/:id/delegation-recipients")
-  delegationRecipients(@OpsViewer() viewer: Viewer, @Param("id") id: string) {
-    return this.ops.delegationRecipients(viewer, id);
+  delegationRecipients(
+    @OpsViewer() viewer: Viewer,
+    @Param("id") id: string,
+    @Query("project") project?: string,
+    @Query("business") business?: string,
+  ) {
+    return this.ops.delegationRecipients(
+      viewer,
+      id,
+      project !== undefined || business !== undefined ? { project, business } : undefined,
+    );
   }
 
   @Post("tasks/:id/delegate")

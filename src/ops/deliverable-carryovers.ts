@@ -8,7 +8,7 @@ import { addDays, nairobiDate, weekOf } from "./weekly/weekly-calendar";
 import { linkTaskToPlan } from "./weekly/weekly-plan-tasks";
 import { weeklySubmissionSchema } from "./weekly/weekly.schemas";
 
-type ChecklistNode = {
+export type ChecklistNode = {
   start: number;
   end: number;
   openEnd: number;
@@ -71,7 +71,7 @@ export function carryTaskId(source: CarrySource, week: string, target: string) {
   return `${value.slice(0, 8)}-${value.slice(8, 12)}-5${value.slice(13, 16)}-a${value.slice(17, 20)}-${value.slice(20)}`;
 }
 
-function removeNodes(html: string, rows: ChecklistNode[]) {
+export function removeNodes(html: string, rows: ChecklistNode[]) {
   const outer = rows.filter(
     (row) =>
       !rows.some((other) => other !== row && other.start < row.start && other.end >= row.end),
@@ -91,6 +91,7 @@ function carryFragment(html: string, root: ChecklistNode, source: CarrySource, w
         node.start > 0 &&
         (node.status === "completed" ||
           node.status === "cancelled" ||
+          node.status === "delegated" ||
           (moving(node) && weekOf(node.date) !== weekOf(root.date))),
     ),
   );

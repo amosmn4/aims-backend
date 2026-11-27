@@ -50,7 +50,13 @@ function fixture() {
       request = { id: requestId, status: "pending", ...(query as { data: object }).data };
       return structuredClone(request);
     });
-  const update = jest.fn<(...args: unknown[]) => Promise<object>>().mockResolvedValue({});
+  const update = jest
+    .fn<(...args: unknown[]) => Promise<object>>()
+    .mockImplementation(async (query) => {
+      Object.assign(task, (query as { data: object }).data);
+      return task;
+    });
+  const createTask = jest.fn<(...args: unknown[]) => Promise<object>>().mockResolvedValue({});
   const notify = jest.fn<(...args: unknown[]) => Promise<object>>().mockResolvedValue({});
   const planUpdate = jest
     .fn<(...args: unknown[]) => Promise<{ count: number }>>()
@@ -60,6 +66,7 @@ function fixture() {
     .mockResolvedValue([{ id: recipientId, name: "Recipient" }]);
   const db = {
     opsTaskDelegation: {
+      findMany: async () => (request?.status === "pending" ? [structuredClone(request)] : []),
       findUnique: async () => (request ? structuredClone(request) : null),
       create,
       updateMany: async (query: { data: object }) => {
@@ -75,7 +82,7 @@ function fixture() {
         user: { id: where.id, isActive: true },
       }),
     },
-    opsTask: { update },
+    opsTask: { update, create: createTask },
     opsWeeklyReport: {
       findUnique: async (query: {
         where: { staffId_weekStart_phase: { staffId: string; phase: string } };
@@ -97,7 +104,12 @@ function fixture() {
   };
   const service = new OpsService(
     db as never,
-    {} as never,
+    {
+      save: async (_db: unknown, _collection: string, value: typeof task) => {
+        data.tasks = [...data.tasks.filter((row) => row.id !== value.id), value as never];
+        return value;
+      },
+    } as never,
     new ConfigService({ NODE_ENV: "test", OPS_WEEKLY_TEST_NOW: "2026-11-27T10:00:00Z" }),
     {} as never,
     {} as never,
@@ -114,6 +126,7 @@ function fixture() {
     data,
     create,
     update,
+    createTask,
     notify,
     planUpdate,
     findRecipients,
@@ -122,6 +135,102 @@ function fixture() {
 }
 
 describe("Task delegation acceptance", () => {
+  it("rejects a draft source that reuses another staff member's task identifier with different casing", async () => {
+    const { service, task, create } = fixture();
+    task.id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    task.assignee = recipientId;
+    const source = {
+      ...task,
+      id: task.id.toUpperCase(),
+      assignee: senderId,
+      description:
+        '<ul data-type="taskList"><li data-type="taskItem" data-did="part" data-checked="false"><div><p>References</p></div></li></ul>',
+    };
+    await expect(
+      service.delegateTask(
+        sender,
+        source.id,
+        { assignee: recipientId, deliverableId: "part", source },
+        1,
+      ),
+    ).rejects.toThrow("not found");
+    expect(create).not.toHaveBeenCalled();
+    expect(task.assignee).toBe(recipientId);
+  });
+  it("offers one deliverable from a new draft without publishing or replacing the saved weekly plan", async () => {
+    const { service, task, data, request, planUpdate } = fixture();
+    const source = {
+      ...task,
+      id: "10000000-0000-4000-8000-000000000005",
+      description:
+        '<ul data-type="taskList"><li data-type="taskItem" data-did="selected" data-checked="false"><div><p>References</p></div></li><li data-type="taskItem" data-did="other" data-status="forwarded" data-target-date="2026-12-04" data-checked="false"><div><p>Other draft work</p></div></li></ul>',
+    };
+    await service.delegateTask(
+      sender,
+      source.id,
+      { assignee: recipientId, deliverableId: "selected", source },
+      1,
+    );
+    const saved = data.tasks.find((row) => row.id === source.id)!;
+    expect(saved.description).toContain("References");
+    expect(saved.description).not.toContain("Other draft work");
+    expect(saved.requiresDeliverables).toBe(true);
+    expect(saved.assignee).toBe(senderId);
+    expect(request()).toMatchObject({
+      status: "pending",
+      taskId: source.id,
+      deliverableId: "selected",
+    });
+    expect(planUpdate).not.toHaveBeenCalled();
+  });
+  it("delegates only the selected deliverable after acceptance and leaves the parent with its sender", async () => {
+    const { service, task, createTask, request, planUpdate } = fixture();
+    const row = (id: string, title: string) =>
+      `<li data-type="taskItem" data-did="${id}" data-status="blocked" data-checked="false"><div><p>${title}</p><ul><li>Keep nested instructions</li></ul></div></li>`;
+    task.description = `<ul data-type="taskList">${row("one", "References")}${row("two", "Approval")}</ul>`;
+    task.status = "Done";
+    await service.delegateTask(sender, taskId, { assignee: recipientId, deliverableId: "one" }, 1);
+    expect(request()).toMatchObject({
+      deliverableId: "one",
+      deliverableTitle: "References",
+      pendingTaskId: null,
+      pendingDeliverableKey: `${taskId}:one`,
+    });
+    expect(createTask).not.toHaveBeenCalled();
+    expect(task.description).not.toContain('data-status="delegated"');
+    await service.respondToDelegation(recipient, requestId, { decision: "accepted" }, 2);
+    expect(task.assignee).toBe(senderId);
+    expect(task.status).toBe("Done");
+    expect(task.description).toContain('data-status="delegated"');
+    const target = (createTask.mock.calls[0]![0] as { data: { description: string } }).data;
+    expect(target).toMatchObject({
+      id: requestId,
+      assignee: recipientId,
+      status: "To do",
+      requiresDeliverables: true,
+    });
+    expect(target.description).toContain("References");
+    expect(target.description).toContain("Keep nested instructions");
+    expect(target.description).not.toContain("Approval");
+    expect(planUpdate).toHaveBeenCalled();
+    await service.respondToDelegation(recipient, requestId, { decision: "accepted" }, 3);
+    expect(createTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("protects pending deliverables from overlapping requests and acceptance after their content changes", async () => {
+    const { service, task, createTask } = fixture();
+    task.description =
+      '<ul data-type="taskList"><li data-type="taskItem" data-did="one" data-checked="false"><div><p>References</p></div></li></ul>';
+    await service.delegateTask(sender, taskId, { assignee: recipientId, deliverableId: "one" }, 1);
+    await expect(
+      service.delegateTask(sender, taskId, { assignee: recipientId, deliverableId: "one" }, 2),
+    ).rejects.toThrow("pending");
+    task.description = task.description.replace("References", "Changed instructions");
+    await expect(
+      service.respondToDelegation(recipient, requestId, { decision: "accepted" }, 2),
+    ).rejects.toThrow("sender changed");
+    expect(createTask).not.toHaveBeenCalled();
+  });
   it("lists active staff by business and project without requiring access to other accounts", async () => {
     const { service, task, findRecipients } = fixture();
     task.project = "project";

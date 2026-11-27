@@ -463,24 +463,25 @@ model OpsWeeklySettings {
 }
 
 model OpsWeeklyReport {
-  id            String         @id @default(uuid()) @db.Char(36)
-  staffId       String         @map("staff_id") @db.Char(36)
-  weekStart     String         @map("week_start") @db.Char(10)
-  phase         OpsWeeklyPhase
-  version       Int            @default(1)
-  submission    Json
-  submittedAt   DateTime?      @map("submitted_at")
-  lateReason    String?        @map("late_reason") @db.Text
-  recalledAt    DateTime?      @map("recalled_at")
-  reviewedAt    DateTime?      @map("reviewed_at")
-  reviewerId    String?        @map("reviewer_id") @db.Char(36)
-  reviewComment String?        @map("review_comment") @db.Text
-  returnedAt    DateTime?      @map("returned_at")
-  returnComment String?        @map("return_comment") @db.Text
-  createdAt     DateTime       @default(now()) @map("created_at")
-  updatedAt     DateTime       @updatedAt @map("updated_at")
-  author        OpsStaff       @relation("OpsWeeklyAuthor", fields: [staffId], references: [id], onDelete: Restrict)
-  reviewer      OpsStaff?      @relation("OpsWeeklyReviewer", fields: [reviewerId], references: [id], onDelete: Restrict)
+  id               String         @id @default(uuid()) @db.Char(36)
+  staffId          String         @map("staff_id") @db.Char(36)
+  weekStart        String         @map("week_start") @db.Char(10)
+  phase            OpsWeeklyPhase
+  version          Int            @default(1)
+  submission       Json
+  submittedAt      DateTime?      @map("submitted_at")
+  firstSubmittedAt DateTime?      @map("first_submitted_at")
+  lateReason       String?        @map("late_reason") @db.Text
+  recalledAt       DateTime?      @map("recalled_at")
+  reviewedAt       DateTime?      @map("reviewed_at")
+  reviewerId       String?        @map("reviewer_id") @db.Char(36)
+  reviewComment    String?        @map("review_comment") @db.Text
+  returnedAt       DateTime?      @map("returned_at")
+  returnComment    String?        @map("return_comment") @db.Text
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+  author           OpsStaff       @relation("OpsWeeklyAuthor", fields: [staffId], references: [id], onDelete: Restrict)
+  reviewer         OpsStaff?      @relation("OpsWeeklyReviewer", fields: [reviewerId], references: [id], onDelete: Restrict)
 
   @@unique([staffId, weekStart, phase])
   @@index([weekStart, phase, submittedAt])
@@ -584,23 +585,24 @@ model OpsProjectDepartment {
 }
 
 model OpsTask {
-  id          String        @id @default(uuid()) @db.Char(36)
-  title       String        @db.VarChar(200)
-  description String?       @db.Text
-  project     String?       @db.Char(36)
-  assignee    String        @db.Char(36)
-  due         String        @db.Char(10)
-  priority    String        @db.VarChar(20)
-  status      String        @db.VarChar(20)
-  ceoComment  String?       @map("ceo_comment") @db.Text
-  business    String        @default("b0") @db.VarChar(36)
-  weekStart   String?       @map("week_start") @db.Char(10)
-  source      String        @default("project") @db.VarChar(20)
-  subtasks    Json?
-  parent      OpsProject?   @relation(fields: [project], references: [id], onDelete: Restrict)
-  owner       OpsStaff      @relation(fields: [assignee], references: [id], onDelete: Restrict)
-  documents   OpsDocument[]
-  delegations OpsTaskDelegation[]
+  id                   String              @id @default(uuid()) @db.Char(36)
+  title                String              @db.VarChar(200)
+  description          String?             @db.Text
+  project              String?             @db.Char(36)
+  assignee             String              @db.Char(36)
+  due                  String              @db.Char(10)
+  priority             String              @db.VarChar(20)
+  status               String              @db.VarChar(20)
+  ceoComment           String?             @map("ceo_comment") @db.Text
+  business             String              @default("b0") @db.VarChar(36)
+  weekStart            String?             @map("week_start") @db.Char(10)
+  source               String              @default("project") @db.VarChar(20)
+  subtasks             Json?
+  requiresDeliverables Boolean             @default(true) @map("requires_deliverables")
+  parent               OpsProject?         @relation(fields: [project], references: [id], onDelete: Restrict)
+  owner                OpsStaff            @relation(fields: [assignee], references: [id], onDelete: Restrict)
+  documents            OpsDocument[]
+  delegations          OpsTaskDelegation[]
 
   @@index([project])
   @@index([assignee])
@@ -608,19 +610,23 @@ model OpsTask {
 }
 
 model OpsTaskDelegation {
-  id            String    @id @default(uuid()) @db.Char(36)
-  taskId        String    @map("task_id") @db.Char(36)
-  pendingTaskId String?   @unique @map("pending_task_id") @db.Char(36)
-  taskTitle     String    @map("task_title") @db.VarChar(200)
-  senderId      String    @map("sender_id") @db.Char(36)
-  recipientId   String    @map("recipient_id") @db.Char(36)
-  weekStart     String    @map("week_start") @db.Char(10)
-  status        String    @default("pending") @db.VarChar(20)
-  createdAt     DateTime  @default(now()) @map("created_at")
-  respondedAt   DateTime? @map("responded_at")
-  task          OpsTask   @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  sender        OpsStaff  @relation("OpsDelegationSender", fields: [senderId], references: [id], onDelete: Restrict)
-  recipient     OpsStaff  @relation("OpsDelegationRecipient", fields: [recipientId], references: [id], onDelete: Restrict)
+  id                    String    @id @default(uuid()) @db.Char(36)
+  taskId                String    @map("task_id") @db.Char(36)
+  pendingTaskId         String?   @unique @map("pending_task_id") @db.Char(36)
+  deliverableId         String?   @map("deliverable_id") @db.VarChar(100)
+  deliverableTitle      String?   @map("deliverable_title") @db.VarChar(200)
+  deliverableSnapshot   String?   @map("deliverable_snapshot") @db.Text
+  pendingDeliverableKey String?   @unique @map("pending_deliverable_key") @db.VarChar(140)
+  taskTitle             String    @map("task_title") @db.VarChar(200)
+  senderId              String    @map("sender_id") @db.Char(36)
+  recipientId           String    @map("recipient_id") @db.Char(36)
+  weekStart             String    @map("week_start") @db.Char(10)
+  status                String    @default("pending") @db.VarChar(20)
+  createdAt             DateTime  @default(now()) @map("created_at")
+  respondedAt           DateTime? @map("responded_at")
+  task                  OpsTask   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  sender                OpsStaff  @relation("OpsDelegationSender", fields: [senderId], references: [id], onDelete: Restrict)
+  recipient             OpsStaff  @relation("OpsDelegationRecipient", fields: [recipientId], references: [id], onDelete: Restrict)
 
   @@index([senderId, status])
   @@index([recipientId, status])

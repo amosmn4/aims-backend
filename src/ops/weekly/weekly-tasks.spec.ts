@@ -8,6 +8,39 @@ jest.mock("sanitize-html", () => {
 });
 
 describe("Weekly task materialization", () => {
+  it("closes a reported task while preserving thirteen completed deliverables and one forwarded outcome", async () => {
+    const create = jest.fn<(...args: unknown[]) => Promise<object>>().mockResolvedValue({});
+    const db = {
+      opsTask: { findUnique: async () => null, create },
+    } as unknown as Prisma.TransactionClient;
+    const rows = Array.from(
+      { length: 14 },
+      (_, index) =>
+        `<li data-type="taskItem" data-did="row${index}" data-status="${index === 13 ? "forwarded" : "completed"}" data-checked="${index !== 13}"${index === 13 ? ' data-target-date="2026-12-04"' : ""}><div><p>Deliverable ${index + 1}</p></div></li>`,
+    ).join("");
+    const report = {
+      summary: "Results",
+      items: [
+        {
+          id: "task",
+          title: "Recruitment",
+          detail: `<ul data-type="taskList">${rows}</ul>`,
+          outcome: "Accounted for",
+          status: "in_progress" as const,
+        },
+      ],
+      blockers: "",
+      nextWeek: "",
+      noWorkReason: "",
+    };
+    await syncWeeklyTasks(db, "staff", "2026-11-23", "report", report);
+    const saved = (create.mock.calls[0]![0] as { data: { status: string; description: string } })
+      .data;
+    expect(saved.status).toBe("Done");
+    expect(saved.description.match(/data-status="completed"/g)).toHaveLength(13);
+    expect(saved.description.match(/data-status="forwarded"/g)).toHaveLength(1);
+    expect(report.items[0]!.status).toBe("completed");
+  });
   const item = {
     id: "weekly-item",
     title: "Prepare results",
@@ -103,7 +136,7 @@ describe("Weekly task materialization", () => {
       where: { id: item.id },
       data: expect.objectContaining({
         description: expect.stringContaining('data-type="taskList"'),
-        status: "Blocked",
+        status: "Done",
         subtasks: [],
       }),
     });

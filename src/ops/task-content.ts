@@ -15,6 +15,7 @@ export const deliverableSchema = z
         "cancelled",
         "forwarded",
         "postponed",
+        "delegated",
       ])
       .optional(),
     targetDate: z
@@ -70,6 +71,7 @@ export const deliverableStatuses = [
   "cancelled",
   "forwarded",
   "postponed",
+  "delegated",
 ] as const;
 export type DeliverableStatus = (typeof deliverableStatuses)[number];
 export function checklistOutcomes(html = "") {
@@ -81,6 +83,7 @@ export function checklistOutcomes(html = "") {
     cancelled: 0,
     forwarded: 0,
     postponed: 0,
+    delegated: 0,
   };
   for (const tag of html.match(/<li\b[^>]*data-type="taskItem"[^>]*>/gi) ?? []) {
     const status = tag.match(/data-status="([a-z_]+)"/i)?.[1];
@@ -100,6 +103,27 @@ export function checklistSummary(html = "") {
     .map(([status, count]) => `${count} ${status.replaceAll("_", " ")}`)
     .join(" | ");
 }
+export function hasDeliverables(html = "") {
+  const rows =
+    html.match(/<li\b[^>]*data-type="taskItem"[^>]*>[\s\S]*?<p\b[^>]*>([\s\S]*?)<\/p>/gi) ?? [];
+  return (
+    rows.length > 0 &&
+    rows.every(
+      (row) =>
+        row
+          .replace(/^[\s\S]*?<p\b[^>]*>/, "")
+          .replace(/<[^>]*>|&nbsp;|&#160;|&#xA0;/gi, "")
+          .trim().length > 0,
+    )
+  );
+}
+export function reportTaskComplete(html = "") {
+  const counts = checklistOutcomes(html);
+  return checklistProgress(html).total > 0 && !counts.pending && !counts.in_progress;
+}
+export function submittedTaskStatus<T extends string>(html: string, fallback: T, closed: boolean) {
+  return closed && reportTaskComplete(html) ? "Done" : checklistStatus(html, fallback);
+}
 export function checklistStatus<T extends string>(
   html: string,
   fallback: T,
@@ -114,7 +138,12 @@ export function checklistStatus<T extends string>(
         ? "Cancelled"
         : counts.blocked > 0
           ? "Blocked"
-          : done || counts.forwarded || counts.postponed || counts.cancelled || counts.in_progress
+          : done ||
+              counts.forwarded ||
+              counts.postponed ||
+              counts.cancelled ||
+              counts.in_progress ||
+              counts.delegated
             ? "In progress"
             : "To do";
 }

@@ -28,6 +28,7 @@ export function periodPlanItems(
           source: task.source,
           business: task.business,
           subtasks: task.subtasks ?? [],
+          requiresDeliverables: task.requiresDeliverables,
         }),
       ),
   ];
@@ -45,6 +46,7 @@ type LinkedTask = {
   business?: string;
   status: string;
   subtasks?: unknown;
+  requiresDeliverables?: boolean;
 };
 
 export async function linkTaskToPlan(
@@ -168,6 +170,7 @@ export async function linkTaskToPlan(
       source: task.source ?? "ad_hoc",
       business: task.business ?? "b0",
       subtasks: task.subtasks ?? [],
+      requiresDeliverables: task.requiresDeliverables,
     });
     const items = existing
       ? submission.items.map((old) => (old.id === existing.id ? item : old))

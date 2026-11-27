@@ -16,16 +16,25 @@ import { EmailService } from "../notifications/email/email.service";
 import { StorageService } from "../storage/storage.service";
 import { sanitizeRichText, stripHtml } from "../common/sanitize";
 import { sanitizeTaskDescription } from "./task-sanitization";
-import { checklistStatus } from "./task-content";
+import { checklistStatus, submittedTaskStatus, hasDeliverables } from "./task-content";
 import { hashToken } from "./ops-auth.service";
 import { auditActor, loadOpsSession } from "./ops-session";
 import { OpsRepository, type OpsTransaction } from "./ops.repository";
-import { weeklySubmissionSchema } from "./weekly/weekly.schemas";
+import { weeklySubmissionSchema, weekSchema } from "./weekly/weekly.schemas";
 import { linkTaskToPlan } from "./weekly/weekly-plan-tasks";
 import { nairobiDate, weekOf } from "./weekly/weekly-calendar";
 import { WeeklyClock } from "./weekly/weekly-clock";
 import { delegationWeek, forwardTaskPeriod } from "./task-planning";
 import { syncDeliverableCarryovers } from "./deliverable-carryovers";
+import { checklistNodes } from "./deliverable-carryovers";
+import {
+  deliverableSelection,
+  delegatedDescription,
+  delegatedTaskDescription,
+  preserveDelegatedDescription,
+  requestedDeliverableDescription,
+  updateDelegatedDrafts,
+} from "./deliverable-delegation";
 import {
   assertCeo,
   assertSystemAdmin,
@@ -196,6 +205,24 @@ export class OpsService {
       async (db, data) => {
         const previous = (data[collection] as Records[K][]).find((row) => row.id === record.id);
         authorizeWrite(viewer, collection, record, previous, data);
+        if (collection === "tasks") {
+          const task = record as Records["tasks"];
+          const old = previous as Records["tasks"] | undefined;
+          task.description = preserveDelegatedDescription(
+            task.description ?? "",
+            old?.description ?? "",
+          );
+          task.requiresDeliverables = old ? (old.requiresDeliverables ?? false) : true;
+          if (task.requiresDeliverables && !hasDeliverables(task.description))
+            throw new BadRequestException(
+              "Add at least one named checklist deliverable before saving this task.",
+            );
+          task.status = submittedTaskStatus(
+            task.description ?? "",
+            task.status,
+            old?.status === "Done" && old.weekStart === task.weekStart,
+          );
+        }
         if (collection === "documents") {
           if (!previous) throw new BadRequestException("Use Upload document to attach a file.");
           const doc = record as Records["documents"];
@@ -495,11 +522,37 @@ export class OpsService {
     });
   }
 
-  async delegationRecipients(viewer: Viewer, id: string) {
+  async delegationRecipients(
+    viewer: Viewer,
+    id: string,
+    context?: { project?: string; business?: string },
+  ) {
     if (viewer.role !== "staff") throw new ForbiddenException("Staff access is required.");
     const { workspace } = await this.workspace(viewer);
-    const task = workspace.tasks.find((row) => row.id === id && row.assignee === viewer.id);
-    if (!task) throw new NotFoundException("Assigned task not found.");
+    const existing = workspace.tasks.find((row) => row.id.toLowerCase() === id.toLowerCase());
+    if (existing && existing.assignee !== viewer.id)
+      throw new NotFoundException("Assigned task not found.");
+    if (!existing && !context) throw new NotFoundException("Assigned task not found.");
+    const task =
+      existing ??
+      parse(
+        z
+          .object({
+            project: z.string().uuid().or(z.literal("")).optional(),
+            business: z.string().uuid().or(z.literal("b0")).optional(),
+          })
+          .strict(),
+        context,
+      );
+    if (
+      !existing &&
+      (!canReadBusiness(viewer, workspace, task.business) ||
+        (task.project &&
+          !workspace.projects.some(
+            (project) => project.id === task.project && project.members.includes(viewer.id),
+          )))
+    )
+      throw new ForbiddenException("Choose an assigned business and project for this deliverable.");
     return this.prisma.opsStaff.findMany({
       where: {
         id: { not: viewer.id },
@@ -519,17 +572,130 @@ export class OpsService {
   delegateTask(viewer: Viewer, id: string, value: unknown, revision: number) {
     if (viewer.role !== "staff")
       throw new ForbiddenException("Only staff can delegate their assigned tasks.");
-    const dto = parse(z.object({ assignee: z.string().uuid() }).strict(), value);
+    const dto = parse(
+      z
+        .object({
+          assignee: z.string().uuid(),
+          deliverableId: z
+            .string()
+            .regex(/^[a-zA-Z0-9_-]{1,100}$/)
+            .optional(),
+          weekStart: weekSchema.optional(),
+          source: schemas.tasks.optional(),
+        })
+        .strict(),
+      value,
+    );
     return this.mutate(viewer, revision, async (db, data) => {
-      const task = data.tasks.find((row) => row.id === id);
+      let task = data.tasks.find((row) => row.id.toLowerCase() === id.toLowerCase());
+      if (dto.deliverableId && dto.source) {
+        if (
+          dto.source.id.toLowerCase() !== id.toLowerCase() ||
+          dto.source.assignee !== viewer.id ||
+          (task && task.assignee !== viewer.id)
+        )
+          throw new NotFoundException("Assigned task not found.");
+        const draft = sanitizeTaskDescription(dto.source.description, dto.source.subtasks);
+        const selection = deliverableSelection(draft, dto.deliverableId);
+        if (
+          !hasDeliverables(selection.html) ||
+          ["completed", "cancelled", "forwarded", "postponed", "delegated"].includes(
+            selection.node.status,
+          )
+        )
+          throw new BadRequestException("Choose a named, open deliverable to delegate.");
+        if (
+          checklistNodes(selection.html).some((node) =>
+            ["forwarded", "postponed"].includes(node.status),
+          ) ||
+          checklistNodes(task?.description ?? "").some(
+            (node) =>
+              checklistNodes(selection.html).some((selected) => selected.id === node.id) &&
+              ["forwarded", "postponed"].includes(node.status),
+          )
+        )
+          throw new ConflictException(
+            "Undo the existing carryover and save its update before delegating this deliverable.",
+          );
+        const description = preserveDelegatedDescription(
+          requestedDeliverableDescription(task?.description ?? "", draft, dto.deliverableId),
+          task?.description ?? "",
+        );
+        const next = {
+          ...(task ?? dto.source),
+          id: task?.id ?? dto.source.id.toLowerCase(),
+          title: task?.title ?? stripHtml(dto.source.title),
+          weekStart:
+            task?.weekStart ?? (dto.source.weekStart ? weekOf(dto.source.weekStart) : undefined),
+          description,
+          ceoComment: task?.ceoComment,
+          subtasks: [],
+          requiresDeliverables: task ? (task.requiresDeliverables ?? false) : true,
+        };
+        if (!next.title.trim())
+          throw new BadRequestException("Enter a task title before delegating.");
+        next.status = submittedTaskStatus(description, next.status, task?.status === "Done");
+        authorizeWrite(viewer, "tasks", next, task, data);
+        if (
+          !canReadBusiness(viewer, data, next.business) ||
+          (next.project &&
+            !data.projects.some(
+              (project) => project.id === next.project && project.members.includes(viewer.id),
+            ))
+        )
+          throw new ForbiddenException(
+            "Choose an assigned business and project for this deliverable.",
+          );
+        if (description.length > 10000)
+          throw new BadRequestException("Shorten the task description before delegating.");
+        await this.repository.save(db, "tasks", next);
+        task = next;
+      }
       if (!task || task.assignee !== viewer.id)
         throw new NotFoundException("Assigned task not found.");
-      if (dto.assignee === viewer.id)
+      if (dto.assignee.toLowerCase() === viewer.id.toLowerCase())
         throw new BadRequestException("Choose another staff member to delegate this task to.");
-      if (["Done", "Cancelled"].includes(task.status))
+      if (!dto.deliverableId && ["Done", "Cancelled"].includes(task.status))
         throw new BadRequestException("Only open tasks can be delegated.");
       if (await db.opsTaskDelegation.findUnique({ where: { pendingTaskId: id } }))
         throw new ConflictException("This task already has a pending delegation request.");
+      const selected = dto.deliverableId
+        ? deliverableSelection(task.description ?? "", dto.deliverableId)
+        : undefined;
+      if (
+        selected &&
+        (!hasDeliverables(selected.html) ||
+          checklistNodes(selected.html).some((node) => !node.id) ||
+          new Set(checklistNodes(selected.html).map((node) => node.id)).size !==
+            checklistNodes(selected.html).length)
+      )
+        throw new BadRequestException(
+          "Reopen the task editor and name each deliverable before delegating it.",
+        );
+      if (
+        selected &&
+        ["completed", "cancelled", "forwarded", "postponed", "delegated"].includes(
+          selected.node.status,
+        )
+      )
+        throw new BadRequestException("Choose an open deliverable to delegate.");
+      const pending = await db.opsTaskDelegation.findMany({
+        where: { taskId: id, status: "pending" },
+      });
+      const selectedIds = selected
+        ? new Set(checklistNodes(selected.html).map((node) => node.id))
+        : null;
+      if (
+        pending.some(
+          (request) =>
+            !selectedIds ||
+            !request.deliverableId ||
+            checklistNodes(request.deliverableSnapshot ?? "").some((node) =>
+              selectedIds.has(node.id),
+            ),
+        )
+      )
+        throw new ConflictException("This deliverable already has a pending delegation request.");
       const recipient = await db.opsStaff.findUnique({
         where: { id: dto.assignee },
         include: { user: { select: { id: true, isActive: true } } },
@@ -555,12 +721,25 @@ export class OpsService {
       }
       const request = await db.opsTaskDelegation.create({
         data: {
-          taskId: id,
-          pendingTaskId: id,
+          taskId: task.id,
+          pendingTaskId: selected ? null : task.id,
+          ...(selected
+            ? {
+                deliverableId: dto.deliverableId,
+                deliverableSnapshot: selected.html,
+                deliverableTitle: stripHtml(
+                  selected.html.match(/<p\b[^>]*>([\s\S]*?)<\/p>/i)?.[1] ?? "Deliverable",
+                ).slice(0, 200),
+                pendingDeliverableKey: `${task.id}:${dto.deliverableId}`,
+              }
+            : {}),
           taskTitle: task.title,
           senderId: viewer.id,
           recipientId: recipient.id,
-          weekStart: delegationWeek(task.weekStart, new WeeklyClock(this.config).now()),
+          weekStart: delegationWeek(
+            dto.weekStart ?? task.weekStart,
+            new WeeklyClock(this.config).now(),
+          ),
         },
       });
       await this.audit(
@@ -576,7 +755,7 @@ export class OpsService {
           userId: recipient.user.id,
           type: "task_assigned",
           title: "Task delegation awaiting your response",
-          body: `${viewer.name} asked you to take on "${task.title}". Accept or decline the request.`,
+          body: `${viewer.name} asked you to take on ${selected ? "a deliverable in " : ""}"${task.title}". Accept or decline the request.`,
           resourceType: "ops-delegation",
           resourceId: request.id,
           dedupeKey: `ops-delegation-request:${request.id}`,
@@ -621,7 +800,12 @@ export class OpsService {
       const now = new WeeklyClock(this.config).now();
       const changed = await db.opsTaskDelegation.updateMany({
         where: { id, status: "pending" },
-        data: { status: decision, pendingTaskId: null, respondedAt: now },
+        data: {
+          status: decision,
+          pendingTaskId: null,
+          pendingDeliverableKey: null,
+          respondedAt: now,
+        },
       });
       if (!changed.count) throw new ConflictException("This delegation has already been answered.");
       if (decision === "accepted") {
@@ -629,7 +813,7 @@ export class OpsService {
         if (
           !task ||
           task.assignee !== request.senderId ||
-          ["Done", "Cancelled"].includes(task.status)
+          (!request.deliverableId && ["Done", "Cancelled"].includes(task.status))
         )
           throw new ConflictException(
             "This task has changed and can no longer be accepted. Ask the sender to cancel this request.",
@@ -644,16 +828,78 @@ export class OpsService {
           throw new ForbiddenException(
             "You need access to the task's business and project before accepting it.",
           );
-        const next = {
-          ...task,
-          assignee: viewer.id,
-          weekStart: delegationWeek(request.weekStart, now),
-        };
-        await db.opsTask.update({
-          where: { id: task.id },
-          data: { assignee: next.assignee, weekStart: next.weekStart },
-        });
-        await linkTaskToPlan(db, viewer, next, task, now);
+        if (request.deliverableId) {
+          const selected = deliverableSelection(task.description ?? "", request.deliverableId);
+          if (selected.html !== request.deliverableSnapshot)
+            throw new ConflictException(
+              "The sender changed this deliverable. Ask them to cancel the request and send it again.",
+            );
+          const description = delegatedDescription(task.description ?? "", request.deliverableId);
+          const source = {
+            ...task,
+            description,
+            status: submittedTaskStatus(description, task.status, task.status === "Done"),
+          };
+          const weekStart = delegationWeek(request.weekStart, now);
+          const next = {
+            ...task,
+            id: request.id,
+            title: task.title,
+            assignee: viewer.id,
+            weekStart,
+            due:
+              task.due < weekStart
+                ? `${new Date(new Date(`${weekStart}T12:00:00Z`).getTime() + 4 * 86400000).toISOString().slice(0, 10)}`
+                : task.due,
+            description: delegatedTaskDescription(selected.html),
+            status: "To do",
+            source: "planned",
+            requiresDeliverables: true,
+            ceoComment: undefined,
+            subtasks: [],
+          };
+          if (description.length > 10000 || next.description.length > 10000)
+            throw new BadRequestException(
+              "Ask the sender to shorten the deliverable instructions before accepting.",
+            );
+          await db.opsTask.update({
+            where: { id: task.id },
+            data: { description, status: source.status },
+          });
+          await db.opsTask.create({
+            data: {
+              id: next.id,
+              title: next.title,
+              assignee: next.assignee,
+              weekStart: next.weekStart,
+              due: next.due,
+              description: next.description,
+              status: next.status,
+              source: next.source,
+              requiresDeliverables: true,
+              subtasks: [],
+              project: task.project || null,
+              business: task.business ?? "b0",
+              priority: task.priority,
+            },
+          });
+          await linkTaskToPlan(db, viewer, next, undefined, now);
+          await updateDelegatedDrafts(db, source, [
+            task.weekStart ?? weekOf(task.due),
+            request.weekStart,
+          ]);
+        } else {
+          const next = {
+            ...task,
+            assignee: viewer.id,
+            weekStart: delegationWeek(request.weekStart, now),
+          };
+          await db.opsTask.update({
+            where: { id: task.id },
+            data: { assignee: next.assignee, weekStart: next.weekStart },
+          });
+          await linkTaskToPlan(db, viewer, next, task, now);
+        }
       }
       const recipientId = decision === "cancelled" ? request.recipientId : request.senderId;
       const person = await db.opsStaff.findUnique({

@@ -41,6 +41,7 @@ function overview(
     version: 1,
     submission: body,
     submittedAt: submitted ? timestamp : null,
+    firstSubmittedAt: submitted ? timestamp : null,
     lateReason: null,
     recalledAt: null,
     reviewedAt: null,

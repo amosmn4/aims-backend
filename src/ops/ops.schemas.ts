@@ -96,6 +96,7 @@ export const schemas = {
       weekStart: date.optional(),
       source: z.enum(["project", "planned", "ad_hoc", "contingency"]).optional(),
       subtasks: deliverablesSchema.optional(),
+      requiresDeliverables: z.boolean().optional(),
     })
     .strict(),
   reports: z

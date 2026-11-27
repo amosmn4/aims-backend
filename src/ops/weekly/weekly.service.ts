@@ -16,7 +16,13 @@ import { auditActor, loadOpsSession } from "../ops-session";
 import { WeeklyClock } from "./weekly-clock";
 import { syncWeeklyTasks } from "./weekly-tasks";
 import { linkTaskToPlan, periodPlanItems } from "./weekly-plan-tasks";
-import { taskOutcome } from "../task-content";
+import {
+  taskOutcome,
+  hasDeliverables,
+  reportTaskComplete,
+  checklistProgress,
+} from "../task-content";
+import { preserveDelegatedDescription } from "../deliverable-delegation";
 import { reportingWorkspace } from "./reporting-workspace";
 import {
   addDays,
@@ -125,6 +131,7 @@ export class WeeklyService {
         where: { id, staffId: viewer.id, version: dto.version, submittedAt: { not: null } },
         data: {
           submittedAt: null,
+          firstSubmittedAt: row.firstSubmittedAt ?? row.submittedAt,
           recalledAt: this.clock.now(),
           reviewedAt: null,
           reviewerId: null,
@@ -285,6 +292,7 @@ export class WeeklyService {
         source: task.source,
         business: task.business,
         subtasks: task.subtasks,
+        requiresDeliverables: task.requiresDeliverables,
       })),
       reportOpensAt: this.reportOpens(week, schedule.settings).toISOString(),
       leave: await this.db.opsLeave.findMany({
@@ -397,6 +405,13 @@ export class WeeklyService {
             throw new ForbiddenException(
               "Link only your own tasks, or add a new task with a unique identifier.",
             );
+          item.requiresDeliverables = task ? task.requiresDeliverables : true;
+          if (item.requiresDeliverables && !hasDeliverables(item.detail))
+            throw new BadRequestException(
+              `Add at least one named checklist deliverable to "${item.title}".`,
+            );
+          const stored = submission.items.find((row) => row.id === item.id);
+          if (stored) stored.requiresDeliverables = item.requiresDeliverables;
         }
         const changed = await tx.opsWeeklyReport.updateMany({
           where: { id, version: dto.version, submittedAt: { not: null } },
@@ -470,18 +485,6 @@ export class WeeklyService {
         throw new BadRequestException(
           "It is too early to submit this week's results. Save a draft until the reporting window opens.",
         );
-      if (
-        now > scheduleFor(week, phase, schedule.settings).deadline &&
-        viewer.sessionId !== "scheduler" &&
-        !lateReason
-      )
-        throw new BadRequestException("A reason is required when submitting after the deadline.");
-      if (
-        now > scheduleFor(week, phase, schedule.settings).deadline &&
-        viewer.sessionId !== "scheduler" &&
-        (lateReason?.length ?? 0) < 5
-      )
-        throw new BadRequestException("Enter a reason of at least five characters.");
     }
     const storageKeys: string[] = [];
     try {
@@ -504,6 +507,30 @@ export class WeeklyService {
         const existing = await tx.opsWeeklyReport.findUnique({
           where: { staffId_weekStart_phase: { staffId: viewer.id, weekStart: week, phase } },
         });
+        const firstSubmission =
+          existing?.firstSubmittedAt ??
+          existing?.submittedAt ??
+          (existing && (existing.recalledAt || existing.returnedAt)
+            ? ((
+                await tx.auditLog.findFirst({
+                  where: { entityId: existing.id, action: "ops.weekly.submitted" },
+                  orderBy: { createdAt: "asc" },
+                  select: { createdAt: true },
+                })
+              )?.createdAt ??
+              existing.recalledAt ??
+              existing.returnedAt)
+            : null);
+        if (
+          dto.submit &&
+          !firstSubmission &&
+          now > scheduleFor(week, phase, schedule.settings).deadline &&
+          viewer.sessionId !== "scheduler" &&
+          (lateReason?.length ?? 0) < 5
+        )
+          throw new BadRequestException(
+            "A reason of at least five characters is required for the first submission after the deadline.",
+          );
         if (phase === "plan") {
           const tasks = await tx.opsTask.findMany({
             where: { assignee: viewer.id, weekStart: week },
@@ -682,6 +709,38 @@ export class WeeklyService {
               : content;
           });
         }
+        const savedItems = existing ? parse(weeklySubmissionSchema, existing.submission).items : [];
+        const liveTasks = await tx.opsTask.findMany({
+          where: {
+            id: { in: dto.submission.items.map((item) => item.taskId ?? item.id) },
+            assignee: viewer.id,
+          },
+        });
+        for (const item of dto.submission.items) {
+          const live = liveTasks.find((task) => task.id === (item.taskId ?? item.id));
+          const saved = savedItems.find(
+            (row) => (row.taskId ?? row.id) === (item.taskId ?? item.id),
+          );
+          item.detail = preserveDelegatedDescription(item.detail, live?.description ?? "");
+          item.requiresDeliverables = live
+            ? live.requiresDeliverables
+            : saved
+              ? (saved.requiresDeliverables ?? false)
+              : true;
+          if (item.requiresDeliverables && !hasDeliverables(item.detail))
+            throw new BadRequestException(
+              `Add at least one named checklist deliverable to "${item.title}".`,
+            );
+          if (
+            dto.submit &&
+            phase === "report" &&
+            checklistProgress(item.detail).total &&
+            !reportTaskComplete(item.detail)
+          )
+            throw new BadRequestException(
+              `Choose an outcome for every deliverable in "${item.title}" before submitting the report.`,
+            );
+        }
         if (
           dto.submit &&
           !dto.submission.items.length &&
@@ -693,12 +752,15 @@ export class WeeklyService {
           throw new BadRequestException("Add a task or a note explaining this week.");
         const data = {
           submission: dto.submission as Prisma.InputJsonObject,
-          submittedAt: dto.submit ? (existing?.submittedAt ?? now) : null,
-          lateReason: dto.submit
-            ? now > scheduleFor(week, phase, schedule.settings).deadline
-              ? (lateReason ?? existing?.lateReason ?? null)
-              : null
-            : (existing?.lateReason ?? null),
+          submittedAt: dto.submit ? (firstSubmission ?? now) : null,
+          firstSubmittedAt: firstSubmission ?? (dto.submit ? now : null),
+          lateReason: firstSubmission
+            ? (existing?.lateReason ?? null)
+            : dto.submit
+              ? now > scheduleFor(week, phase, schedule.settings).deadline
+                ? (lateReason ?? existing?.lateReason ?? null)
+                : null
+              : (existing?.lateReason ?? null),
           recalledAt: dto.submit ? null : (existing?.recalledAt ?? null),
           reviewedAt: null,
           reviewerId: null,
@@ -873,6 +935,7 @@ export class WeeklyService {
         data: returning
           ? {
               submittedAt: null,
+              firstSubmittedAt: old.firstSubmittedAt ?? old.submittedAt,
               reviewedAt: null,
               reviewerId: null,
               reviewComment: null,

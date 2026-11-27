@@ -127,6 +127,7 @@ const TASK_TEXT_OPTIONS: sanitizeHtml.IOptions = {
       "data-status",
       "data-target-date",
       "data-carry-key",
+      "data-carry-parent",
     ],
     input: ["type", "checked", "disabled"],
   },
@@ -139,9 +140,10 @@ const TASK_TEXT_OPTIONS: sanitizeHtml.IOptions = {
     li: (tagName, attrs): sanitizeHtml.Tag => {
       if (attrs["data-type"] !== "taskItem") return { tagName, attribs: {} };
       const status = attrs["data-status"];
-      const valid = /^(pending|in_progress|completed|blocked|cancelled|forwarded|postponed)$/.test(
-        status ?? "",
-      );
+      const valid =
+        /^(pending|in_progress|completed|blocked|cancelled|forwarded|postponed|delegated)$/.test(
+          status ?? "",
+        );
       return {
         tagName,
         attribs: {
@@ -156,6 +158,9 @@ const TASK_TEXT_OPTIONS: sanitizeHtml.IOptions = {
             : {}),
           ...(/^[a-f0-9]{32}$/.test(attrs["data-carry-key"] ?? "")
             ? { "data-carry-key": attrs["data-carry-key"] }
+            : {}),
+          ...(/^[a-zA-Z0-9_-]{1,100}$/.test(attrs["data-carry-parent"] ?? "")
+            ? { "data-carry-parent": attrs["data-carry-parent"] }
             : {}),
         },
       };

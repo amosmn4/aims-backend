@@ -52,6 +52,7 @@ export const weeklyItemSchema = z
     source: z.enum(["planned", "ad_hoc", "contingency", "project"]).optional(),
     business: z.string().max(36).optional(),
     subtasks: deliverablesSchema.optional(),
+    requiresDeliverables: z.boolean().optional(),
   })
   .strict();
 export const weeklySubmissionSchema = z
