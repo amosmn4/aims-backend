@@ -3,6 +3,8 @@ import type { Prisma } from "@prisma/client";
 import type { WeeklyPhase, WeeklySubmission } from "./weekly.schemas";
 import { addDays } from "./weekly-calendar";
 import { taskStatus, checklistStatus, checklistProgress, taskOutcome } from "../task-content";
+import { syncDeliverableCarryovers } from "../deliverable-carryovers";
+import type { Viewer } from "../ops.schemas";
 
 export async function syncWeeklyTasks(
   db: Prisma.TransactionClient,
@@ -11,6 +13,7 @@ export async function syncWeeklyTasks(
   phase: WeeklyPhase,
   submission: WeeklySubmission,
   skipExisting = false,
+  carry?: { viewer: Viewer; now: Date; excludeId?: string },
 ) {
   for (const item of submission.items) {
     const id = item.taskId ?? item.id;
@@ -45,10 +48,32 @@ export async function syncWeeklyTasks(
           description,
           status,
           subtasks: [],
+          ...(phase === "plan" ? { weekStart: week } : {}),
           ...(item.due ? { due: item.due } : {}),
           ...(item.priority ? { priority: item.priority } : {}),
         },
       });
     }
+    if (carry && (!item.taskId || existing))
+      await syncDeliverableCarryovers(
+        db,
+        carry.viewer,
+        {
+          id,
+          title: item.title,
+          description,
+          assignee: staffId,
+          project: existing?.project ?? "",
+          business: existing?.business ?? item.business ?? "b0",
+          priority: item.priority ?? existing?.priority ?? "Medium",
+          due: item.due ?? existing?.due ?? addDays(week, 6),
+          weekStart: week,
+          status,
+        },
+        existing ?? undefined,
+        week,
+        carry.now,
+        carry.excludeId,
+      );
   }
 }

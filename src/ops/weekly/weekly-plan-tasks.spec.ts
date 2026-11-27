@@ -42,7 +42,7 @@ function fixture() {
     weekStart: "2026-11-16",
     phase,
     version: 1,
-    submittedAt: now,
+    submittedAt: null,
     recalledAt: null,
     submission: weeklySubmissionSchema.parse({
       items: [
@@ -96,7 +96,6 @@ function fixture() {
 describe("Task changes across weekly records", () => {
   it("updates active plan and report in place, retains outcomes and avoids repeated revisions", async () => {
     const { db, rows, update, audit } = fixture();
-    const original = structuredClone(rows[0]!.submission);
     expect(await linkTaskToPlan(db, viewer, task, task, now)).toBe("linked");
     for (const row of rows) {
       const body = weeklySubmissionSchema.parse(row.submission);
@@ -115,7 +114,7 @@ describe("Task changes across weekly records", () => {
     expect(audit).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          newValue: expect.objectContaining({ previousSubmission: original }),
+          action: "ops.weekly.draft_saved",
         }),
       }),
     );
@@ -124,8 +123,23 @@ describe("Task changes across weekly records", () => {
   });
   it("keeps closed submitted weeks unchanged", async () => {
     const { db, rows, update } = fixture();
+    rows.forEach((row) => {
+      row.submittedAt = now;
+    });
     const original = structuredClone(rows);
     await linkTaskToPlan(db, viewer, task, task, new Date("2026-11-24T12:00:00Z"));
+    expect(update).not.toHaveBeenCalled();
+    expect(rows).toEqual(original);
+  });
+  it("keeps submitted snapshots private from task edits, forwarding and delegation", async () => {
+    const { db, rows, update } = fixture();
+    rows.forEach((row) => {
+      row.submittedAt = now;
+    });
+    const original = structuredClone(rows);
+    await linkTaskToPlan(db, viewer, task, task, now);
+    await linkTaskToPlan(db, viewer, { ...task, weekStart: "2026-11-23" }, task, now);
+    await linkTaskToPlan(db, viewer, { ...task, assignee: partId }, task, now);
     expect(update).not.toHaveBeenCalled();
     expect(rows).toEqual(original);
   });

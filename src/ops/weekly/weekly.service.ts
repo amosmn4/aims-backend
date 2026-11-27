@@ -63,13 +63,14 @@ export class WeeklyService {
   async notifications(viewer: Viewer) {
     if (!viewer.userId) throw new ForbiddenException("A signed-in account is required.");
     return this.db.notification.findMany({
-      where: { userId: viewer.userId, resourceType: "ops-weekly" },
+      where: { userId: viewer.userId, resourceType: { in: ["ops-weekly", "ops-delegation"] } },
       select: {
         id: true,
         title: true,
         body: true,
         isRead: true,
         resourceId: true,
+        resourceType: true,
         createdAt: true,
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -80,7 +81,7 @@ export class WeeklyService {
   async readNotification(viewer: Viewer, id: string) {
     if (!viewer.userId) throw new ForbiddenException("A signed-in account is required.");
     const result = await this.db.notification.updateMany({
-      where: { id, userId: viewer.userId, resourceType: "ops-weekly" },
+      where: { id, userId: viewer.userId, resourceType: { in: ["ops-weekly", "ops-delegation"] } },
       data: { isRead: true, readAt: this.clock.now() },
     });
     if (!result.count) throw new NotFoundException("Notification not found.");
@@ -453,16 +454,34 @@ export class WeeklyService {
     const schedule = await this.settings();
     if (!schedule.configured)
       throw new BadRequestException("The CEO must configure weekly reporting first.");
+    const now = this.clock.now();
     const current = weekOf(nairobiDate(this.clock.now()));
-    if (week < schedule.settings.startWeek || week > addDays(current, 7))
-      throw new BadRequestException("Choose an enabled reporting week, up to one week ahead.");
+    if (week < schedule.settings.startWeek || week > addDays(current, phase === "plan" ? 364 : 7))
+      throw new BadRequestException(
+        phase === "plan"
+          ? "Choose an enabled plan week within the next 52 weeks."
+          : "Choose an enabled reporting week, up to one week ahead.",
+      );
     if (phase === "report" && dto.submission.items.some((item) => item.status === "planned"))
       throw new BadRequestException("Set the outcome of every task.");
+    const lateReason = dto.lateReason ? stripHtml(dto.lateReason).trim() : undefined;
     if (dto.submit) {
-      if (phase === "report" && this.clock.now() < this.reportOpens(week, schedule.settings))
+      if (phase === "report" && now < this.reportOpens(week, schedule.settings))
         throw new BadRequestException(
           "It is too early to submit this week's results. Save a draft until the reporting window opens.",
         );
+      if (
+        now > scheduleFor(week, phase, schedule.settings).deadline &&
+        viewer.sessionId !== "scheduler" &&
+        !lateReason
+      )
+        throw new BadRequestException("A reason is required when submitting after the deadline.");
+      if (
+        now > scheduleFor(week, phase, schedule.settings).deadline &&
+        viewer.sessionId !== "scheduler" &&
+        (lateReason?.length ?? 0) < 5
+      )
+        throw new BadRequestException("Enter a reason of at least five characters.");
     }
     const storageKeys: string[] = [];
     try {
@@ -674,7 +693,12 @@ export class WeeklyService {
           throw new BadRequestException("Add a task or a note explaining this week.");
         const data = {
           submission: dto.submission as Prisma.InputJsonObject,
-          submittedAt: dto.submit ? (existing?.submittedAt ?? this.clock.now()) : null,
+          submittedAt: dto.submit ? (existing?.submittedAt ?? now) : null,
+          lateReason: dto.submit
+            ? now > scheduleFor(week, phase, schedule.settings).deadline
+              ? (lateReason ?? existing?.lateReason ?? null)
+              : null
+            : (existing?.lateReason ?? null),
           recalledAt: dto.submit ? null : (existing?.recalledAt ?? null),
           reviewedAt: null,
           reviewerId: null,
@@ -699,7 +723,30 @@ export class WeeklyService {
           });
         }
         if (dto.submit) {
-          await syncWeeklyTasks(tx, viewer.id, week, phase, dto.submission);
+          const previousLinkedTasks =
+            phase === "plan"
+              ? await tx.opsTask.findMany({
+                  where: {
+                    id: {
+                      in: dto.submission.items.flatMap((item) =>
+                        item.taskId ? [item.taskId] : [],
+                      ),
+                    },
+                    assignee: viewer.id,
+                  },
+                })
+              : [];
+          await syncWeeklyTasks(tx, viewer.id, week, phase, dto.submission, false, {
+            viewer,
+            now,
+            ...(existing ? { excludeId: existing.id } : {}),
+          });
+          for (const previous of previousLinkedTasks) {
+            if (previous.weekStart === week) continue;
+            const next = await tx.opsTask.findUnique({ where: { id: previous.id } });
+            if (next)
+              await linkTaskToPlan(tx, viewer, next, previous, this.clock.now(), existing?.id);
+          }
         }
         let id: string;
         if (existing) {
@@ -730,6 +777,7 @@ export class WeeklyService {
             phase,
             version: dto.version + 1,
             ...(dto.submit ? { submission: dto.submission } : {}),
+            ...(dto.submit && data.lateReason ? { lateReason: data.lateReason } : {}),
             ...(existing?.submittedAt ? { previousSubmission: existing.submission } : {}),
           },
         );
@@ -870,8 +918,9 @@ export class WeeklyService {
   }
 
   async history(viewer: Viewer, id: string) {
+    if (viewer.role !== "staff") throw new NotFoundException("Weekly report not found.");
     const report = await this.db.opsWeeklyReport.findUnique({ where: { id } });
-    if (!report || (viewer.role !== "ceo" && report.staffId !== viewer.id))
+    if (!report || report.staffId !== viewer.id)
       throw new NotFoundException("Weekly report not found.");
     return this.db.auditLog.findMany({
       where: { entityType: "ops-weekly", entityId: id },
@@ -882,6 +931,7 @@ export class WeeklyService {
 
   serialize(row: OpsWeeklyReport | undefined, settings: WeeklySettings, privateDraft = false) {
     if (!row) return null;
+    if (privateDraft && !row.submittedAt) return null;
     const submission =
       privateDraft && !row.submittedAt
         ? { summary: "", items: [], blockers: "", nextWeek: "", noWorkReason: "" }

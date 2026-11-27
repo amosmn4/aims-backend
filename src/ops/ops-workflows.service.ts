@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -16,6 +17,7 @@ import { parse, type Viewer } from "./ops.schemas";
 import { WeeklyService } from "./weekly/weekly.service";
 import { weeklyDate, weekSchema } from "./weekly/weekly.schemas";
 import { WeeklyClock } from "./weekly/weekly-clock";
+import { addDays, nairobiDate, scheduleFor, weekOf } from "./weekly/weekly-calendar";
 import { escapeHtml } from "../reports/report-email.util";
 import { randomUUID } from "node:crypto";
 import { auditActor } from "./ops-session";
@@ -23,6 +25,7 @@ import { auditActor } from "./ops-session";
 @Injectable()
 export class OpsWorkflowsService {
   private running = false;
+  private remindersRunning = false;
   private readonly logger = new Logger(OpsWorkflowsService.name);
   constructor(
     private readonly db: PrismaService,
@@ -93,6 +96,42 @@ export class OpsWorkflowsService {
     return this.db.opsSubmissionSchedule.findMany({
       where: { staffId: viewer.id },
       orderBy: { runAt: "desc" },
+    });
+  }
+
+  async submissionReminder(viewer: Viewer) {
+    const staff = await this.db.opsStaff.findUnique({
+      where: { id: viewer.id },
+      select: { submissionReminderMinutes: true },
+    });
+    if (!staff) throw new NotFoundException("Staff member not found.");
+    return { minutes: staff.submissionReminderMinutes };
+  }
+
+  saveSubmissionReminder(viewer: Viewer, value: unknown, revision: number) {
+    if (viewer.role !== "staff")
+      throw new ForbiddenException("Only staff can change their submission reminder.");
+    const dto = parse(
+      z
+        .object({ minutes: z.union([z.literal(0), z.literal(20), z.literal(60), z.literal(120)]) })
+        .strict(),
+      value,
+    );
+    return this.ops.mutate(viewer, revision, async (db) => {
+      await db.opsStaff.update({
+        where: { id: viewer.id },
+        data: { submissionReminderMinutes: dto.minutes },
+      });
+      await db.auditLog.create({
+        data: {
+          ...auditActor(viewer),
+          action: "ops.submission.reminder_updated",
+          entityType: "ops-staff",
+          entityId: viewer.id,
+          newValue: { minutes: dto.minutes },
+        },
+      });
+      return { minutes: dto.minutes };
     });
   }
 
@@ -268,7 +307,7 @@ export class OpsWorkflowsService {
         data: { status: "pending", leaseUntil: null },
       });
       const rows = await this.db.opsSubmissionSchedule.findMany({
-        where: { status: "pending", runAt: { lte: new Date(now.getTime() + 3600000) } },
+        where: { status: "pending", runAt: { lte: new Date(now.getTime() + 7200000) } },
         orderBy: { runAt: "asc" },
         take: 100,
       });
@@ -291,6 +330,9 @@ export class OpsWorkflowsService {
           sessionId: "scheduler",
         };
         if (row.runAt > now) {
+          const reminderMinutes = staff.submissionReminderMinutes;
+          if (reminderMinutes <= 0 || row.runAt.getTime() - now.getTime() > reminderMinutes * 60000)
+            continue;
           if (this.config.get("OPS_EMAIL_JOBS_ENABLED") !== true || !this.email.isConfigured())
             continue;
           const claimed = await this.db.opsSubmissionSchedule.updateMany({
@@ -378,6 +420,78 @@ export class OpsWorkflowsService {
       );
     } finally {
       this.running = false;
+    }
+  }
+
+  @Interval(60000)
+  async sendWeeklyDeadlineReminders() {
+    if (this.remindersRunning) return;
+    this.remindersRunning = true;
+    try {
+      const configured = await this.weekly.settings();
+      if (!configured.configured) return;
+      const now = this.clock.now();
+      const thisWeek = weekOf(nairobiDate(now));
+      const weeks = [thisWeek, addDays(thisWeek, -7)];
+      const staff = await this.db.opsStaff.findMany({
+        where: { role: "staff", active: true, user: { isActive: true } },
+        include: { user: { select: { id: true, email: true, passwordHash: true } } },
+      });
+      const origin = this.config.get<string>("OPS_FRONTEND_URL") ?? "";
+      for (const person of staff) {
+        const minutes = person.submissionReminderMinutes;
+        if (![20, 60, 120].includes(minutes) || !person.user?.passwordHash) continue;
+        for (const week of weeks) {
+          for (const phase of ["plan", "report"] as const) {
+            const deadline = scheduleFor(week, phase, configured.settings).deadline;
+            if (
+              person.createdAt > deadline ||
+              now >= deadline ||
+              now < new Date(deadline.getTime() - minutes * 60000)
+            )
+              continue;
+            const entry = await this.db.opsWeeklyReport.findUnique({
+              where: {
+                staffId_weekStart_phase: { staffId: person.id, weekStart: week, phase },
+              },
+              select: { id: true, submittedAt: true },
+            });
+            if (entry?.submittedAt) continue;
+            const created = await this.db.notification.createMany({
+              data: [
+                {
+                  userId: person.user.id,
+                  type: "reminder",
+                  title: `Weekly ${phase} deadline approaching`,
+                  body: `Your weekly ${phase} is due at ${deadline.toLocaleString("en-GB", { timeZone: "Africa/Nairobi" })} EAT.`,
+                  resourceType: "ops-weekly",
+                  resourceId: entry?.id ?? `${week}:${phase}`,
+                  dedupeKey: `ops-weekly-deadline:${week}:${phase}`,
+                },
+              ],
+              skipDuplicates: true,
+            });
+            if (!created.count) continue;
+            if (this.config.get("OPS_EMAIL_JOBS_ENABLED") === true && this.email.isConfigured()) {
+              const link = `${origin}/weekly-reports?week=${encodeURIComponent(week)}&phase=${phase}`;
+              const sent = await this.email.send(
+                person.user.email,
+                `Weekly ${phase} deadline approaching`,
+                `<p>Your weekly ${phase} is due at ${escapeHtml(deadline.toLocaleString("en-GB", { timeZone: "Africa/Nairobi" }))} EAT.</p><p><a href="${escapeHtml(link)}">Open your weekly ${phase}</a></p>`,
+              );
+              if (!sent)
+                this.logger.warn(`Could not email weekly deadline reminder to ${person.id}.`);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error(
+        "Weekly deadline reminder sweep failed",
+        error instanceof Error ? error.message : error,
+      );
+    } finally {
+      this.remindersRunning = false;
     }
   }
 }

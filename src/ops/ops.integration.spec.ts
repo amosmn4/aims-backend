@@ -979,7 +979,12 @@ suite("Ops HTTP API with isolated MySQL", () => {
     };
     const saved = await call("ops/weekly/reports/2026-11-16/plan", token, {
       method: "PUT",
-      body: JSON.stringify({ version: 0, submit: true, submission }),
+      body: JSON.stringify({
+        version: 0,
+        submit: true,
+        lateReason: "Client confirmation arrived late.",
+        submission,
+      }),
     });
     expect(saved.status).toBe(200);
     const plan = await saved.json();
@@ -1360,7 +1365,12 @@ suite("Ops HTTP API with isolated MySQL", () => {
     const savePlan = (version: number, submission: unknown, submit = false) =>
       call(`ops/weekly/reports/${week}/plan`, token, {
         method: "PUT",
-        body: JSON.stringify({ version, submit, submission }),
+        body: JSON.stringify({
+          version,
+          submit,
+          ...(submit ? { lateReason: "Client confirmation arrived late." } : {}),
+          submission,
+        }),
       });
     const draft = await savePlan(0, { title: "Period plan", summary: "Linked work", items: [] });
     expect(draft.status).toBe(200);
@@ -1390,16 +1400,13 @@ suite("Ops HTTP API with isolated MySQL", () => {
     current = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: first.id } });
     const submittedAt = current.submittedAt;
     const third = { ...task, id: randomUUID(), weekStart: week, title: "Added after submission" };
-    expect((await change(`records/tasks/${third.id}`, third, token)).planLink).toBe("added");
+    expect((await change(`records/tasks/${third.id}`, third, token)).planLink).toBe("linked");
     current = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: first.id } });
     expect(current.submittedAt).toEqual(submittedAt);
-    const audit = await prisma.auditLog.findFirstOrThrow({
-      where: { entityType: "ops-weekly", entityId: current.id, action: "ops.weekly.tasks_added" },
-      orderBy: { createdAt: "desc" },
-    });
-    expect(
-      (audit.newValue as { previousSubmission: { items: unknown[] } }).previousSubmission.items,
-    ).toHaveLength(2);
+    expect(parseWeekly(current.submission).items).toHaveLength(2);
+    expect(parseWeekly(current.submission).items.some((item) => item.taskId === third.id)).toBe(
+      false,
+    );
     const removed = {
       ...parseWeekly(current.submission),
       items: parseWeekly(current.submission).items.filter((item) => item.taskId !== task.id),
@@ -1415,7 +1422,7 @@ suite("Ops HTTP API with isolated MySQL", () => {
     await change(`records/tasks/${second.id}`, { ...second, weekStart: undefined }, token);
     current = await prisma.opsWeeklyReport.findUniqueOrThrow({ where: { id: first.id } });
     expect(parseWeekly(current.submission).items.some((item) => item.taskId === second.id)).toBe(
-      false,
+      true,
     );
     const standalone = { ...third, id: randomUUID(), weekStart: undefined };
     expect(

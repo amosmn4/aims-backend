@@ -1,6 +1,6 @@
 import { stripHtml } from "../../common/sanitize";
 import { sanitizeTaskDescription } from "../task-sanitization";
-import { checklistProgress } from "../task-content";
+import { checklistProgress, checklistSummary } from "../task-content";
 import type { WeeklyPhase, WeeklySubmission } from "./weekly.schemas";
 import type { WeeklyService } from "./weekly.service";
 
@@ -19,6 +19,15 @@ const emailText = (value: string) =>
   stripHtml(
     value.replace(/<li\b[^>]*>/gi, "\n  - ").replace(/<\/(p|div|li)>|<br\s*\/?>/gi, "\n"),
   ).trim();
+function checklistMarker(tag: string) {
+  const status = tag.match(/data-status="([a-z_]+)"/)?.[1];
+  const date = tag.match(/data-target-date="([0-9-]+)"/)?.[1];
+  return status && !["pending", "completed"].includes(status)
+    ? `[${taskStatus(status)}${date ? ` to ${date}` : ""}] `
+    : /data-checked="true"/.test(tag)
+      ? "[x] "
+      : "[ ] ";
+}
 function descriptionHtml(item: WeeklySubmission["items"][number]) {
   const html = sanitizeTaskDescription(item.detail, item.subtasks);
   const progress = checklistProgress(html);
@@ -27,11 +36,15 @@ function descriptionHtml(item: WeeklySubmission["items"][number]) {
     .replace(/<label[^>]*>|<\/label>/gi, "")
     .replace(
       /<li\b([^>]*data-type="taskItem"[^>]*)>/gi,
-      (_match, attrs: string) =>
-        `<li ${attrs}><span>${/data-checked="true"/.test(attrs) ? "[x] " : "[ ] "}</span>`,
+      (_match, attrs: string) => `<li ${attrs}><span>${checklistMarker(attrs)}</span>`,
     )
     .replace(/<ul data-type="taskList">/g, '<ul style="list-style:none;padding-left:20px">');
-  return content + (progress.total ? `<p>${progress.done}/${progress.total} completed</p>` : "");
+  return (
+    content +
+    (progress.total
+      ? `<p>${progress.done}/${progress.total} completed</p><p>${checklistSummary(html)}</p>`
+      : "")
+  );
 }
 function descriptionText(item: WeeklySubmission["items"][number]) {
   let depth = 0;
@@ -51,11 +64,7 @@ function descriptionText(item: WeeklySubmission["items"][number]) {
         return (
           "\n" +
           "  ".repeat(Math.max(0, depth)) +
-          (/data-type="taskItem"/.test(tag)
-            ? /data-checked="true"/.test(tag)
-              ? "[x] "
-              : "[ ] "
-            : "- ")
+          (/data-type="taskItem"/.test(tag) ? checklistMarker(tag) : "- ")
         );
       return "\n";
     },

@@ -22,12 +22,15 @@ import { auditActor, loadOpsSession } from "./ops-session";
 import { OpsRepository, type OpsTransaction } from "./ops.repository";
 import { weeklySubmissionSchema } from "./weekly/weekly.schemas";
 import { linkTaskToPlan } from "./weekly/weekly-plan-tasks";
-import { weekOf } from "./weekly/weekly-calendar";
+import { nairobiDate, weekOf } from "./weekly/weekly-calendar";
 import { WeeklyClock } from "./weekly/weekly-clock";
+import { delegationWeek, forwardTaskPeriod } from "./task-planning";
+import { syncDeliverableCarryovers } from "./deliverable-carryovers";
 import {
   assertCeo,
   assertSystemAdmin,
   authorizeWrite,
+  canReadBusiness,
   canReadDocument,
   validateWorkspace,
   visibleWorkspace,
@@ -63,15 +66,24 @@ export class OpsService {
       async (db) => {
         await this.assertCurrentAccess(db, viewer, scheduledId);
         const data = await this.repository.load(db);
-        const workspace = visibleWorkspace(viewer, data.workspace);
-        if (
-          viewer.role === "ceo" &&
-          workspace.documents.some((doc) => doc.weeklyRef && doc.owner !== viewer.id)
-        ) {
-          const submitted = await db.opsWeeklyReport.findMany({
-            where: { submittedAt: { not: null } },
-            select: { staffId: true, weekStart: true, phase: true },
-          });
+        const submitted =
+          viewer.role === "ceo"
+            ? await db.opsWeeklyReport.findMany({
+                where: { submittedAt: { not: null } },
+                select: { staffId: true, weekStart: true, phase: true, submission: true },
+              })
+            : [];
+        const publishedTasks = new Set(
+          submitted
+            .filter((row) => row.phase === "plan")
+            .flatMap((row) =>
+              parse(weeklySubmissionSchema, row.submission).items.map(
+                (item) => `${row.staffId}:${item.taskId ?? item.id}`,
+              ),
+            ),
+        );
+        const workspace = visibleWorkspace(viewer, data.workspace, publishedTasks);
+        if (viewer.role === "ceo") {
           const refs = new Set(
             submitted.map((row) => `weekly:${row.staffId}:${row.weekStart}:${row.phase}`),
           );
@@ -279,6 +291,18 @@ export class OpsService {
         };
         validateWorkspace(next);
         await this.repository.save(db, collection, record);
+        if (collection === "tasks") {
+          const task = record as Records["tasks"];
+          const now = new WeeklyClock(this.config).now();
+          await syncDeliverableCarryovers(
+            db,
+            viewer,
+            task,
+            previous as Records["tasks"] | undefined,
+            task.weekStart ?? weekOf(nairobiDate(now)),
+            now,
+          );
+        }
         const planLink =
           collection === "tasks"
             ? await linkTaskToPlan(
@@ -447,6 +471,215 @@ export class OpsService {
     });
   }
 
+  forwardTask(viewer: Viewer, id: string, revision: number) {
+    if (viewer.role !== "staff" && viewer.role !== "ceo")
+      throw new ForbiddenException("Operational staff access is required.");
+    return this.mutate(viewer, revision, async (db, data) => {
+      const task = data.tasks.find((row) => row.id === id);
+      if (!task || (viewer.role !== "ceo" && task.assignee !== viewer.id))
+        throw new NotFoundException("Assigned task not found.");
+      if (task.status === "Done" || task.status === "Cancelled")
+        throw new BadRequestException("Completed or cancelled tasks cannot be moved forward.");
+      const now = new WeeklyClock(this.config).now();
+      const next = {
+        ...task,
+        ...forwardTaskPeriod(task, now),
+      };
+      await db.opsTask.update({
+        where: { id },
+        data: { weekStart: next.weekStart, due: next.due },
+      });
+      await linkTaskToPlan(db, viewer, next, task, now);
+      await this.audit(db, viewer, "ops.tasks.forwarded", id, task, next);
+      return { success: true, weekStart: next.weekStart, due: next.due };
+    });
+  }
+
+  async delegationRecipients(viewer: Viewer, id: string) {
+    if (viewer.role !== "staff") throw new ForbiddenException("Staff access is required.");
+    const { workspace } = await this.workspace(viewer);
+    const task = workspace.tasks.find((row) => row.id === id && row.assignee === viewer.id);
+    if (!task) throw new NotFoundException("Assigned task not found.");
+    return this.prisma.opsStaff.findMany({
+      where: {
+        id: { not: viewer.id },
+        role: "staff",
+        active: true,
+        user: { isActive: true },
+        ...(task.project ? { memberships: { some: { projectId: task.project } } } : {}),
+        ...(task.business && task.business !== "b0"
+          ? { businessGrants: { some: { businessId: task.business } } }
+          : {}),
+      },
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    });
+  }
+
+  delegateTask(viewer: Viewer, id: string, value: unknown, revision: number) {
+    if (viewer.role !== "staff")
+      throw new ForbiddenException("Only staff can delegate their assigned tasks.");
+    const dto = parse(z.object({ assignee: z.string().uuid() }).strict(), value);
+    return this.mutate(viewer, revision, async (db, data) => {
+      const task = data.tasks.find((row) => row.id === id);
+      if (!task || task.assignee !== viewer.id)
+        throw new NotFoundException("Assigned task not found.");
+      if (dto.assignee === viewer.id)
+        throw new BadRequestException("Choose another staff member to delegate this task to.");
+      if (["Done", "Cancelled"].includes(task.status))
+        throw new BadRequestException("Only open tasks can be delegated.");
+      if (await db.opsTaskDelegation.findUnique({ where: { pendingTaskId: id } }))
+        throw new ConflictException("This task already has a pending delegation request.");
+      const recipient = await db.opsStaff.findUnique({
+        where: { id: dto.assignee },
+        include: { user: { select: { id: true, isActive: true } } },
+      });
+      if (!recipient?.active || recipient.role !== "staff" || !recipient.user?.isActive)
+        throw new BadRequestException("Choose an active staff member with an account.");
+      const recipientViewer: Viewer = {
+        ...recipient,
+        userId: recipient.user.id,
+        email: "",
+        sessionId: "delegation",
+      };
+      if (!canReadBusiness(recipientViewer, data, task.business))
+        throw new ForbiddenException(
+          "The selected staff member cannot access this task's business.",
+        );
+      if (task.project) {
+        const project = data.projects.find((row) => row.id === task.project);
+        if (!project?.members.includes(recipient.id))
+          throw new BadRequestException(
+            "The recipient must be a member of this task's project before delegation.",
+          );
+      }
+      const request = await db.opsTaskDelegation.create({
+        data: {
+          taskId: id,
+          pendingTaskId: id,
+          taskTitle: task.title,
+          senderId: viewer.id,
+          recipientId: recipient.id,
+          weekStart: delegationWeek(task.weekStart, new WeeklyClock(this.config).now()),
+        },
+      });
+      await this.audit(
+        db,
+        viewer,
+        "ops.tasks.delegation_requested",
+        request.id,
+        undefined,
+        request,
+      );
+      await db.notification.create({
+        data: {
+          userId: recipient.user.id,
+          type: "task_assigned",
+          title: "Task delegation awaiting your response",
+          body: `${viewer.name} asked you to take on "${task.title}". Accept or decline the request.`,
+          resourceType: "ops-delegation",
+          resourceId: request.id,
+          dedupeKey: `ops-delegation-request:${request.id}`,
+          createdBy: viewer.userId ?? null,
+        },
+      });
+      return { id: request.id, status: request.status, weekStart: request.weekStart };
+    });
+  }
+
+  async taskDelegations(viewer: Viewer) {
+    if (viewer.role !== "staff") return [];
+    return this.prisma.opsTaskDelegation.findMany({
+      where: { OR: [{ senderId: viewer.id }, { recipientId: viewer.id }] },
+      include: {
+        sender: { select: { id: true, name: true } },
+        recipient: { select: { id: true, name: true } },
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 100,
+    });
+  }
+
+  respondToDelegation(viewer: Viewer, id: string, value: unknown, revision: number) {
+    if (viewer.role !== "staff") throw new ForbiddenException("Staff access is required.");
+    const { decision } = parse(
+      z.object({ decision: z.enum(["accepted", "declined", "cancelled"]) }).strict(),
+      value,
+    );
+    return this.mutate(viewer, revision, async (db, data) => {
+      const request = await db.opsTaskDelegation.findUnique({ where: { id } });
+      if (
+        !request ||
+        (decision === "cancelled"
+          ? request.senderId !== viewer.id
+          : request.recipientId !== viewer.id)
+      )
+        throw new NotFoundException("Delegation request not found.");
+      if (request.status === decision) return { success: true, status: decision };
+      if (request.status !== "pending")
+        throw new ConflictException("This delegation has already been answered.");
+      const now = new WeeklyClock(this.config).now();
+      const changed = await db.opsTaskDelegation.updateMany({
+        where: { id, status: "pending" },
+        data: { status: decision, pendingTaskId: null, respondedAt: now },
+      });
+      if (!changed.count) throw new ConflictException("This delegation has already been answered.");
+      if (decision === "accepted") {
+        const task = data.tasks.find((row) => row.id === request.taskId);
+        if (
+          !task ||
+          task.assignee !== request.senderId ||
+          ["Done", "Cancelled"].includes(task.status)
+        )
+          throw new ConflictException(
+            "This task has changed and can no longer be accepted. Ask the sender to cancel this request.",
+          );
+        if (
+          !canReadBusiness(viewer, data, task.business) ||
+          (task.project &&
+            !data.projects.some(
+              (row) => row.id === task.project && row.members.includes(viewer.id),
+            ))
+        )
+          throw new ForbiddenException(
+            "You need access to the task's business and project before accepting it.",
+          );
+        const next = {
+          ...task,
+          assignee: viewer.id,
+          weekStart: delegationWeek(request.weekStart, now),
+        };
+        await db.opsTask.update({
+          where: { id: task.id },
+          data: { assignee: next.assignee, weekStart: next.weekStart },
+        });
+        await linkTaskToPlan(db, viewer, next, task, now);
+      }
+      const recipientId = decision === "cancelled" ? request.recipientId : request.senderId;
+      const person = await db.opsStaff.findUnique({
+        where: { id: recipientId },
+        select: { userId: true },
+      });
+      if (person?.userId)
+        await db.notification.create({
+          data: {
+            userId: person.userId,
+            type: "task_assigned",
+            title: `Task delegation ${decision}`,
+            body: `${viewer.name} ${decision} the delegation of "${request.taskTitle}".`,
+            resourceType: "ops-delegation",
+            resourceId: id,
+            dedupeKey: `ops-delegation-${decision}:${id}`,
+            createdBy: viewer.userId ?? null,
+          },
+        });
+      await this.audit(db, viewer, `ops.tasks.delegation_${decision}`, id, request, {
+        status: decision,
+      });
+      return { success: true, status: decision };
+    });
+  }
+
   async reviewHistory(viewer: Viewer, id: string) {
     const { workspace } = await this.workspace(viewer);
     if (!workspace.reports.some((report) => report.id === id))
@@ -455,6 +688,38 @@ export class OpsService {
       where: { reportId: id },
       orderBy: { createdAt: "asc" },
       select: { id: true, reviewerId: true, comment: true, createdAt: true },
+    });
+  }
+
+  async projectNotes(viewer: Viewer, projectId: string) {
+    const { workspace } = await this.workspace(viewer);
+    if (!workspace.projects.some((project) => project.id === projectId))
+      throw new NotFoundException("Project not found.");
+    return this.prisma.opsProjectNote.findMany({
+      where: { projectId },
+      include: { author: { select: { id: true, name: true } } },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    });
+  }
+
+  addProjectNote(viewer: Viewer, projectId: string, value: unknown, revision: number) {
+    if (viewer.role !== "staff")
+      throw new ForbiddenException("Only project staff can add a project note.");
+    const dto = parse(z.object({ note: z.string().trim().min(1).max(5000) }).strict(), value);
+    return this.mutate(viewer, revision, async (db, data) => {
+      const project = data.projects.find((row) => row.id === projectId);
+      if (!project) throw new NotFoundException("Project not found.");
+      if (!project.members.includes(viewer.id))
+        throw new ForbiddenException("Only project members can add notes.");
+      const note = await db.opsProjectNote.create({
+        data: { projectId, staffId: viewer.id, note: dto.note },
+        include: { author: { select: { id: true, name: true } } },
+      });
+      await this.audit(db, viewer, "ops.projects.note_added", note.id, undefined, {
+        projectId,
+        note: dto.note,
+      });
+      return note;
     });
   }
 

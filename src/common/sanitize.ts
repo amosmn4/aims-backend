@@ -120,7 +120,14 @@ const TASK_TEXT_OPTIONS: sanitizeHtml.IOptions = {
   allowedAttributes: {
     ...RICH_TEXT_OPTIONS.allowedAttributes,
     ul: ["data-type"],
-    li: ["data-type", "data-checked"],
+    li: [
+      "data-type",
+      "data-checked",
+      "data-did",
+      "data-status",
+      "data-target-date",
+      "data-carry-key",
+    ],
     input: ["type", "checked", "disabled"],
   },
   transformTags: {
@@ -129,13 +136,30 @@ const TASK_TEXT_OPTIONS: sanitizeHtml.IOptions = {
       tagName,
       attribs: attrs["data-type"] === "taskList" ? { "data-type": "taskList" } : {},
     }),
-    li: (tagName, attrs): sanitizeHtml.Tag => ({
-      tagName,
-      attribs:
-        attrs["data-type"] === "taskItem"
-          ? { "data-type": "taskItem", "data-checked": String(attrs["data-checked"] === "true") }
-          : {},
-    }),
+    li: (tagName, attrs): sanitizeHtml.Tag => {
+      if (attrs["data-type"] !== "taskItem") return { tagName, attribs: {} };
+      const status = attrs["data-status"];
+      const valid = /^(pending|in_progress|completed|blocked|cancelled|forwarded|postponed)$/.test(
+        status ?? "",
+      );
+      return {
+        tagName,
+        attribs: {
+          "data-type": "taskItem",
+          "data-checked": String(valid ? status === "completed" : attrs["data-checked"] === "true"),
+          ...(valid ? { "data-status": status } : {}),
+          ...(/^[a-zA-Z0-9_-]{1,100}$/.test(attrs["data-did"] ?? "")
+            ? { "data-did": attrs["data-did"] }
+            : {}),
+          ...(/^\d{4}-\d{2}-\d{2}$/.test(attrs["data-target-date"] ?? "")
+            ? { "data-target-date": attrs["data-target-date"] }
+            : {}),
+          ...(/^[a-f0-9]{32}$/.test(attrs["data-carry-key"] ?? "")
+            ? { "data-carry-key": attrs["data-carry-key"] }
+            : {}),
+        },
+      };
+    },
     input: (_tagName, attrs) => ({
       tagName: "input",
       attribs: {

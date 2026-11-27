@@ -56,6 +56,16 @@ export class OpsWorkflowsController {
     return this.workflows.schedules(viewer);
   }
 
+  @Get("submission-reminder")
+  submissionReminder(@OpsViewer() viewer: Viewer) {
+    return this.workflows.submissionReminder(viewer);
+  }
+
+  @Put("submission-reminder")
+  saveSubmissionReminder(@OpsViewer() viewer: Viewer, @Body() body: unknown, @Req() req: Request) {
+    return this.workflows.saveSubmissionReminder(viewer, body, revision(req));
+  }
+
   @Put("submission-schedules")
   schedule(@OpsViewer() viewer: Viewer, @Body() body: unknown, @Req() req: Request) {
     return this.workflows.schedule(viewer, body, revision(req));

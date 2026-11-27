@@ -7,6 +7,7 @@ import type { OpsService } from "./ops.service";
 import type { WeeklyService } from "./weekly/weekly.service";
 import type { WeeklyClock } from "./weekly/weekly-clock";
 import { OpsWorkflowsService } from "./ops-workflows.service";
+import { defaultWeeklySettings } from "./weekly/weekly-calendar";
 
 jest.mock("../common/sanitize", () => ({
   sanitizeRichText: (value: string) => value,
@@ -31,7 +32,8 @@ describe("Scheduled Ops submissions", () => {
     dept: "hr",
     role: "staff",
     active: true,
-    user: { email: "staff@example.test", isActive: true },
+    submissionReminderMinutes: 60,
+    user: { email: "staff@example.test", isActive: true, passwordHash: "hashed" },
   };
   const db = {
     opsSubmissionSchedule: { updateMany, update, findMany },
@@ -70,45 +72,54 @@ describe("Scheduled Ops submissions", () => {
     send.mockResolvedValue(true);
   });
 
-  it("submits the latest saved draft once when two workers observe the same due record", async () => {
-    findMany.mockResolvedValue([row]);
-    findDraft.mockResolvedValue({
-      version: 7,
-      submittedAt: null,
-      submission: { summary: "Latest saved draft" },
-    });
-    updateMany
-      .mockResolvedValueOnce({ count: 0 })
-      .mockResolvedValueOnce({ count: 1 })
-      .mockResolvedValueOnce({ count: 0 })
-      .mockResolvedValueOnce({ count: 0 });
-    await service.tick();
-    await service.tick();
-    expect(save).toHaveBeenCalledTimes(1);
-    expect(save).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "staff" }),
-      "2026-11-16",
-      "report",
-      { version: 7, submit: true, submission: { summary: "Latest saved draft" } },
-    );
-    expect(update).toHaveBeenCalledWith({
-      where: { id: "schedule" },
-      data: { status: "completed", leaseUntil: null, lastError: null },
-    });
-    expect(send).not.toHaveBeenCalled();
-  });
+  it.each(["plan", "report"] as const)(
+    "automatically submits the latest saved %s draft at the configured time",
+    async (kind) => {
+      findMany.mockResolvedValue([{ ...row, kind }]);
+      findDraft.mockResolvedValue({
+        version: 7,
+        submittedAt: null,
+        submission: { summary: "Latest saved draft" },
+      });
+      updateMany
+        .mockResolvedValueOnce({ count: 0 })
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 })
+        .mockResolvedValueOnce({ count: 0 });
+      await service.tick();
+      await service.tick();
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "staff" }),
+        "2026-11-16",
+        kind,
+        { version: 7, submit: true, submission: { summary: "Latest saved draft" } },
+      );
+      expect(update).toHaveBeenCalledWith({
+        where: { id: "schedule" },
+        data: { status: "completed", leaseUntil: null, lastError: null },
+      });
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
 
-  it("sends a reminder within the final hour and leaves the draft editable", async () => {
-    findMany.mockResolvedValue([{ ...row, runAt: new Date(now.getTime() + 3590000) }]);
-    updateMany.mockResolvedValue({ count: 1 });
-    await service.tick();
-    expect(send).toHaveBeenCalledWith(
-      "staff@example.test",
-      expect.stringContaining("scheduled"),
-      expect.stringContaining("update your saved draft"),
-    );
-    expect(save).not.toHaveBeenCalled();
-  });
+  it.each([20, 60, 120])(
+    "uses the %i minute preference for scheduled submission reminders",
+    async (minutes) => {
+      staff.submissionReminderMinutes = minutes;
+      findMany.mockResolvedValue([
+        { ...row, runAt: new Date(now.getTime() + minutes * 60000 - 1000) },
+      ]);
+      updateMany.mockResolvedValue({ count: 1 });
+      await service.tick();
+      expect(send).toHaveBeenCalledWith(
+        "staff@example.test",
+        expect.stringContaining("scheduled"),
+        expect.stringContaining("update your saved draft"),
+      );
+      expect(save).not.toHaveBeenCalled();
+    },
+  );
   it("submits a monthly draft using its claimed schedule when the staff browser session has ended", async () => {
     findMany.mockResolvedValue([{ ...row, kind: "monthly", target: "monthly-report" }]);
     updateMany.mockResolvedValue({ count: 1 });
@@ -142,4 +153,68 @@ describe("Scheduled Ops submissions", () => {
     });
     expect(send).not.toHaveBeenCalled();
   });
+});
+
+describe("Weekly deadline reminders", () => {
+  it.each([20, 60, 120])(
+    "sends one notification and email within the selected %i minute window",
+    async (minutes) => {
+      const deadline = new Date("2026-11-20T14:00:00Z");
+      let now = new Date(deadline.getTime() - minutes * 60000 - 1);
+      const createMany = jest
+        .fn<(...args: unknown[]) => Promise<{ count: number }>>()
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValue({ count: 0 });
+      const send = jest.fn<(...args: unknown[]) => Promise<boolean>>().mockResolvedValue(true);
+      const db = {
+        opsStaff: {
+          findMany: async () => [
+            {
+              id: "staff",
+              createdAt: new Date("2026-01-01"),
+              submissionReminderMinutes: minutes,
+              user: { id: "user", email: "staff@example.test", passwordHash: "hashed" },
+            },
+          ],
+        },
+        opsWeeklyReport: { findUnique: async () => null },
+        notification: { createMany },
+      };
+      const service = new OpsWorkflowsService(
+        db as never,
+        {} as never,
+        {
+          settings: async () => ({ configured: true, settings: defaultWeeklySettings() }),
+        } as never,
+        { now: () => now } as WeeklyClock,
+        { send, isConfigured: () => true } as never,
+        new ConfigService({
+          OPS_EMAIL_JOBS_ENABLED: true,
+          OPS_FRONTEND_URL: "https://ops.example.test",
+        }),
+        {} as never,
+      );
+      await service.sendWeeklyDeadlineReminders();
+      expect(createMany).not.toHaveBeenCalled();
+      now = new Date(now.getTime() + 2);
+      await service.sendWeeklyDeadlineReminders();
+      await service.sendWeeklyDeadlineReminders();
+      expect(createMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          skipDuplicates: true,
+          data: [
+            expect.objectContaining({
+              resourceType: "ops-weekly",
+              dedupeKey: "ops-weekly-deadline:2026-11-16:report",
+            }),
+          ],
+        }),
+      );
+      expect(send).toHaveBeenCalledTimes(1);
+      now = deadline;
+      createMany.mockClear();
+      await service.sendWeeklyDeadlineReminders();
+      expect(createMany).not.toHaveBeenCalled();
+    },
+  );
 });

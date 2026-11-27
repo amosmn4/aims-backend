@@ -85,6 +85,7 @@ export const weeklySaveSchema = z
   .object({
     version: z.number().int().min(0),
     submit: z.boolean(),
+    lateReason: z.string().trim().min(5).max(1000).optional(),
     submission: weeklySubmissionSchema,
   })
   .strict();

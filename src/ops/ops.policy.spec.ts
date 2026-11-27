@@ -98,6 +98,24 @@ function workspace(): Workspace {
 }
 
 describe("Ops permission and workflow boundaries", () => {
+  it("shows saved project tasks to the CEO while keeping standalone work private until its plan is submitted", () => {
+    const data = workspace();
+    const task = { ...data.tasks[0]!, id: "private-weekly", project: "", assignee: viewer.id };
+    data.tasks.push(task);
+    const ceo = { ...viewer, id: "ceo", role: "ceo" as const };
+    expect(visibleWorkspace(ceo, data).tasks.map((row) => row.id)).toEqual(["task"]);
+    expect(
+      visibleWorkspace(ceo, data, new Set([`${viewer.id}:private-weekly`])).tasks.map(
+        (row) => row.id,
+      ),
+    ).toEqual(["task", "private-weekly"]);
+    expect(
+      visibleWorkspace(ceo, data, new Set(["other:private-weekly"])).tasks.map((row) => row.id),
+    ).toEqual(["task"]);
+    expect(() =>
+      authorizeWrite(ceo, "tasks", { ...task, assignee: "other" }, undefined, data),
+    ).not.toThrow();
+  });
   it("separates business management from finance and never grants all finance businesses by department", () => {
     const data = workspace();
     data.businessAccess = [{ person: viewer.id, business: "business", manage: true }];
@@ -264,7 +282,7 @@ describe("Ops permission and workflow boundaries", () => {
     expect(ownAdminWorkspace.people.map((person) => person.id)).not.toContain("other-system-admin");
   });
 
-  it("keeps CEO report review separate from staff report submissions and client intake", () => {
+  it("allows CEO task assignment and keeps report review separate from staff submissions", () => {
     const data = workspace();
     const ceo = { ...viewer, id: "ceo", role: "ceo" as const };
     const client = {
@@ -299,6 +317,27 @@ describe("Ops permission and workflow boundaries", () => {
     expect(() => authorizeWrite(ceo, "reports", report, undefined, data)).toThrow(
       "review reports through the report review action",
     );
+    expect(() =>
+      authorizeWrite(
+        ceo,
+        "tasks",
+        { ...data.tasks[0]!, id: "ceo-assigned-task", assignee: "other" },
+        undefined,
+        data,
+      ),
+    ).not.toThrow();
+  });
+
+  it("allows staff to create a project led by themselves in their department", () => {
+    const data = workspace();
+    const project = {
+      ...data.projects[0]!,
+      id: "staff-created-project",
+      lead: viewer.id,
+      members: [viewer.id],
+      depts: [viewer.dept!],
+    };
+    expect(() => authorizeWrite(viewer, "projects", project, undefined, data)).not.toThrow();
   });
 
   it("allows an assignee to change task status and reserves assignment changes for the lead", () => {

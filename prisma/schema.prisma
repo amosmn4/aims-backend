@@ -411,34 +411,38 @@ enum OpsRole {
 }
 
 model OpsStaff {
-  id                String              @id @default(uuid()) @db.Char(36)
-  userId            String?             @unique @map("user_id") @db.Char(36)
-  name              String              @db.VarChar(200)
-  title             String              @db.VarChar(200)
-  dept              String?             @db.VarChar(20)
-  role              OpsRole             @default(staff)
-  active            Boolean             @default(true)
-  createdAt         DateTime            @default(now()) @map("created_at")
-  user              User?               @relation(fields: [userId], references: [id], onDelete: Restrict)
-  department        OpsDepartment?      @relation(fields: [dept], references: [id], onDelete: Restrict)
-  ledProjects       OpsProject[]
-  memberships       OpsProjectMember[]
-  tasks             OpsTask[]
-  reports           OpsReport[]
-  reviews           OpsReportReview[]
-  requests          OpsClientRequest[]
-  tenderMemberships OpsTenderMember[]
-  documents         OpsDocument[]
-  documentGrants    OpsDocumentGrant[]
-  businessGrants    OpsBusinessGrant[]
-  moduleGrants      OpsModuleGrant[]
-  records           OpsModuleRecord[]
-  invitations       OpsInvitation[]
-  sessions          OpsSession[]
-  ceoSessions       OpsSession[]        @relation("OpsImpersonatedStaff")
-  weeklyReports     OpsWeeklyReport[]   @relation("OpsWeeklyAuthor")
-  weeklyReviews     OpsWeeklyReport[]   @relation("OpsWeeklyReviewer")
-  weeklyDeliveries  OpsWeeklyDelivery[]
+  id                        String              @id @default(uuid()) @db.Char(36)
+  userId                    String?             @unique @map("user_id") @db.Char(36)
+  name                      String              @db.VarChar(200)
+  title                     String              @db.VarChar(200)
+  dept                      String?             @db.VarChar(20)
+  role                      OpsRole             @default(staff)
+  submissionReminderMinutes Int                 @default(60) @map("submission_reminder_minutes")
+  active                    Boolean             @default(true)
+  createdAt                 DateTime            @default(now()) @map("created_at")
+  user                      User?               @relation(fields: [userId], references: [id], onDelete: Restrict)
+  department                OpsDepartment?      @relation(fields: [dept], references: [id], onDelete: Restrict)
+  ledProjects               OpsProject[]
+  memberships               OpsProjectMember[]
+  tasks                     OpsTask[]
+  reports                   OpsReport[]
+  reviews                   OpsReportReview[]
+  requests                  OpsClientRequest[]
+  tenderMemberships         OpsTenderMember[]
+  documents                 OpsDocument[]
+  documentGrants            OpsDocumentGrant[]
+  businessGrants            OpsBusinessGrant[]
+  moduleGrants              OpsModuleGrant[]
+  records                   OpsModuleRecord[]
+  invitations               OpsInvitation[]
+  sessions                  OpsSession[]
+  ceoSessions               OpsSession[]        @relation("OpsImpersonatedStaff")
+  weeklyReports             OpsWeeklyReport[]   @relation("OpsWeeklyAuthor")
+  weeklyReviews             OpsWeeklyReport[]   @relation("OpsWeeklyReviewer")
+  weeklyDeliveries          OpsWeeklyDelivery[]
+  projectNotes              OpsProjectNote[]
+  sentDelegations           OpsTaskDelegation[] @relation("OpsDelegationSender")
+  receivedDelegations       OpsTaskDelegation[] @relation("OpsDelegationRecipient")
 
   @@index([dept])
   @@map("ops_staff")
@@ -466,6 +470,7 @@ model OpsWeeklyReport {
   version       Int            @default(1)
   submission    Json
   submittedAt   DateTime?      @map("submitted_at")
+  lateReason    String?        @map("late_reason") @db.Text
   recalledAt    DateTime?      @map("recalled_at")
   reviewedAt    DateTime?      @map("reviewed_at")
   reviewerId    String?        @map("reviewer_id") @db.Char(36)
@@ -538,10 +543,24 @@ model OpsProject {
   tasks       OpsTask[]
   reports     OpsReport[]
   documents   OpsDocument[]
+  notes       OpsProjectNote[]
 
   @@index([client])
   @@index([lead])
   @@map("ops_projects")
+}
+
+model OpsProjectNote {
+  id        String     @id @default(uuid()) @db.Char(36)
+  projectId String     @map("project_id") @db.Char(36)
+  staffId   String     @map("staff_id") @db.Char(36)
+  note      String     @db.Text
+  createdAt DateTime   @default(now()) @map("created_at")
+  project   OpsProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  author    OpsStaff   @relation(fields: [staffId], references: [id], onDelete: Restrict)
+
+  @@index([projectId, createdAt])
+  @@map("ops_project_notes")
 }
 
 model OpsProjectMember {
@@ -581,10 +600,31 @@ model OpsTask {
   parent      OpsProject?   @relation(fields: [project], references: [id], onDelete: Restrict)
   owner       OpsStaff      @relation(fields: [assignee], references: [id], onDelete: Restrict)
   documents   OpsDocument[]
+  delegations OpsTaskDelegation[]
 
   @@index([project])
   @@index([assignee])
   @@map("ops_tasks")
+}
+
+model OpsTaskDelegation {
+  id            String    @id @default(uuid()) @db.Char(36)
+  taskId        String    @map("task_id") @db.Char(36)
+  pendingTaskId String?   @unique @map("pending_task_id") @db.Char(36)
+  taskTitle     String    @map("task_title") @db.VarChar(200)
+  senderId      String    @map("sender_id") @db.Char(36)
+  recipientId   String    @map("recipient_id") @db.Char(36)
+  weekStart     String    @map("week_start") @db.Char(10)
+  status        String    @default("pending") @db.VarChar(20)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  respondedAt   DateTime? @map("responded_at")
+  task          OpsTask   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  sender        OpsStaff  @relation("OpsDelegationSender", fields: [senderId], references: [id], onDelete: Restrict)
+  recipient     OpsStaff  @relation("OpsDelegationRecipient", fields: [recipientId], references: [id], onDelete: Restrict)
+
+  @@index([senderId, status])
+  @@index([recipientId, status])
+  @@map("ops_task_delegations")
 }
 
 model OpsReport {

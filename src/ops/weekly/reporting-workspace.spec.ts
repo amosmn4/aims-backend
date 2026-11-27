@@ -40,10 +40,30 @@ describe("Current submission listing", () => {
     ];
     const db = {
       opsStaff: { findMany: async () => profiles },
-      opsWeeklyReport: { findMany: async () => [record] },
+      opsWeeklyReport: {
+        findMany: async () => [
+          record,
+          {
+            ...record,
+            id: "private-draft",
+            submittedAt: null,
+            submission: { ...submission, title: "Private draft" },
+          },
+        ],
+      },
       opsReport: { findMany: async () => [] },
       opsSubmissionSchedule: { findMany: async () => [] },
-      opsTask: { findMany: async () => [] },
+      opsTask: {
+        findMany: async () => [
+          {
+            id: "unpublished-task",
+            assignee: staffId,
+            status: "Done",
+            weekStart: "2026-11-16",
+            due: "2026-11-20",
+          },
+        ],
+      },
       auditLog: {
         findMany: async () =>
           [3, 2, 1].map((version) => ({
@@ -66,13 +86,24 @@ describe("Current submission listing", () => {
       { view: "submissions", from: "2026-11-16", to: "2026-11-22", department: "unrelated" },
       now,
     );
-    expect(result.total).toBe(1);
-    expect(result.rows).toHaveLength(1);
+    expect(result.total).toBe(2);
+    expect(result.rows).toHaveLength(2);
     expect(result.rows[0]).toMatchObject({
       id: record.id,
       title: "Current plan",
       status: "submitted",
       updates: 2,
     });
+    const ceoResult = await reportingWorkspace(
+      db,
+      weekly,
+      { id: "ceo", role: "ceo" } as Viewer,
+      { view: "submissions", from: "2026-11-16", to: "2026-11-22" },
+      now,
+    );
+    expect(ceoResult.rows.map((row) => row.id)).toEqual(["plan"]);
+    expect(ceoResult.activity).toEqual([]);
+    expect(ceoResult.metrics.tasks).toBe(0);
+    expect(ceoResult.performance[0]!.tasks).toBe(0);
   });
 });

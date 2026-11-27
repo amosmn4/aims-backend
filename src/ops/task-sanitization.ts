@@ -29,7 +29,13 @@ export function sanitizeTaskDescription(
         .map((item) => {
           const checked = item.status ? item.status === "completed" : item.done;
           return (
-            '<li data-type="taskItem" data-checked="' +
+            '<li data-type="taskItem" data-did="' +
+            escape(item.id) +
+            '" data-status="' +
+            (item.status ?? (checked ? "completed" : "pending")) +
+            '"' +
+            (item.targetDate ? ' data-target-date="' + escape(item.targetDate) + '"' : "") +
+            ' data-checked="' +
             checked +
             '"><label><input type="checkbox"' +
             (checked ? " checked" : "") +

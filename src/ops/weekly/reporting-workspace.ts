@@ -55,7 +55,11 @@ export async function reportingWorkspace(
   const ids = profiles.map((person) => person.id);
   const [records, monthly, schedules, tasks] = await Promise.all([
     db.opsWeeklyReport.findMany({
-      where: { staffId: { in: ids }, weekStart: { gte: weekOf(from), lte: to } },
+      where: {
+        staffId: { in: ids },
+        weekStart: { gte: weekOf(from), lte: to },
+        ...(ceo ? { submittedAt: { not: null } } : {}),
+      },
       orderBy: [{ weekStart: "desc" }, { id: "asc" }],
     }),
     db.opsReport.findMany({
@@ -108,7 +112,7 @@ export async function reportingWorkspace(
   const rows = records.flatMap((record) => {
     const person = profiles.find((profile) => profile.id === record.staffId)!;
     const history = submittedEvents(record.id);
-    if (ceo && !record.submittedAt && !history.length) return [];
+    if (ceo && !record.submittedAt) return [];
     const latest = history[0];
     const previous = latest?.newValue as { submission?: unknown } | null;
     const snapshot = ceo && !record.submittedAt ? previous?.submission : record.submission;
@@ -143,6 +147,7 @@ export async function reportingWorkspace(
         ? (latest?.createdAt ?? record.submittedAt)
         : record.updatedAt
       ).toISOString(),
+      updatedAt: record.updatedAt.toISOString(),
       status: scheduled ? "scheduled" : status,
       title: entry.submission.title || `Weekly ${record.phase}`,
       summary: entry.submission.summary,
@@ -173,6 +178,7 @@ export async function reportingWorkspace(
       type: "monthly" as const,
       period: record.month ?? record.date.slice(0, 7),
       date: `${record.date}T12:00:00+03:00`,
+      updatedAt: `${record.date}T12:00:00+03:00`,
       status: scheduled
         ? "scheduled"
         : record.status === "draft"
@@ -220,8 +226,9 @@ export async function reportingWorkspace(
     )
     .sort((a, b) => b.date.localeCompare(a.date) || a.id.localeCompare(b.id));
   const people = profiles.filter(matchesPerson);
-  const selected = records.filter((record) =>
-    people.some((person) => person.id === record.staffId),
+  const selected = records.filter(
+    (record) =>
+      (!ceo || !!record.submittedAt) && people.some((person) => person.id === record.staffId),
   );
   const expected = (person: (typeof profiles)[number], phase: "plan" | "report") => {
     let count = 0;
@@ -249,13 +256,14 @@ export async function reportingWorkspace(
       const own = selected.filter((row) => row.staffId === person.id);
       const plans = own.filter((row) => row.phase === "plan" && row.submittedAt).length;
       const reports = own.filter((row) => row.phase === "report" && row.submittedAt);
+      const submittedPlans = own.filter((row) => row.phase === "plan" && row.submittedAt);
       const reported = reports.flatMap((row) =>
         parse(weeklySubmissionSchema, row.submission).items.map((item) => ({
           id: item.taskId ?? item.id,
           status: item.status,
         })),
       );
-      const live = tasks
+      const live = (ceo ? [] : tasks)
         .filter(
           (task) =>
             task.assignee === person.id &&
@@ -270,7 +278,17 @@ export async function reportingWorkspace(
                 ? "in_progress"
                 : "pending",
         }));
-      const items = [...new Map([...live, ...reported].map((item) => [item.id, item])).values()];
+      const commitments = ceo
+        ? submittedPlans.flatMap((row) =>
+            parse(weeklySubmissionSchema, row.submission).items.map((item) => ({
+              id: item.taskId ?? item.id,
+              status: item.status,
+            })),
+          )
+        : [];
+      const items = [
+        ...new Map([...commitments, ...live, ...reported].map((item) => [item.id, item])).values(),
+      ];
       const completed = items.filter((item) => item.status === "completed").length;
       const activity = own.reduce<string | null>(
         (date, row) =>
@@ -295,10 +313,14 @@ export async function reportingWorkspace(
     (row) => !row.historical || records.some((record) => record.id === row.id),
   );
   const metrics = {
-    tasks: tasks.filter((task) => people.some((person) => person.id === task.assignee)).length,
-    completed: tasks.filter(
-      (task) => task.status === "Done" && people.some((person) => person.id === task.assignee),
-    ).length,
+    tasks: ceo
+      ? performance.reduce((sum, person) => sum + person.tasks, 0)
+      : tasks.filter((task) => people.some((person) => person.id === task.assignee)).length,
+    completed: ceo
+      ? performance.reduce((sum, person) => sum + person.completed, 0)
+      : tasks.filter(
+          (task) => task.status === "Done" && people.some((person) => person.id === task.assignee),
+        ).length,
     staff: people.filter(
       (person) => person.active && person.user?.isActive && person.user.passwordHash,
     ).length,
@@ -370,6 +392,6 @@ export async function reportingWorkspace(
     page,
     limit: 10,
     metrics,
-    activity,
+    activity: ceo ? [] : activity,
   };
 }

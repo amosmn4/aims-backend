@@ -52,7 +52,11 @@ export function canReadDocument(viewer: Viewer, doc: Records["documents"], data:
   return !!doc.allowed?.includes(viewer.id);
 }
 
-export function visibleWorkspace(viewer: Viewer, data: Workspace): Workspace {
+export function visibleWorkspace(
+  viewer: Viewer,
+  data: Workspace,
+  publishedTasks: ReadonlySet<string> = new Set(),
+): Workspace {
   const withoutSystemAdmins = {
     ...data,
     people: data.people.filter(
@@ -92,10 +96,27 @@ export function visibleWorkspace(viewer: Viewer, data: Workspace): Workspace {
   if (viewer.role === "ceo")
     return {
       ...withoutSystemAdmins,
+      tasks: data.tasks.filter(
+        (task) =>
+          task.project ||
+          task.assignee === viewer.id ||
+          publishedTasks.has(`${task.assignee}:${task.id}`),
+      ),
       reports: data.reports.filter(
         (report) => report.status !== "draft" || report.author === viewer.id,
       ),
-      documents: data.documents.filter((doc) => canReadDocument(viewer, doc, data)),
+      documents: data.documents.filter(
+        (doc) =>
+          canReadDocument(viewer, doc, data) &&
+          (!doc.task ||
+            data.tasks.some(
+              (task) =>
+                task.id === doc.task &&
+                (task.project ||
+                  task.assignee === viewer.id ||
+                  publishedTasks.has(`${task.assignee}:${task.id}`)),
+            )),
+      ),
     };
   const projects = data.projects.filter(
     (project) =>

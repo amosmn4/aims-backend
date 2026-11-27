@@ -103,7 +103,7 @@ describe("Weekly task materialization", () => {
       where: { id: item.id },
       data: expect.objectContaining({
         description: expect.stringContaining('data-type="taskList"'),
-        status: "To do",
+        status: "Blocked",
         subtasks: [],
       }),
     });

@@ -41,6 +41,7 @@ function overview(
     version: 1,
     submission: body,
     submittedAt: submitted ? timestamp : null,
+    lateReason: null,
     recalledAt: null,
     reviewedAt: null,
     reviewerId: null,
@@ -169,7 +170,7 @@ describe("CEO weekly email content", () => {
     );
     for (const output of [result.html, result.text]) {
       expect(output).toContain("Shortlist");
-      expect(output).toContain("[ ]");
+      expect(output).toContain("[In progress]");
       expect(output).toContain("Check references");
       expect(output).toContain("Campaign launched");
     }

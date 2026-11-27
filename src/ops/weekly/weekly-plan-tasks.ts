@@ -113,12 +113,7 @@ export async function linkTaskToPlan(
           },
         },
       });
-      if (
-        old &&
-        old.id !== excludeId &&
-        ((!old.submittedAt && !old.recalledAt) ||
-          now <= new Date(`${addDays(old.weekStart, 6)}T23:59:59.999+03:00`))
-      ) {
+      if (old && old.id !== excludeId && !old.submittedAt) {
         const submission = parse(weeklySubmissionSchema, old.submission);
         if (submission.items.some((item) => (item.taskId ?? item.id) === task.id))
           await write(
@@ -155,6 +150,7 @@ export async function linkTaskToPlan(
         );
       continue;
     }
+    if (plan.submittedAt) continue;
     if (!existing && submission.items.length >= 100)
       throw new ConflictException(
         "This weekly submission already has 100 tasks. Choose another period.",

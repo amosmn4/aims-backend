@@ -172,6 +172,60 @@ export class OpsController {
     return this.ops.commentTask(viewer, id, dto.comment, revision(req));
   }
 
+  @Post("tasks/:id/forward")
+  @HttpCode(200)
+  forwardTask(@OpsViewer() viewer: Viewer, @Param("id") id: string, @Req() req: Request) {
+    return this.ops.forwardTask(viewer, id, revision(req));
+  }
+
+  @Get("tasks/:id/delegation-recipients")
+  delegationRecipients(@OpsViewer() viewer: Viewer, @Param("id") id: string) {
+    return this.ops.delegationRecipients(viewer, id);
+  }
+
+  @Post("tasks/:id/delegate")
+  @HttpCode(200)
+  delegateTask(
+    @OpsViewer() viewer: Viewer,
+    @Param("id") id: string,
+    @Body() body: unknown,
+    @Req() req: Request,
+  ) {
+    return this.ops.delegateTask(viewer, id, body, revision(req));
+  }
+
+  @Get("task-delegations")
+  taskDelegations(@OpsViewer() viewer: Viewer) {
+    return this.ops.taskDelegations(viewer);
+  }
+
+  @Post("task-delegations/:id/respond")
+  @HttpCode(200)
+  respondToDelegation(
+    @OpsViewer() viewer: Viewer,
+    @Param("id") id: string,
+    @Body() body: unknown,
+    @Req() req: Request,
+  ) {
+    return this.ops.respondToDelegation(viewer, id, body, revision(req));
+  }
+
+  @Get("projects/:id/notes")
+  projectNotes(@OpsViewer() viewer: Viewer, @Param("id") id: string) {
+    return this.ops.projectNotes(viewer, id);
+  }
+
+  @Post("projects/:id/notes")
+  @HttpCode(201)
+  addProjectNote(
+    @OpsViewer() viewer: Viewer,
+    @Param("id") id: string,
+    @Body() body: unknown,
+    @Req() req: Request,
+  ) {
+    return this.ops.addProjectNote(viewer, id, body, revision(req));
+  }
+
   @Get("reports/:id/reviews")
   history(@OpsViewer() viewer: Viewer, @Param("id") id: string) {
     return this.ops.reviewHistory(viewer, id);
