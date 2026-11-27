@@ -19,7 +19,7 @@ import { assertCeo, assertSystemAdmin } from "../ops.policy";
 import { WeeklyService } from "./weekly.service";
 import { WeeklyDeliveryService } from "./weekly-delivery.service";
 import { AllowHtml } from "../../common/sanitize";
-import { IsArray, IsBoolean, IsInt, IsObject, Min } from "class-validator";
+import { IsArray, IsBoolean, IsInt, IsObject, IsOptional, IsString, Min } from "class-validator";
 
 class WeeklyAppendBody {
   @IsInt()
@@ -38,6 +38,10 @@ class WeeklySaveBody {
 
   @IsBoolean()
   submit!: boolean;
+
+  @IsOptional()
+  @IsString()
+  lateReason?: string;
 
   @AllowHtml()
   @IsObject()

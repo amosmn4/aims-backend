@@ -3,6 +3,12 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
+    "prebuild": "npm run prisma:generate",
+    "prebuild:ops": "npm run prisma:generate",
+    "predev": "npm run prisma:generate",
+    "prestart:dev": "npm run prisma:generate",
+    "prestart:ops": "npm run prisma:generate",
+    "prestart:ops:dev": "npm run prisma:generate",
     "build": "nest build",
     "build:ops": "nest build --path tsconfig.ops.json",
     "start": "node --env-file-if-exists=.env scripts/start.cjs",
